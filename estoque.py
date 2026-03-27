@@ -11,7 +11,7 @@ class EstoqueUpdate(SQLModel):
     codigodebarras: str
     categoria: str
 
-
+# cria estoque
 def criar_estoque(estoque: Estoque, funcionario_id: int):
     with Session(engine) as session:
 
