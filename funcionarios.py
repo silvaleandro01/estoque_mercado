@@ -7,13 +7,9 @@ import os
 
 from database import Funcionario, FuncionarioCreate, Setor, engine
 
-
-# config JWT
 SECRET_KEY = os.getenv("SECRET_KEY", "chave_padrao_temporaria")
 ALGORITHM = "HS256"
 
-
-# criar token
 def criar_token(funcionario_id: int, is_admin: bool, horas: int = 12):
     expiracao = datetime.now(timezone.utc) + timedelta(hours=horas)
 
@@ -26,7 +22,6 @@ def criar_token(funcionario_id: int, is_admin: bool, horas: int = 12):
     token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
     return token, expiracao
 
-# verificar token
 def verificar_token(token: str):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
@@ -40,16 +35,12 @@ def verificar_token(token: str):
     except (ExpiredSignatureError, JWTError):
         return None
 
-
-# converter string para date
 def converter_data(data_str: str):
     try:
         return date.fromisoformat(data_str)
     except:
         raise HTTPException(status_code=400, detail="Data inválida, use YYYY-MM-DD")
 
-
-# criar funcionário
 def criar_funcionario(dados: FuncionarioCreate):
     with Session(engine) as session:
 
@@ -79,14 +70,10 @@ def criar_funcionario(dados: FuncionarioCreate):
 
         return funcionario
 
-
-# listar
 def listar_funcionarios():
     with Session(engine) as session:
         return session.exec(select(Funcionario)).all()
 
-
-# buscar
 def buscar_funcionario(funcionario_id: int):
     with Session(engine) as session:
         funcionario = session.get(Funcionario, funcionario_id)
@@ -96,8 +83,6 @@ def buscar_funcionario(funcionario_id: int):
 
         return funcionario
 
-
-# atualizar
 def atualizar_funcionario(funcionario_id: int, dados: FuncionarioCreate):
     with Session(engine) as session:
         funcionario = session.get(Funcionario, funcionario_id)
@@ -122,8 +107,6 @@ def atualizar_funcionario(funcionario_id: int, dados: FuncionarioCreate):
             session.rollback()
             raise HTTPException(status_code=500, detail="Erro ao atualizar funcionário")
 
-
-# deletar
 def deletar_funcionario(funcionario_id: int):
     with Session(engine) as session:
         funcionario = session.get(Funcionario, funcionario_id)
@@ -139,8 +122,6 @@ def deletar_funcionario(funcionario_id: int):
             session.rollback()
             raise HTTPException(status_code=500, detail="Erro ao deletar funcionário")
 
-
-# validação de token
 def validar_funcionario_por_token(token: str):
     funcionario_id = verificar_token(token)
 
@@ -155,7 +136,6 @@ def validar_funcionario_por_token(token: str):
 
         agora = datetime.now(timezone.utc)
 
-        # SQLite retorna datas sem fuso (naive), adicionamos o fuso UTC se necessário
         expiracao = funcionario.token_expiracao
         if expiracao and expiracao.tzinfo is None:
             expiracao = expiracao.replace(tzinfo=timezone.utc)
@@ -165,8 +145,6 @@ def validar_funcionario_por_token(token: str):
 
         return funcionario
 
-
-# controle de permissão baseado no setor_id
 def verificar_permissao(funcionario: Funcionario, rota: str):
 
     if funcionario.is_admin:
@@ -181,7 +159,6 @@ def verificar_permissao(funcionario: Funcionario, rota: str):
     return True
 
 
-# renovar token
 def renovar_token(funcionario_id: int):
     with Session(engine) as session:
         funcionario = session.get(Funcionario, funcionario_id)

@@ -3,11 +3,9 @@ from fastapi import HTTPException
 from database import Setor, SetorCreate, engine
 
 
-# criar setor
 def criar_setor(dados: SetorCreate):
     with Session(engine) as session:
 
-        # verifica se já existe setor com mesmo tipo
         existente = session.exec(
             select(Setor).where(Setor.tipo == dados.tipo)
         ).first()
@@ -31,13 +29,11 @@ def criar_setor(dados: SetorCreate):
             raise HTTPException(status_code=500, detail="Erro ao criar setor")
 
 
-# listar setores
 def listar_setores():
     with Session(engine) as session:
         return session.exec(select(Setor)).all()
 
 
-# buscar setor por id
 def buscar_setor(id: int):
     with Session(engine) as session:
         setor = session.get(Setor, id)
@@ -48,7 +44,6 @@ def buscar_setor(id: int):
         return setor
 
 
-# atualizar setor
 def atualizar_setor(id: int, dados: SetorCreate):
     with Session(engine) as session:
         setor = session.get(Setor, id)
@@ -56,7 +51,6 @@ def atualizar_setor(id: int, dados: SetorCreate):
         if not setor:
             raise HTTPException(status_code=404, detail="Setor não encontrado")
 
-        # impede duplicação de tipo em outro setor
         existente = session.exec(
             select(Setor).where(
                 Setor.tipo == dados.tipo,
@@ -79,7 +73,6 @@ def atualizar_setor(id: int, dados: SetorCreate):
             raise HTTPException(status_code=500, detail="Erro ao atualizar setor")
 
 
-# deletar setor
 def deletar_setor(id: int):
     with Session(engine) as session:
         setor = session.get(Setor, id)

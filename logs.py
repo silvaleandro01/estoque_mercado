@@ -1,7 +1,6 @@
 from sqlmodel import Session, select
 from database import Log, engine
 
-# criar log
 def criar_log(funcionario_id: int, tipo: str):
     with Session(engine) as session:
         log = Log(
@@ -11,8 +10,6 @@ def criar_log(funcionario_id: int, tipo: str):
         session.add(log)
         session.commit()
 
-
-# listar logs
 def listar_logs():
     with Session(engine) as session:
         return session.exec(select(Log)).all()

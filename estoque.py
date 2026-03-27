@@ -3,8 +3,6 @@ from sqlmodel import Session, select, SQLModel
 from database import Estoque, engine
 from logs import criar_log
 
-
-# schema de atualização
 class EstoqueUpdate(SQLModel):
     titulo: str
     nomedoproduto: str
@@ -14,11 +12,9 @@ class EstoqueUpdate(SQLModel):
     categoria: str
 
 
-# criar ou incrementar estoque
 def criar_estoque(estoque: Estoque, funcionario_id: int):
     with Session(engine) as session:
 
-        # verifica se já existe produto com o mesmo código de barras
         produto_existente = session.exec(
             select(Estoque).where(
                 Estoque.codigodebarras == estoque.codigodebarras
@@ -38,7 +34,6 @@ def criar_estoque(estoque: Estoque, funcionario_id: int):
                 session.rollback()
                 raise HTTPException(status_code=500, detail="Erro ao atualizar estoque")
 
-        # cria novo produto
         estoque.funcionario_id = funcionario_id
 
         try:
@@ -52,13 +47,11 @@ def criar_estoque(estoque: Estoque, funcionario_id: int):
             raise HTTPException(status_code=500, detail="Erro ao criar produto")
 
 
-# listar produtos
 def mostrar_produtos():
     with Session(engine) as session:
         return session.exec(select(Estoque)).all()
 
 
-# buscar produto por id
 def buscar_estoque(estoque_id: int):
     with Session(engine) as session:
         estoque = session.get(Estoque, estoque_id)
@@ -69,7 +62,6 @@ def buscar_estoque(estoque_id: int):
         return estoque
 
 
-# atualizar produto
 def atualizar_estoque(estoque_id: int, dados: EstoqueUpdate, funcionario_id: int):
     with Session(engine) as session:
         estoque = session.get(Estoque, estoque_id)
@@ -77,7 +69,6 @@ def atualizar_estoque(estoque_id: int, dados: EstoqueUpdate, funcionario_id: int
         if not estoque:
             raise HTTPException(status_code=404, detail="Estoque não localizado")
 
-        # verifica duplicidade de código de barras
         produto_existente = session.exec(
             select(Estoque).where(
                 Estoque.codigodebarras == dados.codigodebarras
@@ -90,7 +81,6 @@ def atualizar_estoque(estoque_id: int, dados: EstoqueUpdate, funcionario_id: int
                 detail="Código de barras já cadastrado em outro produto"
             )
 
-        # atualiza campos
         estoque.titulo = dados.titulo
         estoque.nomedoproduto = dados.nomedoproduto
         estoque.quantidade = dados.quantidade
@@ -98,7 +88,6 @@ def atualizar_estoque(estoque_id: int, dados: EstoqueUpdate, funcionario_id: int
         estoque.codigodebarras = dados.codigodebarras
         estoque.categoria = dados.categoria
 
-        # registra quem alterou
         estoque.funcionario_id = funcionario_id
 
         try:
@@ -111,7 +100,6 @@ def atualizar_estoque(estoque_id: int, dados: EstoqueUpdate, funcionario_id: int
             raise HTTPException(status_code=500, detail="Erro ao atualizar estoque")
 
 
-# deletar produto
 def deletar_estoque(estoque_id: int):
     with Session(engine) as session:
         estoque = session.get(Estoque, estoque_id)

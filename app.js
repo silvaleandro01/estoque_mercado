@@ -1,9 +1,6 @@
 const API_URL = "http://127.0.0.1:8000";
 
-// Estado Local
 let carrinho = [];
-
-// --- Gerenciamento de Estado e Auth ---
 
 function getToken() {
     return localStorage.getItem('api_token');
@@ -39,8 +36,6 @@ function checkAuth() {
     }
 }
 
-// --- Utilitários de Requisição ---
-
 async function apiFetch(endpoint, options = {}) {
     const token = getToken();
     const headers = {
@@ -66,13 +61,9 @@ async function apiFetch(endpoint, options = {}) {
     }
 }
 
-// --- Navegação ---
-
 function navegar(viewId) {
-    // Esconde todas as views
     document.querySelectorAll('.view').forEach(el => el.classList.add('hidden'));
     
-    // Mostra a selecionada
     const target = document.getElementById(`view-${viewId}`);
     if (target) {
         target.classList.remove('hidden');
@@ -85,8 +76,6 @@ function carregarDadosView(viewId) {
     if (viewId === 'vendas') carregarVendas();
     if (viewId === 'funcionarios') carregarFuncionarios();
 }
-
-// --- Lógica de Estoque ---
 
 async function carregarEstoque() {
     const container = document.getElementById('view-estoque');
@@ -144,7 +133,7 @@ async function adicionarProduto() {
         quantidade: parseInt(document.getElementById('novo-prod-qtd').value),
         preco: parseFloat(document.getElementById('novo-prod-preco').value),
         categoria: document.getElementById('novo-prod-cat').value,
-        titulo: document.getElementById('novo-prod-nome').value // Campo opcional
+        titulo: document.getElementById('novo-prod-nome').value
     };
 
     const res = await apiFetch('/estoque/inserir', {
@@ -158,12 +147,9 @@ async function adicionarProduto() {
     }
 }
 
-// --- Lógica de Vendas ---
-
 async function carregarVendas() {
     const container = document.getElementById('view-vendas');
     
-    // Busca vendas do dia (Backend)
     const vendasDia = await apiFetch('/vendas/vendasdodia');
     
     let totalHoje = 0;
@@ -171,7 +157,6 @@ async function carregarVendas() {
         totalHoje = vendasDia.total_vendido;
     }
 
-    // Renderiza interface
     let html = `
         <h2>Vendas</h2>
         
@@ -192,7 +177,6 @@ async function carregarVendas() {
                     <tr><th>Código</th><th>Qtd</th><th>Ação</th></tr>
                 </thead>
                 <tbody id="lista-carrinho">
-                    <!-- Itens via JS -->
                 </tbody>
             </table>
 
@@ -217,7 +201,6 @@ function adicionarAoCarrinho() {
 
     carrinho.push({ codigodebarras: codigo, quantidade: qtd });
     
-    // Limpa inputs
     document.getElementById('venda-codigo').value = '';
     document.getElementById('venda-qtd').value = '1';
     document.getElementById('venda-codigo').focus();
@@ -266,11 +249,9 @@ async function finalizarVenda() {
     if (res) {
         alert("Venda realizada com sucesso!");
         carrinho = [];
-        carregarVendas(); // Recarrega para atualizar o total do dia
+        carregarVendas();
     }
 }
-
-// --- Lógica de Funcionários ---
 
 async function carregarFuncionarios() {
     const container = document.getElementById('view-funcionarios');
@@ -351,5 +332,4 @@ async function criarFuncionario() {
     }
 }
 
-// Inicialização
 checkAuth();
