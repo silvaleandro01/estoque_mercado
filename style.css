@@ -14,7 +14,7 @@ body {
     height: 100vh;
 }
 
-#login-screen {
+#login-screen, #password-screen {
     flex-direction: column;
     align-items: center;
     justify-content: center;
@@ -27,13 +27,37 @@ body {
     margin-bottom: 10px;
 }
 
-#token-input {
+.input-group-auth, .password-wrapper {
+    position: relative;
+    width: 320px;
+    margin: 10px 0;
+}
+
+.password-wrapper input, .input-group-auth input {
     padding: 12px;
-    width: 300px;
-    margin: 20px 0;
+    width: 100%;
     border-radius: 5px;
     border: none;
     font-size: 1rem;
+    box-sizing: border-box;
+}
+
+.toggle-btn {
+    position: absolute;
+    right: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0;
+    font-size: 1.2rem;
+    color: #333;
+}
+
+.toggle-btn:hover {
+    background: none;
+    opacity: 0.7;
 }
 
 .sidebar {
@@ -161,3 +185,14 @@ button:hover {
     text-align: right;
     margin-top: 20px;
 }
+
+.feedback-msg {
+    margin-top: 15px;
+    padding: 10px;
+    border-radius: 4px;
+    font-size: 0.9rem;
+    display: none;
+}
+
+.feedback-error { background-color: #f8d7da; color: #721c24; display: block; }
+.feedback-success { background-color: #d4edda; color: #155724; display: block; }

@@ -1,23 +1,106 @@
 const API_URL = "http://127.0.0.1:8000";
 
 let carrinho = [];
+let pendingFuncionarioId = null;
 
 function getToken() {
     return localStorage.getItem('api_token');
 }
 
-function login() {
-    let token = document.getElementById('token-input').value.trim();
+async function login() {
+    const user = document.getElementById('user-input').value.trim();
+    const pass = document.getElementById('pass-input').value;
     
-    if (token) {
-        // Remove o prefixo 'Bearer ' caso o usuário tenha colado junto com o token
-        if (token.startsWith('Bearer ')) {
-            token = token.replace('Bearer ', '');
-        }
-        localStorage.setItem('api_token', token);
+    if (!user) {
+        alert('Por favor, insira seu usuário (nome.sobrenome).');
+        return;
+    }
+
+    const res = await fetch(`${API_URL}/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: user, password: pass })
+    });
+
+    const data = await res.json();
+
+    if (res.status === 401) {
+        alert(data.detail);
+        return;
+    }
+
+    if (data.status === "primeiro_acesso" || data.status === "senha_expirada") {
+        pendingFuncionarioId = data.funcionario_id;
+        document.getElementById('login-screen').classList.add('hidden');
+        document.getElementById('password-screen').classList.remove('hidden');
+        document.getElementById('pwd-title').innerText = data.status === "primeiro_acesso" ? "Primeiro Acesso" : "Senha Expirada";
+        document.getElementById('pwd-msg').innerText = "Por favor, defina uma senha forte para continuar.";
+    } else if (data.status === "sucesso") {
+        localStorage.setItem('api_token', data.token);
         checkAuth();
-    } else {
-        alert('Por favor, insira um token.');
+    }
+}
+
+function togglePassword(inputId) {
+    const input = document.getElementById(inputId);
+    input.type = input.type === "password" ? "text" : "password";
+}
+
+async function submeterNovaSenha() {
+    const novaSenha = document.getElementById('new-password').value;
+    const confirmaSenha = document.getElementById('confirm-password').value;
+    const feedback = document.getElementById('pwd-feedback');
+    
+    // 1. Limpar estado de erro anterior e preparar feedback
+    feedback.style.display = 'none';
+    feedback.className = 'feedback-msg';
+
+    if (novaSenha !== confirmaSenha) {
+        feedback.innerText = "As senhas não coincidem!";
+        feedback.className = 'feedback-msg feedback-error';
+        feedback.style.display = 'block';
+        return;
+    }
+
+    try {
+        const res = await fetch(`${API_URL}/funcionarios/definir-senha`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ funcionario_id: pendingFuncionarioId, nova_senha: novaSenha })
+        });
+
+        let data;
+        try {
+            data = await res.json();
+        } catch (e) {
+            // Caso o servidor retorne um erro 500 sem JSON válido
+            data = { detail: "Erro interno no servidor. Verifique a força da senha e tente novamente." };
+        }
+
+        if (res.ok) {
+            alert("Senha cadastrada com sucesso! Por favor, realize o login com sua nova senha.");
+            
+            // Retorna para a tela de login
+            document.getElementById('password-screen').classList.add('hidden');
+            document.getElementById('login-screen').classList.remove('hidden');
+            
+            // Limpa os campos e estados
+            document.getElementById('new-password').value = '';
+            document.getElementById('confirm-password').value = '';
+            document.getElementById('pass-input').value = '';
+            feedback.style.display = 'none';
+            pendingFuncionarioId = null;
+        } else {
+            // Aqui pegamos o detalhe exato do erro vindo do backend (ex: "Falta caractere especial")
+            const mensagemErro = data.detail || "Erro ao validar senha.";
+            alert(`Senha Inválida: ${mensagemErro}`);
+            feedback.innerText = mensagemErro;
+            feedback.className = 'feedback-msg feedback-error';
+            feedback.style.display = 'block';
+        }
+    } catch (error) {
+        console.error("Erro ao definir senha:", error);
+        alert("Erro de conexão com o servidor. Tente novamente.");
     }
 }
 
@@ -270,15 +353,30 @@ async function carregarFuncionarios() {
     const container = document.getElementById('view-funcionarios');
     container.innerHTML = '<h3>Carregando...</h3>';
 
-    const funcionarios = await apiFetch('/funcionarios/listar');
+    // Carrega funcionários e setores simultaneamente
+    const [funcionarios, setores] = await Promise.all([
+        apiFetch('/funcionarios/listar'),
+        apiFetch('/setores/listar')
+    ]);
     
     if (!funcionarios) {
         container.innerHTML = `<div class="card"><h3>Acesso Negado</h3><p>Apenas RH ou Admin podem ver isso.</p></div>`;
         return;
     }
 
+    const listaSetores = setores || [];
+
     let html = `
         <h2>Gestão de RH</h2>
+
+        <div class="card">
+            <h3>Cadastrar Novo Setor</h3>
+            <div class="form-group">
+                <input class="form-control" type="text" id="setor-nome-novo" placeholder="Nome do Setor (ex: Recursos Humanos)">
+                <input class="form-control" type="text" id="setor-tipo-novo" placeholder="Tipo (ex: rh, estoque, vendas, gerencia)">
+            </div>
+            <button onclick="criarSetor()">Cadastrar Setor</button>
+        </div>
         
         <div class="card">
             <h3>Cadastrar Novo Funcionário</h3>
@@ -295,7 +393,10 @@ async function carregarFuncionarios() {
                     <option value="false">Não tem filhos</option>
                     <option value="true">Tem filhos</option>
                 </select>
-                <input class="form-control" type="number" id="func-setor" placeholder="ID do Setor (1, 2...)">
+                <select class="form-control" id="func-setor">
+                    <option value="">Selecione o Setor</option>
+                    ${listaSetores.map(s => `<option value="${s.id}">${s.nome} (${s.tipo})</option>`).join('')}
+                </select>
             </div>
             <button onclick="criarFuncionario()">Cadastrar</button>
         </div>
@@ -324,14 +425,42 @@ async function carregarFuncionarios() {
     container.innerHTML = html;
 }
 
+async function criarSetor() {
+    const dados = {
+        nome: document.getElementById('setor-nome-novo').value,
+        tipo: document.getElementById('setor-tipo-novo').value
+    };
+
+    if (!dados.nome || !dados.tipo) {
+        alert("Preencha todos os campos do setor.");
+        return;
+    }
+
+    const res = await apiFetch('/setores/criar', {
+        method: 'POST',
+        body: JSON.stringify(dados)
+    });
+
+    if (res) {
+        alert('Setor criado com sucesso!');
+        carregarFuncionarios(); // Recarrega para atualizar o dropdown de funcionários
+    }
+}
+
 async function criarFuncionario() {
+    const setorId = document.getElementById('func-setor').value;
+    if (!setorId) {
+        alert("Selecione um setor válido.");
+        return;
+    }
+
     const dados = {
         nome: document.getElementById('func-nome').value,
         sobrenome: document.getElementById('func-sobrenome').value,
         data_nascimento: document.getElementById('func-nasc').value,
         genero: document.getElementById('func-genero').value,
         possui_filhos: document.getElementById('func-filhos').value === 'true',
-        setor_id: parseInt(document.getElementById('func-setor').value)
+        setor_id: parseInt(setorId)
     };
 
     const res = await apiFetch('/funcionarios/criar', {

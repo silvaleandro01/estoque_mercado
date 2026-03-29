@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, Header, HTTPException
+from fastapi import FastAPI, Depends, Header, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
@@ -41,6 +41,14 @@ def get_funcionario(authorization: str = Header(...)):
     token = authorization.split(" ")[1]
     return validar_funcionario_por_token(token)
 
+@app.post("/login")
+def login_rota(username: str = Body(...), password: str = Body("")):
+    return autenticar_funcionario(username, password)
+
+@app.post("/funcionarios/definir-senha")
+def definir_senha_rota(funcionario_id: int = Body(...), nova_senha: str = Body(...)):
+    return definir_nova_senha(funcionario_id, nova_senha)
+
 @app.post("/funcionarios/criar")
 def criar(dados: FuncionarioCreate):
     return criar_funcionario(dados)
@@ -66,7 +74,7 @@ def deletar(id: int, funcionario=Depends(get_funcionario)):
     verificar_permissao(funcionario, "rh")
     return deletar_funcionario(id)
 
-@app.post("/rh/renovar-token/{id}")
+@app.post("/funcionarios/renovar-token/{id}")
 def renovar(id: int, funcionario=Depends(get_funcionario)):
     verificar_permissao(funcionario, "rh")
     return renovar_token(id)
