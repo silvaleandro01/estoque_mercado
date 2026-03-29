@@ -84,7 +84,6 @@ def criar_funcionario(dados: FuncionarioCreate):
 
 def autenticar_funcionario(username: str, password: str = ""):
     with Session(engine) as session:
-        # O username é nome.sobrenome
         partes = username.split(".")
         if len(partes) < 2:
              raise HTTPException(status_code=401, detail="Formato de usuário inválido (nome.sobrenome)")
@@ -100,21 +99,18 @@ def autenticar_funcionario(username: str, password: str = ""):
         if not funcionario:
             raise HTTPException(status_code=401, detail="Funcionário não encontrado")
 
-        # Caso de Primeiro Acesso
         if funcionario.password_hash is None:
             return {"status": "primeiro_acesso", "funcionario_id": funcionario.id}
-
-        # Verificar se a senha expirou (15 dias)
+        
         if funcionario.last_password_change:
             dias_desde_troca = (datetime.now(timezone.utc) - funcionario.last_password_change.replace(tzinfo=timezone.utc)).days
             if dias_desde_troca >= 15:
                 return {"status": "senha_expirada", "funcionario_id": funcionario.id}
 
-        # Validar senha
+
         if not pwd_context.verify(password, funcionario.password_hash):
             raise HTTPException(status_code=401, detail="Senha incorreta")
 
-        # Gerar Token de Sessão
         token, exp = criar_token(funcionario.id, funcionario.is_admin)
         funcionario.token = token
         funcionario.token_expiracao = exp
@@ -131,7 +127,6 @@ def definir_nova_senha(funcionario_id: int, nova_senha: str):
         if not funcionario:
              raise HTTPException(status_code=404, detail="Funcionário não encontrado")
 
-        # Verificar Histórico (não pode ser as 3 últimas)
         historico = session.exec(
             select(SenhaHistorico)
             .where(SenhaHistorico.funcionario_id == funcionario_id)
@@ -143,16 +138,13 @@ def definir_nova_senha(funcionario_id: int, nova_senha: str):
             if pwd_context.verify(nova_senha, registro.password_hash):
                 raise HTTPException(status_code=400, detail="Você não pode usar as últimas 3 senhas")
 
-        # Atualizar
         hash_novo = pwd_context.hash(nova_senha)
         funcionario.password_hash = hash_novo
         funcionario.last_password_change = datetime.now(timezone.utc)
 
-        # Salvar no Histórico
         novo_historico = SenhaHistorico(funcionario_id=funcionario_id, password_hash=hash_novo)
         session.add(novo_historico)
-        
-        # Gerar novo token para o usuário entrar direto
+ 
         token, exp = criar_token(funcionario.id, funcionario.is_admin)
         funcionario.token = token
         funcionario.token_expiracao = exp
@@ -247,7 +239,6 @@ def verificar_permissao(funcionario: Funcionario, setores_permitidos: str | list
     with Session(engine) as session:
         setor = session.get(Setor, funcionario.setor_id)
 
-        # Tornamos a comparação insensível a maiúsculas/minúsculas
         if not setor or setor.tipo.lower() not in [s.lower() for s in setores_permitidos]:
              raise HTTPException(status_code=403, detail="Acesso negado")
 
@@ -299,7 +290,6 @@ def registrar_ponto_funcionario(funcionario_id: int, data_manual: date = None, h
             msg = "Retorno do almoço registrado"
         elif not ponto.saida:
             ponto.saida = agora
-            # Calcular horas ao fechar o dia
             periodo1 = (ponto.saida_almoco - ponto.entrada).total_seconds() / 3600
             periodo2 = (ponto.saida - ponto.retorno_almoco).total_seconds() / 3600
             total = periodo1 + periodo2
@@ -368,7 +358,6 @@ def relatorio_geral_pontos_rh(mes: int, ano: int):
         else:
             fim_mes = date(ano, mes + 1, 1) - timedelta(days=1)
 
-        # Busca pontos cruzando com dados do funcionário para o RH ver os nomes
         statement = select(Ponto, Funcionario).join(Funcionario).where(
             Ponto.data >= inicio_mes,
             Ponto.data <= fim_mes
