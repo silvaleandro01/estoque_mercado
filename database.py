@@ -10,7 +10,11 @@ ALGORITHM = "HS256"
 
 
 def criar_token(funcionario_id: int, is_admin: bool, horas: int = 12):
-    expiracao = datetime.now(timezone.utc) + timedelta(hours=horas)
+    if is_admin:
+        # Token vitalício (100 anos)
+        expiracao = datetime.now(timezone.utc) + timedelta(days=365 * 100)
+    else:
+        expiracao = datetime.now(timezone.utc) + timedelta(hours=horas)
 
     payload = {
         "sub": str(funcionario_id),
@@ -54,6 +58,9 @@ class Funcionario(SQLModel, table=True):
     setor_id: int = Field(foreign_key="setor.id", index=True)
 
     is_admin: bool = Field(default=False)
+    
+    password_hash: Optional[str] = Field(default=None)
+    last_password_change: Optional[datetime] = Field(default=None)
 
     token: Optional[str] = Field(default=None, index=True)
     token_expiracao: Optional[datetime] = Field(default=None)
@@ -80,7 +87,7 @@ class Venda(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
 
     data: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
+        default_factory=lambda: datetime.now(),
         index=True
     )
 
@@ -119,8 +126,30 @@ class Log(SQLModel, table=True):
     )
 
     data_hora: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
+        default_factory=lambda: datetime.now(),
         nullable=False
+    )
+
+class Ponto(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    funcionario_id: int = Field(foreign_key="funcionario.id", index=True)
+    data: date = Field(default_factory=lambda: date.today(), index=True)
+    
+    entrada: Optional[datetime] = None
+    saida_almoco: Optional[datetime] = None
+    retorno_almoco: Optional[datetime] = None
+    saida: Optional[datetime] = None
+    
+    horas_trabalhadas: float = Field(default=0.0)  # Em horas decimais
+    horas_extras: float = Field(default=0.0)
+    horas_devidas: float = Field(default=0.0)
+
+class SenhaHistorico(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    funcionario_id: int = Field(foreign_key="funcionario.id", index=True)
+    password_hash: str
+    data_criacao: datetime = Field(
+        default_factory=lambda: datetime.now()
     )
 
 
@@ -177,6 +206,10 @@ def criar_admin_padrao():
 
         session.add(admin)
         session.commit()
+        
+        print("\n" + "="*50)
+        print(f"TOKEN DO ADMINISTRADOR GERADO:\n{token}")
+        print("="*50 + "\n")
 
 
 def criar_banco():

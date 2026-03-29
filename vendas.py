@@ -1,6 +1,6 @@
 from fastapi import HTTPException
 from sqlmodel import Session, select
-from datetime import date
+from datetime import date, datetime, timezone
 from database import engine, Estoque, Venda, ItemVenda
 
 def criar_venda(dados, funcionario_id: int):
