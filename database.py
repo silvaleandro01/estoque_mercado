@@ -11,7 +11,6 @@ ALGORITHM = "HS256"
 
 def criar_token(funcionario_id: int, is_admin: bool, horas: int = 12):
     if is_admin:
-        # Token vitalício (100 anos)
         expiracao = datetime.now(timezone.utc) + timedelta(days=365 * 100)
     else:
         expiracao = datetime.now(timezone.utc) + timedelta(hours=horas)
