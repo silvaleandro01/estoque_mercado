@@ -46,8 +46,7 @@ def criar_venda(dados, funcionario_id: int):
 def vendas_do_dia():
     with Session(engine) as session:
         vendas = session.exec(select(Venda)).all()
-        # Sincroniza com o fuso horário UTC usado no banco de dados
-        hoje = datetime.now(timezone.utc).date()
+        hoje = date.today()
         total = 0
 
         for venda in vendas:

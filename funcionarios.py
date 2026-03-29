@@ -7,14 +7,12 @@ from passlib.context import CryptContext
 import re
 import os
 
-# Importamos as constantes e modelos do database para manter a consistência
-from database import Funcionario, FuncionarioCreate, Setor, engine, SECRET_KEY, ALGORITHM, SenhaHistorico
+from database import Funcionario, FuncionarioCreate, Setor, engine, SECRET_KEY, ALGORITHM, SenhaHistorico, Ponto
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 def criar_token(funcionario_id: int, is_admin: bool, horas: int = 12):
     if is_admin:
-        # Token vitalício (100 anos)
         expiracao = datetime.now(timezone.utc) + timedelta(days=365 * 100)
     else:
         expiracao = datetime.now(timezone.utc) + timedelta(hours=horas)
@@ -279,3 +277,112 @@ def renovar_token(funcionario_id: int):
             "token": token,
             "expiracao": exp
         }
+
+def registrar_ponto_funcionario(funcionario_id: int, data_manual: date = None, hora_manual: datetime = None):
+    with Session(engine) as session:
+        hoje = data_manual if data_manual else date.today()
+        agora = hora_manual if hora_manual else datetime.now()
+        
+        ponto = session.exec(
+            select(Ponto).where(Ponto.funcionario_id == funcionario_id, Ponto.data == hoje)
+        ).first()
+
+        if not ponto:
+            ponto = Ponto(funcionario_id=funcionario_id, data=hoje, entrada=agora)
+            session.add(ponto)
+            msg = "Entrada registrada"
+        elif not ponto.saida_almoco:
+            ponto.saida_almoco = agora
+            msg = "Saída para almoço registrada"
+        elif not ponto.retorno_almoco:
+            ponto.retorno_almoco = agora
+            msg = "Retorno do almoço registrado"
+        elif not ponto.saida:
+            ponto.saida = agora
+            # Calcular horas ao fechar o dia
+            periodo1 = (ponto.saida_almoco - ponto.entrada).total_seconds() / 3600
+            periodo2 = (ponto.saida - ponto.retorno_almoco).total_seconds() / 3600
+            total = periodo1 + periodo2
+            
+            ponto.horas_trabalhadas = round(total, 2)
+            if total > 8:
+                extra = total - 8
+                ponto.horas_extras = round(min(extra, 2), 2) # Máximo 2h extras
+                ponto.horas_devidas = 0
+            else:
+                ponto.horas_extras = 0
+                ponto.horas_devidas = round(8 - total, 2)
+                
+            msg = "Saída encerrada. Horas calculadas."
+        else:
+            raise HTTPException(status_code=400, detail="Todos os pontos de hoje já foram batidos.")
+
+        session.add(ponto)
+        session.commit()
+        return {"detail": msg}
+
+def obter_status_ponto(funcionario_id: int):
+    with Session(engine) as session:
+        hoje = date.today()
+        return session.exec(
+            select(Ponto).where(Ponto.funcionario_id == funcionario_id, Ponto.data == hoje)
+        ).first()
+
+def relatorio_mensal_funcionario(funcionario_id: int, mes: int, ano: int):
+    with Session(engine) as session:
+        # Calcula o primeiro e último dia do mês
+        inicio_mes = date(ano, mes, 1)
+        if mes == 12:
+            fim_mes = date(ano + 1, 1, 1) - timedelta(days=1)
+        else:
+            fim_mes = date(ano, mes + 1, 1) - timedelta(days=1)
+
+        pontos = session.exec(
+            select(Ponto).where(
+                Ponto.funcionario_id == funcionario_id,
+                Ponto.data >= inicio_mes,
+                Ponto.data <= fim_mes
+            ).order_by(Ponto.data.desc())
+        ).all()
+        
+        total_trabalhado = sum(p.horas_trabalhadas for p in pontos)
+        total_extra = sum(p.horas_extras for p in pontos)
+        total_devido = sum(p.horas_devidas for p in pontos)
+        saldo_mensal = total_extra - total_devido
+        
+        return {
+            "pontos": pontos,
+            "resumo": {
+                "total_trabalhado_mes": round(total_trabalhado, 2),
+                "total_extra_mes": round(total_extra, 2),
+                "total_devido_mes": round(total_devido, 2),
+                "saldo_mensal": round(saldo_mensal, 2)
+            }
+        }
+
+def relatorio_geral_pontos_rh(mes: int, ano: int):
+    with Session(engine) as session:
+        inicio_mes = date(ano, mes, 1)
+        if mes == 12:
+            fim_mes = date(ano + 1, 1, 1) - timedelta(days=1)
+        else:
+            fim_mes = date(ano, mes + 1, 1) - timedelta(days=1)
+
+        # Busca pontos cruzando com dados do funcionário para o RH ver os nomes
+        statement = select(Ponto, Funcionario).join(Funcionario).where(
+            Ponto.data >= inicio_mes,
+            Ponto.data <= fim_mes
+        ).order_by(Ponto.data.desc(), Funcionario.nome)
+        
+        resultados = session.exec(statement).all()
+        
+        return [{
+            "id": p.id,
+            "data": p.data,
+            "funcionario": f"{f.nome} {f.sobrenome}",
+            "trabalhadas": p.horas_trabalhadas,
+            "extras": p.horas_extras,
+            "devidas": p.horas_devidas,
+            "entrada": p.entrada,
+            "saida": p.saida
+        } for p, f in resultados]

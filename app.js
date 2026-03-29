@@ -118,6 +118,7 @@ function checkAuth() {
         loginScreen.classList.add('hidden');
         mainLayout.classList.remove('hidden');
         navegar('dashboard');
+        verificarLembretePonto();
     } else {
         loginScreen.classList.remove('hidden');
         mainLayout.classList.add('hidden');
@@ -166,6 +167,7 @@ function carregarDadosView(viewId) {
     if (viewId === 'estoque') carregarEstoque();
     if (viewId === 'vendas') carregarVendas();
     if (viewId === 'funcionarios') carregarFuncionarios();
+    if (viewId === 'pontos') carregarPontos();
 }
 
 async function carregarEstoque() {
@@ -349,14 +351,39 @@ async function finalizarVenda() {
     }
 }
 
+// Função auxiliar para converter decimal (7.99) para HH:MM
+function formatarHorasRelogio(decimal) {
+    if (decimal === null || decimal === undefined || isNaN(decimal)) return "00:00";
+    const sinal = decimal < 0 ? "-" : "";
+    const valorAbsoluto = Math.abs(decimal);
+    const horas = Math.floor(valorAbsoluto);
+    const minutos = Math.round((valorAbsoluto - horas) * 60);
+    // Garante que 60 minutos virem 1 hora extra
+    const horasFinal = minutos === 60 ? horas + 1 : horas;
+    const minutosFinal = minutos === 60 ? 0 : minutos;
+    return `${sinal}${horasFinal.toString().padStart(2, '0')}:${minutosFinal.toString().padStart(2, '0')}`;
+}
+
+// Função auxiliar para formatar data ISO sem deslocamento de fuso horário
+function formatarDataSimples(dataStr) {
+    if (!dataStr) return "--/--/----";
+    const partes = dataStr.split('T')[0].split('-');
+    return `${partes[2]}/${partes[1]}/${partes[0]}`;
+}
+
 async function carregarFuncionarios() {
     const container = document.getElementById('view-funcionarios');
     container.innerHTML = '<h3>Carregando...</h3>';
 
+    const data = new Date();
+    const mes = data.getMonth() + 1;
+    const ano = data.getFullYear();
+
     // Carrega funcionários e setores simultaneamente
-    const [funcionarios, setores] = await Promise.all([
+    const [funcionarios, setores, pontosGerais] = await Promise.all([
         apiFetch('/funcionarios/listar'),
-        apiFetch('/setores/listar')
+        apiFetch('/setores/listar'),
+        apiFetch(`/pontos/rh/geral?mes=${mes}&ano=${ano}`)
     ]);
     
     if (!funcionarios) {
@@ -405,7 +432,7 @@ async function carregarFuncionarios() {
         <h3>Equipe</h3>
         <table>
             <thead>
-                <tr><th>ID</th><th>Nome</th><th>Setor ID</th><th>Admin</th></tr>
+                <tr><th>ID</th><th>Nome</th><th>Setor ID</th><th>Admin</th><th>Ações</th></tr>
             </thead>
             <tbody>
     `;
@@ -417,12 +444,105 @@ async function carregarFuncionarios() {
                 <td>${f.nome} ${f.sobrenome}</td>
                 <td>${f.setor_id}</td>
                 <td>${f.is_admin ? 'Sim' : 'Não'}</td>
+                <td>
+                    <button class="btn" style="padding: 5px 10px; font-size: 0.8rem;" 
+                        onclick="verRelatorioPontoIndividual(${f.id}, '${f.nome} ${f.sobrenome}')">Ver Ponto Mensal</button>
+                </td>
             </tr>
         `;
     });
 
     html += '</tbody></table></div>';
+
+    html += `<div id="detalhe-ponto-individual"></div>`;
+
+    html += `
+        <div class="card">
+            <h3>Controle de Ponto Geral - Carga Semanal 44h (8h Diárias)</h3>
+            <p style="font-size: 0.85rem; color: #666; margin-bottom: 15px;">
+                Relatório consolidado de batidas, horas trabalhadas e balanço do banco de horas.
+            </p>
+            <table>
+                <thead>
+                    <tr><th>Data</th><th>Funcionário</th><th>Entrada</th><th>Saída</th><th>Trabalhadas</th><th>Extras</th><th>Saldo Diário</th></tr>
+                </thead>
+                <tbody>
+                    ${(pontosGerais || []).map(p => `
+                        <tr>
+                            <td>${formatarDataSimples(p.data)}</td>
+                            <td>${p.funcionario}</td>
+                            <td>${p.entrada ? new Date(p.entrada).toLocaleTimeString() : '--'}</td>
+                            <td>${p.saida ? new Date(p.saida).toLocaleTimeString() : '--'}</td>
+                            <td>${formatarHorasRelogio(p.trabalhadas)}</td>
+                            <td><span style="color: green">${p.extras > 0 ? '+' + formatarHorasRelogio(p.extras) : '00:00'}</span></td>
+                            <td>
+                                <strong style="color: ${p.extras - p.devidas >= 0 ? (p.extras - p.devidas > 0 ? '#27ae60' : '#333') : '#e74c3c'}">
+                                    ${formatarHorasRelogio(p.extras - p.devidas)}
+                                </strong>
+                            </td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        </div>
+    `;
+
     container.innerHTML = html;
+}
+
+async function verRelatorioPontoIndividual(id, nomeCompleto) {
+    const container = document.getElementById('detalhe-ponto-individual');
+    container.innerHTML = '<h3>Carregando relatório...</h3>';
+    
+    const agora = new Date();
+    const mes = agora.getMonth() + 1;
+    const ano = agora.getFullYear();
+
+    const relatorio = await apiFetch(`/pontos/rh/funcionario/${id}?mes=${mes}&ano=${ano}`);
+    
+    if (!relatorio) return;
+
+    const formatarHora = (iso) => iso ? new Date(iso).toLocaleTimeString() : '--:--';
+
+    let html = `
+        <div class="card" style="border-top: 5px solid #3498db; animation: fadeIn 0.5s;">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <h3>Relatório Detalhado: ${nomeCompleto} (${mes}/${ano})</h3>
+                <button class="btn-danger" onclick="document.getElementById('detalhe-ponto-individual').innerHTML = ''">Fechar</button>
+            </div>
+            
+            <div style="display: flex; gap: 15px; margin: 20px 0; flex-wrap: wrap;">
+                <div class="ponto-stamp">Trabalhado:<br><strong>${formatarHorasRelogio(relatorio.resumo.total_trabalhado_mes)}</strong></div>
+                <div class="ponto-stamp">Extras:<br><strong style="color: green">+${formatarHorasRelogio(relatorio.resumo.total_extra_mes)}</strong></div>
+                <div class="ponto-stamp">Devidas:<br><strong style="color: red">${relatorio.resumo.total_devido_mes > 0 ? '-' : ''}${formatarHorasRelogio(relatorio.resumo.total_devido_mes)}</strong></div>
+                <div class="ponto-stamp">Saldo Mensal:<br><strong style="color: ${relatorio.resumo.saldo_mensal >= 0 ? (relatorio.resumo.saldo_mensal > 0 ? '#27ae60' : '#333') : '#e74c3c'}">
+                    ${formatarHorasRelogio(relatorio.resumo.saldo_mensal)}
+                </strong></div>
+            </div>
+
+            <table>
+                <thead>
+                    <tr><th>Data</th><th>Entrada</th><th>Almoço</th><th>Retorno</th><th>Saída</th><th>Extras</th><th>Devidas</th></tr>
+                </thead>
+                <tbody>
+                    ${(relatorio.pontos || []).map(p => `
+                        <tr>
+                            <td>${formatarDataSimples(p.data)}</td>
+                            <td>${formatarHora(p.entrada)}</td>
+                            <td>${formatarHora(p.saida_almoco)}</td>
+                            <td>${formatarHora(p.retorno_almoco)}</td>
+                            <td>${formatarHora(p.saida)}</td>
+                            <td style="color: green">${p.horas_extras > 0 ? '+' + formatarHorasRelogio(p.horas_extras) : '00:00'}</td>
+                            <td style="color: red">${p.horas_devidas > 0 ? '-' + formatarHorasRelogio(p.horas_devidas) : '00:00'}</td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        </div>
+    `;
+    
+    container.innerHTML = html;
+    container.scrollIntoView({ behavior: 'smooth' });
 }
 
 async function criarSetor() {
@@ -471,6 +591,90 @@ async function criarFuncionario() {
     if (res) {
         alert('Funcionário cadastrado!');
         carregarFuncionarios();
+    }
+}
+
+async function verificarLembretePonto() {
+    const status = await apiFetch('/pontos/status');
+    // Se não houver registro hoje ou se ainda não bateu a entrada
+    if (!status || !status.entrada) {
+        alert("Atenção: Você ainda não bateu o ponto de entrada hoje!");
+    }
+}
+
+async function carregarPontos() {
+    const container = document.getElementById('view-pontos');
+    container.innerHTML = '<h3>Carregando...</h3>';
+    
+    const agora = new Date();
+    const mes = agora.getMonth() + 1;
+    const ano = agora.getFullYear();
+
+    const [status, relatorio] = await Promise.all([
+        apiFetch('/pontos/status'),
+        apiFetch(`/pontos/meu-relatorio?mes=${mes}&ano=${ano}`)
+    ]);
+
+    const hojeStr = agora.toLocaleDateString();
+
+    const formatarHora = (iso) => iso ? new Date(iso).toLocaleTimeString() : '--:--';
+
+    let html = `
+        <h2>Ponto Eletrônico - ${hojeStr}</h2>
+        <div class="card" style="text-align: center;">
+            <div class="form-group" style="display: flex; justify-content: center; gap: 20px; margin-bottom: 20px;">
+                <div class="ponto-stamp">Entrada:<br><strong>${formatarHora(status?.entrada)}</strong></div>
+                <div class="ponto-stamp">Almoço:<br><strong>${formatarHora(status?.saida_almoco)}</strong></div>
+                <div class="ponto-stamp">Retorno:<br><strong>${formatarHora(status?.retorno_almoco)}</strong></div>
+                <div class="ponto-stamp">Saída:<br><strong>${formatarHora(status?.saida)}</strong></div>
+            </div>
+            
+            <div style="margin: 20px 0;">
+                <p>Status: <strong>${status?.saida ? 'Expediente Encerrado' : 'Em Aberto'}</strong></p>
+                <p>Horas Hoje: ${formatarHorasRelogio(status?.horas_trabalhadas)} | Extras: ${formatarHorasRelogio(status?.horas_extras)}</p>
+            </div>
+
+            <button class="btn-success" onclick="baterPonto()" ${status?.saida ? 'disabled' : ''}>
+                ${status?.saida ? 'Expediente Finalizado' : 'Bater Próximo Ponto'}
+            </button>
+        </div>
+
+        <div class="card">
+            <h3>Meu Histórico Mensal (${mes}/${ano})</h3>
+            <div style="display: flex; gap: 20px; margin-bottom: 20px;">
+                <div class="ponto-stamp">Total Horas:<br><strong>${formatarHorasRelogio(relatorio?.resumo.total_trabalhado_mes)}</strong></div>
+                <div class="ponto-stamp">Banco Extras:<br><strong style="color: green">+${formatarHorasRelogio(relatorio?.resumo.total_extra_mes)}</strong></div>
+                <div class="ponto-stamp">Banco Horas Devidas:<br><strong style="color: red">${relatorio?.resumo.total_devido_mes > 0 ? '-' : ''}${formatarHorasRelogio(relatorio?.resumo.total_devido_mes)}</strong></div>
+                <div class="ponto-stamp">Saldo Final:<br><strong style="color: ${relatorio?.resumo.saldo_mensal >= 0 ? (relatorio?.resumo.saldo_mensal > 0 ? '#27ae60' : '#333') : '#e74c3c'}">${formatarHorasRelogio(relatorio?.resumo.saldo_mensal)}</strong></div>
+            </div>
+            <table>
+                <thead>
+                    <tr><th>Data</th><th>Entrada</th><th>Almoço</th><th>Retorno</th><th>Saída</th><th>Extra</th><th>Devido</th></tr>
+                </thead>
+                <tbody>
+                    ${(relatorio?.pontos || []).map(p => `
+                        <tr>
+                            <td>${formatarDataSimples(p.data)}</td>
+                            <td>${formatarHora(p.entrada)}</td>
+                            <td>${formatarHora(p.saida_almoco)}</td>
+                            <td>${formatarHora(p.retorno_almoco)}</td>
+                            <td>${formatarHora(p.saida)}</td>
+                            <td style="color: green">${p.horas_extras > 0 ? '+' + formatarHorasRelogio(p.horas_extras) : '00:00'}</td>
+                            <td style="color: red">${p.horas_devidas > 0 ? '-' + formatarHorasRelogio(p.horas_devidas) : '00:00'}</td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        </div>
+    `;
+    container.innerHTML = html;
+}
+
+async function baterPonto() {
+    const res = await apiFetch('/pontos/bater', { method: 'POST' });
+    if (res) {
+        alert(res.detail);
+        carregarPontos();
     }
 }
 

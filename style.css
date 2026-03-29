@@ -196,3 +196,12 @@ button:hover {
 
 .feedback-error { background-color: #f8d7da; color: #721c24; display: block; }
 .feedback-success { background-color: #d4edda; color: #155724; display: block; }
+
+.ponto-stamp {
+    background-color: #f8f9fa;
+    padding: 15px;
+    border-radius: 8px;
+    border: 1px solid #ddd;
+    color: #2c3e50;
+    min-width: 120px;
+}

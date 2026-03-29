@@ -87,7 +87,7 @@ class Venda(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
 
     data: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
+        default_factory=lambda: datetime.now(),
         index=True
     )
 
@@ -126,16 +126,30 @@ class Log(SQLModel, table=True):
     )
 
     data_hora: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
+        default_factory=lambda: datetime.now(),
         nullable=False
     )
+
+class Ponto(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    funcionario_id: int = Field(foreign_key="funcionario.id", index=True)
+    data: date = Field(default_factory=lambda: date.today(), index=True)
+    
+    entrada: Optional[datetime] = None
+    saida_almoco: Optional[datetime] = None
+    retorno_almoco: Optional[datetime] = None
+    saida: Optional[datetime] = None
+    
+    horas_trabalhadas: float = Field(default=0.0)  # Em horas decimais
+    horas_extras: float = Field(default=0.0)
+    horas_devidas: float = Field(default=0.0)
 
 class SenhaHistorico(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     funcionario_id: int = Field(foreign_key="funcionario.id", index=True)
     password_hash: str
     data_criacao: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc)
+        default_factory=lambda: datetime.now()
     )
 
 

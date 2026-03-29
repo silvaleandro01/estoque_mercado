@@ -81,27 +81,27 @@ def renovar(id: int, funcionario=Depends(get_funcionario)):
 
 @app.post("/estoque/inserir")
 def inserir_estoque(estoque: Estoque, funcionario=Depends(get_funcionario)):
-    verificar_permissao(funcionario, "estoque")
+    verificar_permissao(funcionario, ["estoque", "gerencia"])
     return criar_estoque(estoque, funcionario.id)
 
 @app.get("/estoque/mostrar")
 def mostrar_estoque(funcionario=Depends(get_funcionario)):
-    verificar_permissao(funcionario, "estoque")
+    verificar_permissao(funcionario, ["estoque", "gerencia"])
     return mostrar_produtos()
 
 @app.get("/estoque/buscar/{estoque_id}")
 def buscar_estoque_route(estoque_id: int, funcionario=Depends(get_funcionario)):
-    verificar_permissao(funcionario, "estoque")
+    verificar_permissao(funcionario, ["estoque", "gerencia"])
     return buscar_estoque(estoque_id)
 
 @app.put("/estoque/atualizar/{estoque_id}")
 def atualizar_estoque_route(estoque_id: int, dados: EstoqueUpdate, funcionario=Depends(get_funcionario)):
-    verificar_permissao(funcionario, "estoque")
+    verificar_permissao(funcionario, ["estoque", "gerencia"])
     return atualizar_estoque(estoque_id, dados, funcionario.id)
 
 @app.delete("/estoque/deletar/{estoque_id}")
 def deletar_estoque_route(estoque_id: int, funcionario=Depends(get_funcionario)):
-    verificar_permissao(funcionario, "estoque")
+    verificar_permissao(funcionario, ["estoque", "gerencia"])
     return deletar_estoque(estoque_id)
 
 @app.post("/vendas/inserir")
@@ -113,6 +113,34 @@ def inserir_vendas(dados: VendaInput, funcionario=Depends(get_funcionario)):
 def buscar_vendas(funcionario=Depends(get_funcionario)):
     verificar_permissao(funcionario, "gerencia")
     return vendas_do_dia()
+
+@app.post("/pontos/bater")
+def bater_ponto(
+    data_manual: date = None, 
+    hora_manual: datetime = None, 
+    funcionario=Depends(get_funcionario)
+):
+    if funcionario.is_admin:
+        raise HTTPException(status_code=400, detail="Admin não bate ponto")
+    return registrar_ponto_funcionario(funcionario.id, data_manual, hora_manual)
+
+@app.get("/pontos/status")
+def status_ponto(funcionario=Depends(get_funcionario)):
+    return obter_status_ponto(funcionario.id)
+
+@app.get("/pontos/meu-relatorio")
+def meu_relatorio(mes: int, ano: int, funcionario=Depends(get_funcionario)):
+    return relatorio_mensal_funcionario(funcionario.id, mes, ano)
+
+@app.get("/pontos/rh/geral")
+def relatorio_geral_rh(mes: int, ano: int, funcionario=Depends(get_funcionario)):
+    verificar_permissao(funcionario, "rh")
+    return relatorio_geral_pontos_rh(mes, ano)
+
+@app.get("/pontos/rh/funcionario/{id}")
+def relatorio_individual_rh(id: int, mes: int, ano: int, funcionario=Depends(get_funcionario)):
+    verificar_permissao(funcionario, "rh")
+    return relatorio_mensal_funcionario(id, mes, ano)
 
 @app.post("/setores/criar")
 def rota_criar_setor(setor: SetorCreate, funcionario=Depends(get_funcionario)):
