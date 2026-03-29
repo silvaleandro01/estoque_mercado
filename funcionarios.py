@@ -5,10 +5,8 @@ from jose import jwt, JWTError
 from jose.exceptions import ExpiredSignatureError
 import os
 
-from database import Funcionario, FuncionarioCreate, Setor, engine
-
-SECRET_KEY = os.getenv("SECRET_KEY", "chave_padrao_temporaria")
-ALGORITHM = "HS256"
+# Importamos as constantes e modelos do database para manter a consistência
+from database import Funcionario, FuncionarioCreate, Setor, engine, SECRET_KEY, ALGORITHM
 
 def criar_token(funcionario_id: int, is_admin: bool, horas: int = 12):
     expiracao = datetime.now(timezone.utc) + timedelta(hours=horas)
@@ -145,15 +143,18 @@ def validar_funcionario_por_token(token: str):
 
         return funcionario
 
-def verificar_permissao(funcionario: Funcionario, rota: str):
-
+def verificar_permissao(funcionario: Funcionario, setores_permitidos: str | list[str]):
     if funcionario.is_admin:
         return True
+
+    if isinstance(setores_permitidos, str):
+        setores_permitidos = [setores_permitidos]
 
     with Session(engine) as session:
         setor = session.get(Setor, funcionario.setor_id)
 
-        if not setor or setor.tipo != rota:
+        # Tornamos a comparação insensível a maiúsculas/minúsculas
+        if not setor or setor.tipo.lower() not in [s.lower() for s in setores_permitidos]:
              raise HTTPException(status_code=403, detail="Acesso negado")
 
     return True

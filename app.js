@@ -7,8 +7,13 @@ function getToken() {
 }
 
 function login() {
-    const token = document.getElementById('token-input').value;
+    let token = document.getElementById('token-input').value.trim();
+    
     if (token) {
+        // Remove o prefixo 'Bearer ' caso o usuário tenha colado junto com o token
+        if (token.startsWith('Bearer ')) {
+            token = token.replace('Bearer ', '');
+        }
         localStorage.setItem('api_token', token);
         checkAuth();
     } else {
@@ -46,13 +51,16 @@ async function apiFetch(endpoint, options = {}) {
 
     try {
         const response = await fetch(`${API_URL}${endpoint}`, { ...options, headers });
-        
+
         if (response.status === 401 || response.status === 403) {
-            alert("Sessão expirada ou sem permissão.");
+            const errorData = await response.json();
+            const mensagem = errorData.detail || "Erro de permissão";
+            
+            alert(`Erro ${response.status}: ${mensagem}`);
+            
             if (response.status === 401) logout();
             return null;
         }
-
         return response.json();
     } catch (error) {
         console.error("Erro na API:", error);
@@ -152,8 +160,13 @@ async function carregarVendas() {
     
     const vendasDia = await apiFetch('/vendas/vendasdodia');
     
+    if (!vendasDia) {
+        container.innerHTML = '<h2>Acesso Negado</h2><p>Você não tem permissão para visualizar o caixa.</p>';
+        return;
+    }
+
     let totalHoje = 0;
-    if (vendasDia && vendasDia.total_vendido) {
+    if (vendasDia.total_vendido !== undefined) {
         totalHoje = vendasDia.total_vendido;
     }
 

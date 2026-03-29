@@ -177,6 +177,10 @@ def criar_admin_padrao():
 
         session.add(admin)
         session.commit()
+        
+        print("\n" + "="*50)
+        print(f"TOKEN DO ADMINISTRADOR GERADO:\n{token}")
+        print("="*50 + "\n")
 
 
 def criar_banco():

@@ -35,7 +35,7 @@ app.add_middleware(
 )
 
 def get_funcionario(authorization: str = Header(...)):
-    if not authorization.startswith("Bearer "):
+    if not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Token inválido")
 
     token = authorization.split(" ")[1]
@@ -98,12 +98,12 @@ def deletar_estoque_route(estoque_id: int, funcionario=Depends(get_funcionario))
 
 @app.post("/vendas/inserir")
 def inserir_vendas(dados: VendaInput, funcionario=Depends(get_funcionario)):
-    verificar_permissao(funcionario, "vendas")
+    verificar_permissao(funcionario, ["vendas", "gerencia"])
     return criar_venda(dados, funcionario.id)
 
 @app.get("/vendas/vendasdodia")
 def buscar_vendas(funcionario=Depends(get_funcionario)):
-    verificar_permissao(funcionario, "vendas")
+    verificar_permissao(funcionario, "gerencia")
     return vendas_do_dia()
 
 @app.post("/setores/criar")
