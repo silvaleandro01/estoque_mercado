@@ -8,20 +8,16 @@ def criar_venda(dados, funcionario_id: int):
 
         venda = Venda(funcionario_id=funcionario_id)
         session.add(venda)
-        session.commit()
-        session.refresh(venda)
+        session.flush()
         total = 0
-
         for item in dados.itens:
-
-            produto = session.exec(select(Estoque).where(Estoque.codigodebarras == item.codigodebarras)).first() 
-
+            produto = session.exec(select(Estoque).where(Estoque.codigodebarras == item.codigodebarras)).first()
             if not produto:
                 raise HTTPException(status_code=404, detail=f"Produto {item.codigodebarras} não encontrado")
-            
-            if produto.quantidade < item.quantidade:
-                raise HTTPException(status_code=400,detail=f"Estoque insuficiente para {produto.nomedoproduto}")
           
+            if produto.quantidade < item.quantidade:
+                raise HTTPException(status_code=400, detail=f"Estoque insuficiente para {produto.nomedoproduto}")
+
             produto.quantidade -= item.quantidade
 
             preco_total = produto.preco * item.quantidade
