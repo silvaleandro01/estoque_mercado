@@ -13,6 +13,24 @@ from funcionarios import *
 from setor import criar_setor, listar_setores, buscar_setor, atualizar_setor, deletar_setor
 from logs import listar_logs
 
+from pydantic import BaseModel
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str = ""
+
+class PasswordResetRequest(BaseModel):
+    funcionario_id: int
+    nova_senha: str
+
+class SalarioUpdate(BaseModel):
+    funcionario_id: int
+    valor: float
+
+class FolhaFecharRequest(BaseModel):
+    mes: int
+    ano: int
+
 from estoque import EstoqueUpdate
 
 
@@ -24,12 +42,12 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-origins = ["*"]  
+origins = ["*", "null"]
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -42,12 +60,12 @@ def get_funcionario(authorization: str = Header(...)):
     return validar_funcionario_por_token(token)
 
 @app.post("/login")
-def login_rota(username: str = Body(...), password: str = Body("")):
-    return autenticar_funcionario(username, password)
+def login_rota(dados: LoginRequest):
+    return autenticar_funcionario(dados.username, dados.password)
 
 @app.post("/funcionarios/definir-senha")
-def definir_senha_rota(funcionario_id: int = Body(...), nova_senha: str = Body(...)):
-    return definir_nova_senha(funcionario_id, nova_senha)
+def definir_senha_rota(dados: PasswordResetRequest):
+    return definir_nova_senha(dados.funcionario_id, dados.nova_senha)
 
 @app.post("/funcionarios/criar")
 def criar(dados: FuncionarioCreate):
@@ -142,6 +160,36 @@ def relatorio_individual_rh(id: int, mes: int, ano: int, funcionario=Depends(get
     verificar_permissao(funcionario, "rh")
     return relatorio_mensal_funcionario(id, mes, ano)
 
+@app.post("/funcionarios/definir-salario")
+def rota_definir_salario(dados: SalarioUpdate, funcionario=Depends(get_funcionario)):
+    verificar_permissao(funcionario, "rh")
+    return definir_salario_funcionario(dados.funcionario_id, dados.valor)
+
+@app.get("/funcionarios/salario-historico/{id}")
+def rota_historico_salario(id: int, funcionario=Depends(get_funcionario)):
+    verificar_permissao(funcionario, "rh")
+    return buscar_historico_salarial(id)
+
+@app.post("/folha/fechar")
+def rota_fechar_folha(dados: FolhaFecharRequest, funcionario=Depends(get_funcionario)):
+    verificar_permissao(funcionario, "rh")
+    return fechar_folha_mensal(dados.mes, dados.ano)
+
+@app.get("/folha/meu-holerite")
+def rota_meu_holerite(mes: int, ano: int, funcionario=Depends(get_funcionario)):
+    res = buscar_holerite_funcionario(funcionario.id, mes, ano)
+    return res if res else {}
+
+@app.get("/folha/buscar-funcionario")
+def rota_admin_buscar_holerite(funcionario_id: int, mes: int, ano: int, funcionario=Depends(get_funcionario)):
+    verificar_permissao(funcionario, "rh")
+    res = buscar_holerite_funcionario(funcionario_id, mes, ano)
+    return res if res else {}
+
+@app.post("/folha/assinar/{id}")
+def rota_assinar_holerite(id: int, funcionario=Depends(get_funcionario)):
+    return assinar_holerite_funcionario(funcionario.id, id)
+
 @app.post("/setores/criar")
 def rota_criar_setor(setor: SetorCreate, funcionario=Depends(get_funcionario)):
     verificar_permissao(funcionario, "rh")
@@ -149,10 +197,12 @@ def rota_criar_setor(setor: SetorCreate, funcionario=Depends(get_funcionario)):
 
 @app.get("/setores/listar")
 def rota_listar_setores(funcionario=Depends(get_funcionario)):
+    verificar_permissao(funcionario, "rh")
     return listar_setores()
 
 @app.get("/setores/{id}")
 def rota_buscar_setor(id: int, funcionario=Depends(get_funcionario)):
+    verificar_permissao(funcionario, "rh")
     return buscar_setor(id)
 
 @app.put("/setores/{id}")

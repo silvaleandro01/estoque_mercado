@@ -2,20 +2,21 @@ from sqlmodel import Session, select
 from fastapi import HTTPException
 from database import Setor, SetorCreate, engine
 
-
 def criar_setor(dados: SetorCreate):
     with Session(engine) as session:
-
+        tipo_norm = dados.tipo.strip().lower()
+        nome_norm = dados.nome.strip()
+        
         existente = session.exec(
-            select(Setor).where(Setor.tipo == dados.tipo)
+            select(Setor).where(Setor.tipo == tipo_norm)
         ).first()
 
         if existente:
-            raise HTTPException(status_code=400, detail="Tipo de setor já existe")
+            raise HTTPException(status_code=400, detail=f"O tipo '{tipo_norm}' já está cadastrado.")
 
         novo_setor = Setor(
-            nome=dados.nome,
-            tipo=dados.tipo
+            nome=nome_norm,
+            tipo=tipo_norm
         )
 
         session.add(novo_setor)
@@ -28,32 +29,33 @@ def criar_setor(dados: SetorCreate):
             session.rollback()
             raise HTTPException(status_code=500, detail="Erro ao criar setor")
 
-
 def listar_setores():
     with Session(engine) as session:
         return session.exec(select(Setor)).all()
-
 
 def buscar_setor(id: int):
     with Session(engine) as session:
         setor = session.get(Setor, id)
 
+        if setor and setor.tipo == "admin":
+            raise HTTPException(status_code=400, detail="O setor 'admin' não pode ser excluído.")
         if not setor:
             raise HTTPException(status_code=404, detail="Setor não encontrado")
 
         return setor
-
-
 def atualizar_setor(id: int, dados: SetorCreate):
     with Session(engine) as session:
         setor = session.get(Setor, id)
 
+        if setor and setor.tipo == "admin":
+            raise HTTPException(status_code=400, detail="O setor 'admin' não pode ser excluído.")
         if not setor:
             raise HTTPException(status_code=404, detail="Setor não encontrado")
 
+        tipo_norm = dados.tipo.strip().lower()
         existente = session.exec(
             select(Setor).where(
-                Setor.tipo == dados.tipo,
+                Setor.tipo == tipo_norm,
                 Setor.id != id
             )
         ).first()
@@ -61,8 +63,8 @@ def atualizar_setor(id: int, dados: SetorCreate):
         if existente:
             raise HTTPException(status_code=400, detail="Tipo já está em uso")
 
-        setor.nome = dados.nome
-        setor.tipo = dados.tipo
+        setor.nome = dados.nome.strip()
+        setor.tipo = tipo_norm
 
         try:
             session.commit()
@@ -72,11 +74,12 @@ def atualizar_setor(id: int, dados: SetorCreate):
             session.rollback()
             raise HTTPException(status_code=500, detail="Erro ao atualizar setor")
 
-
 def deletar_setor(id: int):
     with Session(engine) as session:
         setor = session.get(Setor, id)
 
+        if setor and setor.tipo == "admin":
+            raise HTTPException(status_code=400, detail="O setor 'admin' não pode ser excluído.")
         if not setor:
             raise HTTPException(status_code=404, detail="Setor não encontrado")
 

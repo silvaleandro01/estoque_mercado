@@ -7,8 +7,6 @@ import os
 
 SECRET_KEY = os.getenv("SECRET_KEY", "chave_padrao_temporaria")
 ALGORITHM = "HS256"
-
-
 def criar_token(funcionario_id: int, is_admin: bool, horas: int = 12):
     if is_admin:
         expiracao = datetime.now(timezone.utc) + timedelta(days=365 * 100)
@@ -37,6 +35,7 @@ class FuncionarioCreate(SQLModel):
     genero: str
     possui_filhos: bool
     setor_id: int
+    valor_mensal: float = 0.0
 
 
 class Setor(SQLModel, table=True):
@@ -139,9 +138,47 @@ class Ponto(SQLModel, table=True):
     retorno_almoco: Optional[datetime] = None
     saida: Optional[datetime] = None
     
-    horas_trabalhadas: float = Field(default=0.0)  # Em horas decimais
+    horas_trabalhadas: float = Field(default=0.0)
     horas_extras: float = Field(default=0.0)
     horas_devidas: float = Field(default=0.0)
+class Salario(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    funcionario_id: int = Field(foreign_key="funcionario.id", index=True, unique=True)
+    valor_mensal: float = Field(default=0.0)
+    valor_hora: float = Field(default=0.0)
+
+class SalarioHistorico(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    funcionario_id: int = Field(foreign_key="funcionario.id", index=True)
+    valor_antigo: float
+    valor_novo: float
+    data_alteracao: datetime = Field(default_factory=lambda: datetime.now())
+
+class Holerite(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    funcionario_id: int = Field(foreign_key="funcionario.id", index=True)
+    mes: int
+    ano: int
+    data_competencia: date = Field(index=True)
+    valor_bruto: float
+    valor_liquido: float
+    salario_base: float
+    inss: float
+    irpf: float
+    fgts: float
+    vale_transporte: float
+    vale_refeicao: float
+    contribuicao_assistencial: float
+    ajuda_custo: float
+    adiantamento: float
+    horas_extras_valor: float
+    horas_trabalhadas: float
+    dias_trabalhados: int = 30
+    horas_extras: float
+    horas_devidas: float
+    assinado: bool = Field(default=False)
+    data_assinatura: Optional[datetime] = None
+    data_emissao: datetime = Field(default_factory=lambda: datetime.now())
 
 class SenhaHistorico(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -152,10 +189,12 @@ class SenhaHistorico(SQLModel, table=True):
     )
 
 
+# Substitua 'usuario', 'senha' e 'estoque_mercado' pelos seus dados do MySQL
+MYSQL_URL = "mysql+pymysql://root:SuaSenha@localhost:3306/estoque_mercado"
+
 engine = create_engine(
-    "sqlite:///./database.db",
-    echo=True,
-    connect_args={"check_same_thread": False}
+    MYSQL_URL,
+    echo=True
 )
 
 
@@ -197,18 +236,13 @@ def criar_admin_padrao():
         session.add(admin)
         session.commit()
         session.refresh(admin)
-
+        salario_admin = Salario(funcionario_id=admin.id, valor_mensal=0.0, valor_hora=0.0)
+        session.add(salario_admin)
         token, exp = criar_token(admin.id, True)
-
         admin.token = token
         admin.token_expiracao = exp
-
         session.add(admin)
         session.commit()
-        
-        print("\n" + "="*50)
-        print(f"TOKEN DO ADMINISTRADOR GERADO:\n{token}")
-        print("="*50 + "\n")
 
 
 def criar_banco():

@@ -47,11 +47,12 @@
 
     <div id="main-layout" class="container hidden">
         <nav class="sidebar">
-            <h3>Mercado 24h</h3>
+            <h3 id="sidebar-user-name">Mercado 24h</h3>
             <ul>
                 <li onclick="navegar('dashboard')">Dashboard</li>
                 <li onclick="navegar('estoque')">Estoque</li>
                 <li onclick="navegar('vendas')">Vendas</li>
+                <li onclick="navegar('vendas-dia')">Vendas do Dia</li>
                 <li onclick="navegar('pontos')">Ponto Eletrônico</li>
                 <li onclick="navegar('funcionarios')">Funcionários</li>
                 <li onclick="logout()" class="danger">Sair</li>
@@ -73,6 +74,10 @@
             </div>
             
             <div id="view-vendas" class="view hidden">
+                <!-- Injetado via JS -->
+            </div>
+
+            <div id="view-vendas-dia" class="view hidden">
                 <!-- Injetado via JS -->
             </div>
             
