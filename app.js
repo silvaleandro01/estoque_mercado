@@ -2,6 +2,12 @@ const API_URL = "http://127.0.0.1:8000";
 
 let carrinho = [];
 let pendingFuncionarioId = null;
+let editandoFuncionarioId = null;
+let editandoProdutoId = null;
+let editandoSetorId = null;
+let cacheFuncionarios = [];
+let cacheProdutos = [];
+let cacheSetores = [];
 
 function getToken() {
     return localStorage.getItem('api_token');
@@ -62,6 +68,7 @@ async function login() {
             localStorage.setItem('api_token', data?.token);
             localStorage.setItem('user_setor', data?.setor);
             localStorage.setItem('is_admin', data?.is_admin);
+            localStorage.setItem('user_cargo', data?.cargo);
             checkAuth();
         } else {
             alert("Servidor retornou um status desconhecido: " + data?.status);
@@ -142,20 +149,31 @@ function checkAuth() {
         mainLayout.classList.remove('hidden');
 
         const isAdmin = localStorage.getItem('is_admin') === 'true';
-        const setor = (localStorage.getItem('user_setor') || "").toLowerCase();
+        const setor = (localStorage.getItem('user_setor') || "").toLowerCase().trim();
+        const cargo = (localStorage.getItem('user_cargo') || "operacional").toLowerCase().trim();
+
+        // Log para depuração - ajuda a ver por que o menu sumiu
+        console.log(`Verificando acessos - Admin: ${isAdmin}, Setor: ${setor}, Cargo: ${cargo}`);
+
+        const isDiretor = cargo.includes('diretor');
+        const isGerente = cargo.includes('gerente');
+        const inVendas = setor.includes('vendas');
+        const inEstoque = setor.includes('estoque');
+        const inGerencia = setor.includes('gerencia');
+        const inRH = setor.includes('rh');
 
         document.querySelectorAll('.sidebar ul li').forEach(li => {
             const acao = li.getAttribute('onclick') || "";
             let visivel = true;
 
             if (acao.includes("'funcionarios'")) {
-                if (!isAdmin && setor !== 'rh') visivel = false;
+                if (!isAdmin && !inRH && !isDiretor) visivel = false;
             } else if (acao.includes("'estoque'")) {
-                if (!isAdmin && setor !== 'estoque' && setor !== 'gerencia') visivel = false;
+                if (!isAdmin && !inEstoque && !isDiretor && !inGerencia) visivel = false;
             } else if (acao.includes("'vendas-dia'")) {
-                if (!isAdmin && setor !== 'gerencia') visivel = false;
+                if (!isAdmin && !isDiretor && !inGerencia && !(isGerente && inVendas)) visivel = false;
             } else if (acao.includes("'vendas'")) {
-                if (!isAdmin && setor !== 'vendas' && setor !== 'gerencia') visivel = false;
+                if (!isAdmin && !inVendas && !isDiretor && !inGerencia) visivel = false;
             }
 
             if (visivel) li.classList.remove('hidden');
@@ -220,6 +238,7 @@ function carregarDadosView(viewId) {
     if (viewId === 'vendas') carregarVendas();
     if (viewId === 'vendas-dia') carregarVendasDia();
     if (viewId === 'funcionarios') carregarFuncionarios();
+    if (viewId === 'movimentacao') carregarMovimentacao();
     if (viewId === 'pontos') carregarPontos();
 }
 
@@ -228,16 +247,25 @@ async function carregarEstoque() {
     container.innerHTML = '<h3>Carregando...</h3>';
 
     const produtos = await apiFetch('/estoque/mostrar');
+    cacheProdutos = produtos || [];
     
     if (!produtos) {
         container.innerHTML = '<h3>Erro ao carregar estoque. Verifique suas permissões.</h3>';
         return;
     }
 
+    const isAdmin = localStorage.getItem('is_admin') === 'true';
+    const cargo = (localStorage.getItem('user_cargo') || "").toLowerCase().trim();
+    const setor = (localStorage.getItem('user_setor') || "").toLowerCase().trim();
+    
+    const isGerenciaGeral = isAdmin || setor === 'gerencia' || setor === 'admin';
+    const podeCadastrar = isGerenciaGeral || setor === 'estoque';
+    const podeEditar = isGerenciaGeral || (cargo.includes('gerente') && setor === 'estoque');
+
     let html = `
         <h2>Controle de Estoque</h2>
-        <div class="card">
-            <h3>Cadastrar Novo Produto</h3>
+        ${podeCadastrar ? `<div class="card">
+            <h3 id="form-estoque-title">Cadastrar Novo Produto</h3>
             <div class="form-group">
                 <input class="form-control" type="text" id="novo-prod-nome" placeholder="Nome do Produto">
                 <input class="form-control" type="text" id="novo-prod-codigo" placeholder="Código de Barras">
@@ -245,13 +273,15 @@ async function carregarEstoque() {
                 <input class="form-control" type="number" id="novo-prod-preco" placeholder="Preço (R$)">
                 <input class="form-control" type="text" id="novo-prod-cat" placeholder="Categoria">
             </div>
-            <button onclick="adicionarProduto()">Salvar</button>
-        </div>
+            <div id="estoque-btn-container">
+                <button class="btn-success" onclick="adicionarProduto()">Salvar Produto</button>
+            </div>
+        </div>` : ''}
         <div class="card">
         <h3>Produtos Cadastrados</h3>
         <table>
             <thead>
-                <tr><th>ID</th><th>Produto</th><th>Cód. Barras</th><th>Qtd</th><th>Preço</th></tr>
+                <tr><th>ID</th><th>Produto</th><th>Cód. Barras</th><th>Qtd</th><th>Preço</th>${podeEditar ? '<th>Ações</th>' : ''}</tr>
             </thead>
             <tbody>
     `;
@@ -264,12 +294,70 @@ async function carregarEstoque() {
                 <td>${p.codigodebarras}</td>
                 <td>${p.quantidade}</td>
                 <td>R$ ${p.preco}</td>
+                ${podeEditar ? `<td><button class="btn" style="padding: 5px; font-size: 0.7rem; background: #ff9800; color: white;" onclick="prepararEdicaoEstoque(${p.id})">Editar</button></td>` : ''}
             </tr>
         `;
     });
 
     html += '</tbody></table></div>';
     container.innerHTML = html;
+}
+
+async function carregarMovimentacao() {
+    const container = document.getElementById('view-movimentacao');
+    container.innerHTML = '<h3>Carregando histórico...</h3>';
+    
+    const logs = await apiFetch('/logs');
+    if (!logs) return;
+
+    let html = `
+        <h2>Movimentação de Estoque</h2>
+        <div class="card">
+            <h3>Histórico de Ações</h3>
+            <table>
+                <thead>
+                    <tr><th>Data/Hora</th><th>Funcionário ID</th><th>Ação</th></tr>
+                </thead>
+                <tbody>
+                    ${logs.map(l => `
+                        <tr>
+                            <td>${new Date(l.data_hora).toLocaleString()}</td>
+                            <td>${l.funcionario_id}</td>
+                            <td>${l.tipo_movimentacao}</td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        </div>`;
+    container.innerHTML = html;
+}
+
+function prepararEdicaoEstoque(id) {
+    const p = cacheProdutos.find(prod => prod.id === id);
+    if (!p) return;
+
+    editandoProdutoId = p.id;
+    document.getElementById('form-estoque-title').innerText = `Editando: ${p.nomedoproduto}`;
+    document.getElementById('novo-prod-nome').value = p.nomedoproduto;
+    document.getElementById('novo-prod-codigo').value = p.codigodebarras;
+    document.getElementById('novo-prod-qtd').value = p.quantidade;
+    document.getElementById('novo-prod-preco').value = p.preco;
+    document.getElementById('novo-prod-cat').value = p.categoria;
+
+    const btnContainer = document.getElementById('estoque-btn-container');
+    btnContainer.innerHTML = `
+        <button class="btn-success" onclick="adicionarProduto()">Atualizar Produto</button>
+        <button class="btn" onclick="cancelarEdicaoEstoque()">Cancelar</button>
+    `;
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function cancelarEdicaoEstoque() {
+    editandoProdutoId = null;
+    document.getElementById('form-estoque-title').innerText = "Cadastrar Novo Produto";
+    const btnContainer = document.getElementById('estoque-btn-container');
+    btnContainer.innerHTML = `<button class="btn-success" onclick="adicionarProduto()">Salvar Produto</button>`;
+    carregarEstoque();
 }
 
 async function adicionarProduto() {
@@ -282,14 +370,22 @@ async function adicionarProduto() {
         titulo: document.getElementById('novo-prod-nome').value
     };
 
-    const res = await apiFetch('/estoque/inserir', {
-        method: 'POST',
-        body: JSON.stringify(dados)
-    });
+    let res;
+    if (editandoProdutoId) {
+        res = await apiFetch(`/estoque/atualizar/${editandoProdutoId}`, {
+            method: 'PUT',
+            body: JSON.stringify(dados)
+        });
+    } else {
+        res = await apiFetch('/estoque/inserir', {
+            method: 'POST',
+            body: JSON.stringify(dados)
+        });
+    }
 
     if (res) {
-        alert('Produto adicionado!');
-        carregarEstoque();
+        alert(editandoProdutoId ? 'Produto atualizado!' : 'Produto adicionado!');
+        cancelarEdicaoEstoque();
     }
 }
 
@@ -433,6 +529,9 @@ async function carregarFuncionarios() {
         apiFetch(`/pontos/rh/geral?mes=${mes}&ano=${ano}`)
     ]);
     
+    cacheFuncionarios = funcionarios || [];
+    cacheSetores = setores || [];
+
     if (!funcionarios) {
         container.innerHTML = `<div class="card"><h3>Acesso Negado</h3><p>Apenas RH ou Admin podem ver isso.</p></div>`;
         return;
@@ -465,7 +564,12 @@ async function carregarFuncionarios() {
                             <td>${s.id}</td>
                             <td>${s.nome}</td>
                             <td>${s.tipo.charAt(0).toUpperCase() + s.tipo.slice(1)}</td>
-                            <td>${s.tipo !== 'admin' ? `<button class="btn-danger" style="padding: 5px 10px; font-size: 0.8rem;" onclick="removerSetor(${s.id})">Excluir</button>` : `<button class="btn-danger" style="padding: 5px 10px; font-size: 0.8rem;" disabled>Admin</button>`}</td>
+                            <td>
+                                ${s.tipo !== 'admin' ? `
+                                    <button class="btn" style="padding: 5px 10px; font-size: 0.8rem; background: #ff9800; color: white;" onclick="prepararEdicaoSetor(${s.id})">Editar</button>
+                                    <button class="btn-danger" style="padding: 5px 10px; font-size: 0.8rem;" onclick="removerSetor(${s.id})">Excluir</button>
+                                ` : `<button class="btn-danger" style="padding: 5px 10px; font-size: 0.8rem;" disabled>Admin</button>`}
+                            </td>
                         </tr>
                     `).join('')}
                 </tbody>
@@ -473,19 +577,22 @@ async function carregarFuncionarios() {
         </div>
 
         <div class="card">
-            <h3>Cadastrar Novo Setor</h3>
+            <h3 id="form-setor-title">Cadastrar Novo Setor</h3>
             <div class="form-group">
                 <input class="form-control" type="text" id="setor-nome-novo" placeholder="Nome do Setor (ex: Recursos Humanos)">
                 <input class="form-control" type="text" id="setor-tipo-novo" placeholder="Tipo (ex: rh, estoque, vendas, gerencia)">
             </div>
-            <button onclick="criarSetor()">Cadastrar Setor</button>
+            <div id="setor-btn-container">
+                <button onclick="criarSetor()">Cadastrar Setor</button>
+            </div>
         </div>
         
         <div class="card">
-            <h3>Cadastrar Novo Funcionário</h3>
+            <h3 id="form-func-title">Cadastrar Novo Funcionário</h3>
             <div class="form-group">
                 <input class="form-control" type="text" id="func-nome" placeholder="Nome">
                 <input class="form-control" type="text" id="func-sobrenome" placeholder="Sobrenome">
+                <label style="font-size:0.8rem; color: #666;">Data de Nascimento:</label>
                 <input class="form-control" type="date" id="func-nasc" placeholder="Data Nasc.">
                 <select class="form-control" id="func-genero">
                     <option value="masculino">Masculino</option>
@@ -500,16 +607,27 @@ async function carregarFuncionarios() {
                     <option value="">Selecione o Setor</option>
                     ${listaSetores.filter(s => s.tipo !== 'admin').map(s => `<option value="${s.id}">${s.nome} (${s.tipo})</option>`).join('')}
                 </select>
+                <select class="form-control" id="func-cargo">
+                    <option value="operacional">Operacional</option>
+                    <option value="gerente">Gerente de Setor</option>
+                    <option value="diretor">Diretor de Mercado</option>
+                </select>
+                <div style="display:flex; align-items:center; gap:5px; padding: 5px;">
+                    <input type="checkbox" id="func-admin" style="width: 20px; height: 20px;">
+                    <label for="func-admin" style="font-size: 0.9rem;">Privilégios de Administrador</label>
+                </div>
                 <input class="form-control" type="number" id="func-salario" placeholder="Salário Mensal (R$)">
             </div>
-            <button onclick="criarFuncionario()">Cadastrar</button>
+            <div id="func-btn-container">
+                <button class="btn-success" onclick="criarFuncionario()" id="btn-salvar-func">Cadastrar</button>
+            </div>
         </div>
 
         <div class="card">
             <h3>Equipe</h3>
             <table>
                 <thead>
-                    <tr><th>ID</th><th>Nome</th><th>Setor</th><th>Filhos</th><th>Admin</th><th>Ações</th></tr>
+                    <tr><th>ID</th><th>Nome</th><th>Setor</th><th>Cargo</th><th>Admin</th><th>Ações</th></tr>
                 </thead>
                 <tbody>`;
 
@@ -520,9 +638,11 @@ async function carregarFuncionarios() {
                 <td>${f.id}</td>
                 <td>${f.nome} ${f.sobrenome}</td>
                 <td>${setor ? setor.nome : f.setor_id}</td>
-                <td>${f.possui_filhos ? 'Sim' : 'Não'}</td>
+                <td>${f.cargo.charAt(0).toUpperCase() + f.cargo.slice(1)}</td>
                 <td>${f.is_admin ? 'Sim' : 'Não'}</td>
                 <td>
+                    <button class="btn" style="padding: 5px 10px; font-size: 0.8rem; background: #ff9800; color: white;" 
+                        onclick="prepararEdicaoFuncionario(${f.id})">Editar</button>
                     <button class="btn" style="padding: 5px 10px; font-size: 0.8rem;" 
                         onclick="verRelatorioPontoIndividual(${f.id}, '${f.nome} ${f.sobrenome}')">Ver Ponto Mensal</button>
                     <button class="btn" style="padding: 5px 10px; font-size: 0.8rem; background: #673ab7; color: white;" 
@@ -563,6 +683,49 @@ async function carregarFuncionarios() {
     <div id="gerenciamento-salario-individual" class="hidden"></div>`;
 
     container.innerHTML = html;
+}
+
+function prepararEdicaoFuncionario(id) {
+    const f = cacheFuncionarios.find(emp => emp.id === id);
+    if (!f) return alert("Erro ao localizar dados do funcionário.");
+
+    editandoFuncionarioId = f.id;
+    document.getElementById('form-func-title').innerText = `Editando: ${f.nome} ${f.sobrenome}`;
+    
+    document.getElementById('func-nome').value = f.nome;
+    document.getElementById('func-sobrenome').value = f.sobrenome;
+    document.getElementById('func-nasc').value = f.data_nascimento;
+    document.getElementById('func-genero').value = f.genero;
+    document.getElementById('func-filhos').value = f.possui_filhos.toString();
+    document.getElementById('func-setor').value = f.setor_id;
+    document.getElementById('func-cargo').value = f.cargo;
+    document.getElementById('func-admin').checked = f.is_admin;
+    
+    // Esconde campo de salário na edição rápida (usa-se o botão $ Salário para isso)
+    document.getElementById('func-salario').style.display = 'none';
+    
+    const btnContainer = document.getElementById('func-btn-container');
+    btnContainer.innerHTML = `
+        <button class="btn-success" onclick="criarFuncionario()">Salvar Alterações</button>
+        <button class="btn" onclick="cancelarEdicaoFuncionario()">Cancelar</button>
+    `;
+    
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function cancelarEdicaoFuncionario() {
+    editandoFuncionarioId = null;
+    document.getElementById('form-func-title').innerText = "Cadastrar Novo Funcionário";
+    
+    document.getElementById('func-nome').value = '';
+    document.getElementById('func-sobrenome').value = '';
+    document.getElementById('func-nasc').value = '';
+    document.getElementById('func-salario').value = '';
+    document.getElementById('func-salario').style.display = 'block';
+    document.getElementById('func-admin').checked = false;
+    
+    const btnContainer = document.getElementById('func-btn-container');
+    btnContainer.innerHTML = `<button class="btn-success" onclick="criarFuncionario()" id="btn-salvar-func">Cadastrar</button>`;
 }
 
 async function fecharFolhaMensal() {
@@ -710,6 +873,32 @@ function fecharJanelaIndividual(containerId) {
     if (dashboard) dashboard.classList.remove('hidden');
 }
 
+function prepararEdicaoSetor(id) {
+    const s = cacheSetores.find(sec => sec.id === id);
+    if (!s) return;
+
+    editandoSetorId = s.id;
+    document.getElementById('form-setor-title').innerText = `Editando Setor: ${s.nome}`;
+    document.getElementById('setor-nome-novo').value = s.nome;
+    document.getElementById('setor-tipo-novo').value = s.tipo;
+
+    const btnContainer = document.getElementById('setor-btn-container');
+    btnContainer.innerHTML = `
+        <button class="btn-success" onclick="criarSetor()">Salvar Alterações</button>
+        <button class="btn" onclick="cancelarEdicaoSetor()">Cancelar</button>
+    `;
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function cancelarEdicaoSetor() {
+    editandoSetorId = null;
+    document.getElementById('form-setor-title').innerText = "Cadastrar Novo Setor";
+    document.getElementById('setor-nome-novo').value = '';
+    document.getElementById('setor-tipo-novo').value = '';
+    const btnContainer = document.getElementById('setor-btn-container');
+    btnContainer.innerHTML = `<button onclick="criarSetor()">Cadastrar Setor</button>`;
+}
+
 async function criarSetor() {
     const dados = {
         nome: document.getElementById('setor-nome-novo').value,
@@ -721,15 +910,22 @@ async function criarSetor() {
         return;
     }
 
-    const res = await apiFetch('/setores/criar', {
-        method: 'POST',
-        body: JSON.stringify(dados)
-    });
+    let res;
+    if (editandoSetorId) {
+        res = await apiFetch(`/setores/${editandoSetorId}`, {
+            method: 'PUT',
+            body: JSON.stringify(dados)
+        });
+    } else {
+        res = await apiFetch('/setores/criar', {
+            method: 'POST',
+            body: JSON.stringify(dados)
+        });
+    }
 
     if (res) {
-        alert('Setor criado com sucesso!');
-        document.getElementById('setor-nome-novo').value = '';
-        document.getElementById('setor-tipo-novo').value = '';
+        alert(editandoSetorId ? 'Setor atualizado com sucesso!' : 'Setor criado com sucesso!');
+        cancelarEdicaoSetor();
         carregarFuncionarios();
     }
 }
@@ -757,16 +953,27 @@ async function criarFuncionario() {
         genero: document.getElementById('func-genero').value,
         possui_filhos: document.getElementById('func-filhos').value === 'true',
         setor_id: parseInt(setorId),
+        cargo: document.getElementById('func-cargo').value,
+        is_admin: document.getElementById('func-admin').checked,
         valor_mensal: parseFloat(document.getElementById('func-salario').value) || 0
     };
 
-    const res = await apiFetch('/funcionarios/criar', {
-        method: 'POST',
-        body: JSON.stringify(dados)
-    });
+    let res;
+    if (editandoFuncionarioId) {
+        res = await apiFetch(`/funcionarios/atualizar/${editandoFuncionarioId}`, {
+            method: 'PUT',
+            body: JSON.stringify(dados)
+        });
+    } else {
+        res = await apiFetch('/funcionarios/criar', {
+            method: 'POST',
+            body: JSON.stringify(dados)
+        });
+    }
 
     if (res) {
-        alert('Funcionário cadastrado!');
+        alert(editandoFuncionarioId ? 'Cadastro atualizado!' : 'Funcionário cadastrado!');
+        cancelarEdicaoFuncionario();
         carregarFuncionarios();
     }
 }

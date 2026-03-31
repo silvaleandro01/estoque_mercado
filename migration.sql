@@ -14,6 +14,7 @@ CREATE TABLE `funcionario` (
     `sobrenome` VARCHAR(100) NOT NULL,
     `data_nascimento` DATE NOT NULL,
     `genero` VARCHAR(20) NOT NULL,
+    `cargo` VARCHAR(50) NOT NULL DEFAULT 'operacional',
     `possui_filhos` BOOLEAN NOT NULL DEFAULT FALSE,
     `setor_id` INT NOT NULL,
     `is_admin` BOOLEAN NOT NULL DEFAULT FALSE,

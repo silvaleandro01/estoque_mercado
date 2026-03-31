@@ -134,7 +134,8 @@ def autenticar_funcionario(username: str, password: str = ""):
             "status": "sucesso", 
             "token": token,
             "is_admin": funcionario.is_admin,
-            "setor": setor.tipo if setor else None
+            "setor": setor.tipo.lower().strip() if setor else None,
+            "cargo": funcionario.cargo
         }
 
 def definir_nova_senha(funcionario_id: int, nova_senha: str):
@@ -175,11 +176,21 @@ def definir_nova_senha(funcionario_id: int, nova_senha: str):
             "status": "sucesso", 
             "token": token, 
             "is_admin": funcionario.is_admin,
-            "setor": setor.tipo if setor else None
+            "setor": setor.tipo.lower().strip() if setor else None,
+            "cargo": funcionario.cargo
         }
 
-def listar_funcionarios():
+def listar_funcionarios(quem_solicitou: Funcionario):
     with Session(engine) as session:
+        if quem_solicitou.is_admin:
+            return session.exec(select(Funcionario)).all()
+        
+        # Se for Diretor, vê todos exceto os do RH
+        if quem_solicitou.cargo.lower().strip() == "diretor":
+            setor_rh = session.exec(select(Setor).where(Setor.tipo == "rh")).first()
+            rh_id = setor_rh.id if setor_rh else -1
+            return session.exec(select(Funcionario).where(Funcionario.setor_id != rh_id)).all()
+            
         return session.exec(select(Funcionario)).all()
 
 def buscar_funcionario(funcionario_id: int):
@@ -199,6 +210,7 @@ def atualizar_funcionario(funcionario_id: int, dados: FuncionarioCreate):
             raise HTTPException(status_code=404, detail="Funcionário não encontrado")
 
         update_data = dados.model_dump()
+        update_data.pop("valor_mensal", None) # Remove campo que não pertence à tabela Funcionario
 
         if "data_nascimento" in update_data:
             if isinstance(update_data["data_nascimento"], str):
@@ -253,20 +265,53 @@ def validar_funcionario_por_token(token: str):
 
         return funcionario
 
-def verificar_permissao(funcionario: Funcionario, setores_permitidos: str | list[str]):
+def verificar_permissao(funcionario: Funcionario, escopo: str):
+    # Admin sempre tem acesso a tudo
     if funcionario.is_admin:
         return True
 
-    if isinstance(setores_permitidos, str):
-        setores_permitidos = [setores_permitidos]
-
     with Session(engine) as session:
         setor = session.get(Setor, funcionario.setor_id)
+        if not setor:
+            raise HTTPException(status_code=403, detail="Setor não encontrado")
 
-        if not setor or setor.tipo.lower() not in [s.lower() for s in setores_permitidos]:
-             raise HTTPException(status_code=403, detail="Acesso negado")
+        s_tipo = setor.tipo.lower().strip()
+        f_cargo = funcionario.cargo.lower().strip()
 
-    return True
+        # 1. ADMIN / GERÊNCIA GERAL: Acesso total irrestrito via flag ou setor
+        if funcionario.is_admin or s_tipo == "admin" or s_tipo == "gerencia":
+            return True
+
+        # 2. DIRETOR: Acesso de visualização (Leitura) a quase tudo - Sem RH
+        if "diretor" in f_cargo:
+            if escopo in ["vendas", "vendas_dia", "estoque_ver", "equipe", "movimentacao"]:
+                return True
+            return False
+
+        # 3. SEGURANÇA DE VENDAS (Pablo Mari e Equipe)
+        if escopo in ["vendas", "vendas_dia"]:
+            if s_tipo != "vendas":
+                return False
+            if escopo == "vendas_dia":
+                return "gerente" in f_cargo
+            return True
+
+        # 4. SEGURANÇA DE ESTOQUE (Gerente de Estoque e Equipe)
+        if escopo in ["estoque_ver", "estoque_inserir", "estoque_editar", "movimentacao"]:
+            if s_tipo != "estoque":
+                return False
+            if escopo == "estoque_editar":
+                return "gerente" in f_cargo
+            return True
+
+        # 5. SEGURANÇA DE RH / EQUIPE
+        if escopo == "rh":
+            return s_tipo == "rh"
+        
+        if escopo == "equipe":
+            return s_tipo == "rh"
+
+    raise HTTPException(status_code=403, detail="Acesso negado para esta operação")
 
 
 def renovar_token(funcionario_id: int):

@@ -1,6 +1,6 @@
 from sqlmodel import Session, select
 from fastapi import HTTPException
-from database import Setor, SetorCreate, engine
+from database import Setor, SetorCreate, engine, Funcionario
 
 def criar_setor(dados: SetorCreate):
     with Session(engine) as session:
@@ -38,7 +38,7 @@ def buscar_setor(id: int):
         setor = session.get(Setor, id)
 
         if setor and setor.tipo == "admin":
-            raise HTTPException(status_code=400, detail="O setor 'admin' não pode ser excluído.")
+            raise HTTPException(status_code=400, detail="O setor 'admin' é restrito.")
         if not setor:
             raise HTTPException(status_code=404, detail="Setor não encontrado")
 
@@ -48,7 +48,7 @@ def atualizar_setor(id: int, dados: SetorCreate):
         setor = session.get(Setor, id)
 
         if setor and setor.tipo == "admin":
-            raise HTTPException(status_code=400, detail="O setor 'admin' não pode ser excluído.")
+            raise HTTPException(status_code=400, detail="O setor 'admin' não pode ser editado.")
         if not setor:
             raise HTTPException(status_code=404, detail="Setor não encontrado")
 
@@ -82,6 +82,11 @@ def deletar_setor(id: int):
             raise HTTPException(status_code=400, detail="O setor 'admin' não pode ser excluído.")
         if not setor:
             raise HTTPException(status_code=404, detail="Setor não encontrado")
+
+        # Verifica se existem funcionários vinculados a este setor
+        vinculados = session.exec(select(Funcionario).where(Funcionario.setor_id == id)).first()
+        if vinculados:
+            raise HTTPException(status_code=400, detail="Não é possível excluir um setor que possui funcionários vinculados. Mova todos os funcionários para outro setor antes de excluir.")
 
         try:
             session.delete(setor)

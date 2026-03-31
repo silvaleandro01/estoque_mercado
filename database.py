@@ -1,6 +1,7 @@
 from typing import Optional
 from datetime import datetime, timezone, date, timedelta
 from sqlmodel import Field, SQLModel, create_engine, Session, select
+from sqlalchemy import text
 from jose import jwt
 import os
 
@@ -31,17 +32,19 @@ class SetorCreate(SQLModel):
 class FuncionarioCreate(SQLModel):
     nome: str
     sobrenome: str
-    data_nascimento: date
+    data_nascimento: str
     genero: str
     possui_filhos: bool
     setor_id: int
+    cargo: str = "operacional"
+    is_admin: bool = False
     valor_mensal: float = 0.0
 
 
 class Setor(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     nome: str
-    tipo: str = Field(index=True, unique=True)
+    tipo: str = Field(index=True, unique=True, max_length=50)
 
 
 class Funcionario(SQLModel, table=True):
@@ -51,6 +54,7 @@ class Funcionario(SQLModel, table=True):
     sobrenome: str
     data_nascimento: date
     genero: str
+    cargo: str = Field(default="operacional", max_length=50)
     possui_filhos: bool
 
     setor_id: int = Field(foreign_key="setor.id", index=True)
@@ -60,7 +64,7 @@ class Funcionario(SQLModel, table=True):
     password_hash: Optional[str] = Field(default=None)
     last_password_change: Optional[datetime] = Field(default=None)
 
-    token: Optional[str] = Field(default=None, index=True)
+    token: Optional[str] = Field(default=None, index=True, max_length=255)
     token_expiracao: Optional[datetime] = Field(default=None)
 
 
@@ -71,7 +75,7 @@ class Estoque(SQLModel, table=True):
     nomedoproduto: str
     quantidade: int
     preco: float
-    codigodebarras: str = Field(unique=True, index=True)
+    codigodebarras: str = Field(unique=True, index=True, max_length=100)
     categoria: str
 
     funcionario_id: Optional[int] = Field(
@@ -120,7 +124,8 @@ class Log(SQLModel, table=True):
 
     tipo_movimentacao: str = Field(
         index=True,
-        nullable=False
+        nullable=False,
+        max_length=255
     )
 
     data_hora: datetime = Field(
@@ -190,11 +195,13 @@ class SenhaHistorico(SQLModel, table=True):
 
 
 # Substitua 'usuario', 'senha' e 'estoque_mercado' pelos seus dados do MySQL
-MYSQL_URL = "mysql+pymysql://root:SuaSenha@localhost:3306/estoque_mercado"
+MYSQL_URL = "mysql+pymysql://root:SuaNovaSenhaAqui@localhost:3306/estoque_mercado"
 
 engine = create_engine(
     MYSQL_URL,
-    echo=True
+    echo=True,
+    pool_recycle=3600,
+    pool_pre_ping=True
 )
 
 
@@ -229,6 +236,7 @@ def criar_admin_padrao():
             data_nascimento=date(2000, 1, 1),
             genero="outro",
             possui_filhos=False,
+            cargo="diretor",
             setor_id=setor_admin.id,
             is_admin=True
         )
@@ -246,5 +254,22 @@ def criar_admin_padrao():
 
 
 def criar_banco():
+    # Tenta criar o banco de dados caso ele não exista no MySQL
+    # Conectamos ao servidor sem especificar o nome do banco de dados inicialmente
+    url_servidor = "mysql+pymysql://root:SuaNovaSenhaAqui@localhost:3306/"
+    engine_servidor = create_engine(url_servidor)
+    with engine_servidor.connect() as conn:
+        conn.execute(text("CREATE DATABASE IF NOT EXISTS estoque_mercado"))
+        conn.commit()
+    engine_servidor.dispose()
+
     SQLModel.metadata.create_all(engine)
+
+    # Garante que a coluna 'cargo' exista (migração manual automática)
+    with engine.connect() as conn:
+        colunas = conn.execute(text("SHOW COLUMNS FROM funcionario LIKE 'cargo'")).fetchone()
+        if not colunas:
+            conn.execute(text("ALTER TABLE funcionario ADD COLUMN cargo VARCHAR(50) NOT NULL DEFAULT 'operacional'"))
+            conn.commit()
+
     criar_admin_padrao()
