@@ -13,7 +13,7 @@ from funcionarios import *
 from setor import criar_setor, listar_setores, buscar_setor, atualizar_setor, deletar_setor
 from logs import listar_logs
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 class LoginRequest(BaseModel):
     username: str
@@ -30,6 +30,12 @@ class SalarioUpdate(BaseModel):
 class FolhaFecharRequest(BaseModel):
     mes: int
     ano: int
+
+class HierarquiaRequest(BaseModel):
+    funcionario_id: int
+    bate_ponto: bool
+    cargo_confianca: bool
+    cargo: str
 
 from estoque import EstoqueUpdate
 
@@ -51,7 +57,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 def get_funcionario(authorization: str = Header(...)):
     if not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Token inválido")
@@ -143,14 +148,16 @@ def bater_ponto(
     hora_manual: datetime = None, 
     funcionario=Depends(get_funcionario)
 ):
-    if funcionario.is_admin:
-        raise HTTPException(status_code=400, detail="Admin não bate ponto")
+    if funcionario.is_admin or "diretor" in funcionario.cargo.lower():
+        raise HTTPException(
+            status_code=400, 
+            detail="Registro de ponto negado."
+        )
     return registrar_ponto_funcionario(funcionario.id, data_manual, hora_manual)
 
 @app.get("/pontos/status")
 def status_ponto(funcionario=Depends(get_funcionario)):
     return obter_status_ponto(funcionario.id)
-
 @app.get("/pontos/meu-relatorio")
 def meu_relatorio(mes: int, ano: int, funcionario=Depends(get_funcionario)):
     return relatorio_mensal_funcionario(funcionario.id, mes, ano)
@@ -224,3 +231,8 @@ def rota_deletar_setor(id: int, funcionario=Depends(get_funcionario)):
 def ver_logs(funcionario=Depends(get_funcionario)):
     verificar_permissao(funcionario, "movimentacao")
     return listar_logs()
+
+@app.post("/funcionarios/configurar-hierarquia")
+def rota_configurar_hierarquia(dados: HierarquiaRequest, funcionario=Depends(get_funcionario)):
+    verificar_permissao(funcionario, "hierarquia")
+    return configurar_hierarquia_funcionario(dados.funcionario_id, dados)

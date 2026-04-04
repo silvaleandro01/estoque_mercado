@@ -152,7 +152,7 @@ function checkAuth() {
         const setor = (localStorage.getItem('user_setor') || "").toLowerCase().trim();
         const cargo = (localStorage.getItem('user_cargo') || "operacional").toLowerCase().trim();
 
-        const isDiretor = cargo.includes('direto');
+        const isDiretor = cargo === 'diretor';
         const isGerente = cargo.includes('gerente');
         const inVendas = setor.includes('vendas');
         const inEstoque = setor.includes('estoque');
@@ -165,9 +165,9 @@ function checkAuth() {
             if (acao.includes("'funcionarios'")) {
                 if (!isAdmin && !inRH && !isDiretor && !inGerencia) visivel = false;
             } else if (acao.includes("'estoque'")) {
-                if (!isAdmin && !inEstoque && !isDiretor && !inGerencia && !inRH) visivel = false;
+                if (!isAdmin && !inEstoque && !isDiretor && !inGerencia) visivel = false;
             } else if (acao.includes("'vendas-dia'")) {
-                if (!isAdmin && !isDiretor && !inRH && !(inVendas && cargo.includes('gerente'))) visivel = false;
+                if (!isAdmin && !isDiretor && !(inVendas && isGerente)) visivel = false;
             } else if (acao.includes("'vendas'")) {
                 if (!isAdmin && !inVendas && !inGerencia) visivel = false;
             }
@@ -579,8 +579,8 @@ async function carregarFuncionarios() {
         <div class="card">
             <h3 id="form-setor-title">Cadastrar Novo Setor</h3>
             <div class="form-group">
-                <input class="form-control" type="text" id="setor-nome-novo" placeholder="Nome do Setor (ex: Vendas)">
-                <input class="form-control" type="text" id="setor-tipo-novo" placeholder="Tipo (ex: vendas, estoque, rh)">
+                <input class="form-control" type="text" id="setor-nome-novo" placeholder="Nome do Setor (ex: Recursos Humanos)">
+                <input class="form-control" type="text" id="setor-tipo-novo" placeholder="Tipo (ex: rh, estoque, vendas, gerencia)">
             </div>
             <div id="setor-btn-container">
                 <button onclick="criarSetor()">Cadastrar Setor</button>
@@ -610,8 +610,8 @@ async function carregarFuncionarios() {
                 </select>
                 <select class="form-control" id="func-cargo">
                     <option value="operacional">Operacional</option>
-                    <option value="gerente de setor">Gerente de Setor</option>
-                    <option value="diretoria">Diretoria</option>
+                    <option value="gerente">Gerente de Setor</option>
+                    <option value="diretor">Diretor de Mercado</option>
                 </select>
                 <div style="display:flex; align-items:center; gap:5px; padding: 5px;">
                     <input type="checkbox" id="func-admin" style="width: 20px; height: 20px;">
@@ -961,7 +961,7 @@ async function criarFuncionario() {
         cargo: document.getElementById('func-cargo').value,
         is_admin: document.getElementById('func-admin').checked,
         bate_ponto: document.getElementById('func-bate-ponto').checked,
-        cargo_confianca: document.getElementById('func-cargo').value.includes('direto'),
+        cargo_confianca: document.getElementById('func-cargo').value === 'diretor',
         valor_mensal: parseFloat(document.getElementById('func-salario').value) || 0
     };
 
@@ -1004,10 +1004,8 @@ async function carregarPontos() {
         apiFetch(`/folha/meu-holerite?mes=${mes}&ano=${ano}`, {}, true)
     ]);
     
-    const isAdmin = localStorage.getItem('is_admin') === 'true';
     const userCargo = (localStorage.getItem('user_cargo') || "").toLowerCase();
-    const isDiretoria = userCargo.includes('direto');
-    const podeBaterPonto = !isDiretoria && !isAdmin;
+    const podeBaterPonto = userCargo !== 'diretor' && localStorage.getItem('is_admin') !== 'true';
     const hojeStr = agora.toLocaleDateString();
 
     if (relatorio && relatorio.funcionario) {

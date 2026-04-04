@@ -18,9 +18,11 @@ CREATE TABLE `funcionario` (
     `possui_filhos` BOOLEAN NOT NULL DEFAULT FALSE,
     `setor_id` INT NOT NULL,
     `is_admin` BOOLEAN NOT NULL DEFAULT FALSE,
+    `bate_ponto` BOOLEAN NOT NULL DEFAULT TRUE,
+    `cargo_confianca` BOOLEAN NOT NULL DEFAULT FALSE,
     `password_hash` VARCHAR(255),
     `last_password_change` DATETIME,
-    `token` VARCHAR(255), -- Reduzido para 255 para garantir compatibilidade de index
+    `token` VARCHAR(255),
     `token_expiracao` DATETIME,
     KEY `idx_token` (`token`),
     CONSTRAINT `fk_func_setor` FOREIGN KEY (`setor_id`) REFERENCES `setor` (`id`)

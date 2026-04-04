@@ -52,7 +52,7 @@ def vendas_do_dia():
             "dat": hoje,
             "total_vendido": total
         }
-  
+
 def listar_vendas():
     with Session(engine) as session:
         return session.exec(select(Venda)).all()

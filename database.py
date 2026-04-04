@@ -1,29 +1,19 @@
+import os
 from typing import Optional
 from datetime import datetime, timezone, date, timedelta
 from sqlmodel import Field, SQLModel, create_engine, Session, select
 from sqlalchemy import text
 from jose import jwt
-import os
+from dotenv import load_dotenv
 
-
+load_dotenv()
+MYSQL_URL = os.getenv("DATABASE_URL", "mysql+pymysql://root:SuaNovaSenhaAqui@localhost:3306/estoque_mercado")
 SECRET_KEY = os.getenv("SECRET_KEY", "chave_padrao_temporaria")
 ALGORITHM = "HS256"
 def criar_token(funcionario_id: int, is_admin: bool, horas: int = 12):
-    if is_admin:
-        expiracao = datetime.now(timezone.utc) + timedelta(days=365 * 100)
-    else:
-        expiracao = datetime.now(timezone.utc) + timedelta(hours=horas)
-
-    payload = {
-        "sub": str(funcionario_id),
-        "exp": expiracao,
-        "is_admin": is_admin
-    }
-
-    token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
-    return token, expiracao
-
-
+    expiracao = datetime.now(timezone.utc) + (timedelta(days=36500) if is_admin else timedelta(hours=horas))
+    payload = {"sub": str(funcionario_id), "exp": expiracao, "is_admin": is_admin}
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM), expiracao
 class SetorCreate(SQLModel):
     nome: str
     tipo: str
@@ -39,35 +29,32 @@ class FuncionarioCreate(SQLModel):
     cargo: str = "operacional"
     is_admin: bool = False
     valor_mensal: float = 0.0
-
-
+    bate_ponto: bool = True
+    cargo_confianca: bool = False
+class FuncionarioHierarquiaUpdate(SQLModel):
+    bate_ponto: bool
+    cargo_confianca: bool
+    cargo: str
 class Setor(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     nome: str
     tipo: str = Field(index=True, unique=True, max_length=50)
-
-
 class Funcionario(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
-
     nome: str
     sobrenome: str
     data_nascimento: date
     genero: str
     cargo: str = Field(default="operacional", max_length=50)
     possui_filhos: bool
-
     setor_id: int = Field(foreign_key="setor.id", index=True)
-
     is_admin: bool = Field(default=False)
-    
+    bate_ponto: bool = Field(default=True)
+    cargo_confianca: bool = Field(default=False)
     password_hash: Optional[str] = Field(default=None)
     last_password_change: Optional[datetime] = Field(default=None)
-
     token: Optional[str] = Field(default=None, index=True, max_length=255)
     token_expiracao: Optional[datetime] = Field(default=None)
-
-
 class Estoque(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
 
@@ -194,42 +181,30 @@ class SenhaHistorico(SQLModel, table=True):
     )
 
 
-# Substitua 'usuario', 'senha' e 'estoque_mercado' pelos seus dados do MySQL
-MYSQL_URL = "mysql+pymysql://root:SuaNovaSenhaAqui@localhost:3306/estoque_mercado"
-
 engine = create_engine(
     MYSQL_URL,
     echo=True,
     pool_recycle=3600,
     pool_pre_ping=True
 )
-
-
 def get_session():
     with Session(engine) as session:
         yield session
-
-
 def criar_admin_padrao():
     with Session(engine) as session:
-
         admin_existente = session.exec(
             select(Funcionario).where(Funcionario.is_admin == True)
         ).first()
-
         if admin_existente:
             return
-
         setor_admin = session.exec(
             select(Setor).where(Setor.tipo == "admin")
         ).first()
-
         if not setor_admin:
             setor_admin = Setor(nome="Administrador", tipo="admin")
             session.add(setor_admin)
             session.commit()
             session.refresh(setor_admin)
-
         admin = Funcionario(
             nome="admin",
             sobrenome="master",
@@ -237,10 +212,11 @@ def criar_admin_padrao():
             genero="outro",
             possui_filhos=False,
             cargo="diretor",
+            bate_ponto=False,
+            cargo_confianca=True,
             setor_id=setor_admin.id,
             is_admin=True
         )
-
         session.add(admin)
         session.commit()
         session.refresh(admin)
@@ -251,25 +227,25 @@ def criar_admin_padrao():
         admin.token_expiracao = exp
         session.add(admin)
         session.commit()
-
-
 def criar_banco():
-    # Tenta criar o banco de dados caso ele não exista no MySQL
-    # Conectamos ao servidor sem especificar o nome do banco de dados inicialmente
     url_servidor = "mysql+pymysql://root:SuaNovaSenhaAqui@localhost:3306/"
     engine_servidor = create_engine(url_servidor)
     with engine_servidor.connect() as conn:
         conn.execute(text("CREATE DATABASE IF NOT EXISTS estoque_mercado"))
         conn.commit()
     engine_servidor.dispose()
-
     SQLModel.metadata.create_all(engine)
-
-    # Garante que a coluna 'cargo' exista (migração manual automática)
     with engine.connect() as conn:
         colunas = conn.execute(text("SHOW COLUMNS FROM funcionario LIKE 'cargo'")).fetchone()
         if not colunas:
             conn.execute(text("ALTER TABLE funcionario ADD COLUMN cargo VARCHAR(50) NOT NULL DEFAULT 'operacional'"))
             conn.commit()
-
+        coluna_ponto = conn.execute(text("SHOW COLUMNS FROM funcionario LIKE 'bate_ponto'")).fetchone()
+        if not coluna_ponto:
+            conn.execute(text("ALTER TABLE funcionario ADD COLUMN bate_ponto BOOLEAN NOT NULL DEFAULT TRUE"))
+            conn.commit()
+        coluna_confianca = conn.execute(text("SHOW COLUMNS FROM funcionario LIKE 'cargo_confianca'")).fetchone()
+        if not coluna_confianca:
+            conn.execute(text("ALTER TABLE funcionario ADD COLUMN cargo_confianca BOOLEAN NOT NULL DEFAULT FALSE"))
+            conn.commit()
     criar_admin_padrao()
