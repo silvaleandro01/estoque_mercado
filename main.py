@@ -13,7 +13,7 @@ from funcionarios import *
 from setor import criar_setor, listar_setores, buscar_setor, atualizar_setor, deletar_setor
 from logs import listar_logs
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 class LoginRequest(BaseModel):
     username: str
@@ -30,6 +30,12 @@ class SalarioUpdate(BaseModel):
 class FolhaFecharRequest(BaseModel):
     mes: int
     ano: int
+
+class HierarquiaRequest(BaseModel):
+    funcionario_id: int
+    bate_ponto: bool
+    cargo_confianca: bool
+    cargo: str
 
 from estoque import EstoqueUpdate
 
@@ -51,7 +57,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 def get_funcionario(authorization: str = Header(...)):
     if not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Token inválido")
@@ -68,14 +73,17 @@ def definir_senha_rota(dados: PasswordResetRequest):
     return definir_nova_senha(dados.funcionario_id, dados.nova_senha)
 
 @app.post("/funcionarios/criar")
-def criar(dados: FuncionarioCreate):
+def criar(dados: FuncionarioCreate, funcionario=Depends(get_funcionario)):
+    verificar_permissao(funcionario, "rh")
+    if not funcionario.is_admin:
+        dados.is_admin = False
     return criar_funcionario(dados)
 
 
 @app.get("/funcionarios/listar")
 def listar(funcionario=Depends(get_funcionario)):
-    verificar_permissao(funcionario, "rh")
-    return listar_funcionarios()
+    verificar_permissao(funcionario, "equipe")
+    return listar_funcionarios(funcionario)
 
 @app.get("/funcionarios/buscar/{id}")
 def buscar(id: int, funcionario=Depends(get_funcionario)):
@@ -85,6 +93,8 @@ def buscar(id: int, funcionario=Depends(get_funcionario)):
 @app.put("/funcionarios/atualizar/{id}")
 def atualizar(id: int, dados: FuncionarioCreate, funcionario=Depends(get_funcionario)):
     verificar_permissao(funcionario, "rh")
+    if not funcionario.is_admin:
+        dados.is_admin = False
     return atualizar_funcionario(id, dados)
 
 @app.delete("/funcionarios/deletar/{id}")
@@ -99,37 +109,37 @@ def renovar(id: int, funcionario=Depends(get_funcionario)):
 
 @app.post("/estoque/inserir")
 def inserir_estoque(estoque: Estoque, funcionario=Depends(get_funcionario)):
-    verificar_permissao(funcionario, ["estoque", "gerencia"])
+    verificar_permissao(funcionario, "estoque_inserir")
     return criar_estoque(estoque, funcionario.id)
 
 @app.get("/estoque/mostrar")
 def mostrar_estoque(funcionario=Depends(get_funcionario)):
-    verificar_permissao(funcionario, ["estoque", "gerencia"])
+    verificar_permissao(funcionario, "estoque_ver")
     return mostrar_produtos()
 
 @app.get("/estoque/buscar/{estoque_id}")
 def buscar_estoque_route(estoque_id: int, funcionario=Depends(get_funcionario)):
-    verificar_permissao(funcionario, ["estoque", "gerencia"])
+    verificar_permissao(funcionario, "estoque_ver")
     return buscar_estoque(estoque_id)
 
 @app.put("/estoque/atualizar/{estoque_id}")
 def atualizar_estoque_route(estoque_id: int, dados: EstoqueUpdate, funcionario=Depends(get_funcionario)):
-    verificar_permissao(funcionario, ["estoque", "gerencia"])
+    verificar_permissao(funcionario, "estoque_editar")
     return atualizar_estoque(estoque_id, dados, funcionario.id)
 
 @app.delete("/estoque/deletar/{estoque_id}")
 def deletar_estoque_route(estoque_id: int, funcionario=Depends(get_funcionario)):
-    verificar_permissao(funcionario, ["estoque", "gerencia"])
+    verificar_permissao(funcionario, "estoque_editar")
     return deletar_estoque(estoque_id)
 
 @app.post("/vendas/inserir")
 def inserir_vendas(dados: VendaInput, funcionario=Depends(get_funcionario)):
-    verificar_permissao(funcionario, ["vendas", "gerencia"])
+    verificar_permissao(funcionario, "vendas")
     return criar_venda(dados, funcionario.id)
 
 @app.get("/vendas/vendasdodia")
 def buscar_vendas(funcionario=Depends(get_funcionario)):
-    verificar_permissao(funcionario, "gerencia")
+    verificar_permissao(funcionario, "vendas_dia")
     return vendas_do_dia()
 
 @app.post("/pontos/bater")
@@ -138,14 +148,16 @@ def bater_ponto(
     hora_manual: datetime = None, 
     funcionario=Depends(get_funcionario)
 ):
-    if funcionario.is_admin:
-        raise HTTPException(status_code=400, detail="Admin não bate ponto")
+    if funcionario.is_admin or "diretor" in funcionario.cargo.lower():
+        raise HTTPException(
+            status_code=400, 
+            detail="Registro de ponto negado."
+        )
     return registrar_ponto_funcionario(funcionario.id, data_manual, hora_manual)
 
 @app.get("/pontos/status")
 def status_ponto(funcionario=Depends(get_funcionario)):
     return obter_status_ponto(funcionario.id)
-
 @app.get("/pontos/meu-relatorio")
 def meu_relatorio(mes: int, ano: int, funcionario=Depends(get_funcionario)):
     return relatorio_mensal_funcionario(funcionario.id, mes, ano)
@@ -217,5 +229,10 @@ def rota_deletar_setor(id: int, funcionario=Depends(get_funcionario)):
 
 @app.get("/logs")
 def ver_logs(funcionario=Depends(get_funcionario)):
-    verificar_permissao(funcionario, "rh")
+    verificar_permissao(funcionario, "movimentacao")
     return listar_logs()
+
+@app.post("/funcionarios/configurar-hierarquia")
+def rota_configurar_hierarquia(dados: HierarquiaRequest, funcionario=Depends(get_funcionario)):
+    verificar_permissao(funcionario, "hierarquia")
+    return configurar_hierarquia_funcionario(dados.funcionario_id, dados)
