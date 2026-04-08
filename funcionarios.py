@@ -96,11 +96,13 @@ def autenticar_funcionario(username: str, password: str = ""):
         session.commit()
         setor = session.get(Setor, funcionario.setor_id)
         return {
-            "status": "sucesso", 
+            "status": "sucesso",
             "token": token,
             "is_admin": funcionario.is_admin,
             "setor": setor.tipo.lower().strip() if setor else None,
-            "cargo": funcionario.cargo
+            "cargo": funcionario.cargo,
+            "bate_ponto": funcionario.bate_ponto,
+            "nome_completo": f"{funcionario.nome} {funcionario.sobrenome}"
         }
 def definir_nova_senha(funcionario_id: int, nova_senha: str):
     validar_senha_forte(nova_senha)
@@ -129,11 +131,13 @@ def definir_nova_senha(funcionario_id: int, nova_senha: str):
         session.commit()
         setor = session.get(Setor, funcionario.setor_id)
         return {
-            "status": "sucesso", 
-            "token": token, 
+            "status": "sucesso",
+            "token": token,
             "is_admin": funcionario.is_admin,
             "setor": setor.tipo.lower().strip() if setor else None,
-            "cargo": funcionario.cargo
+            "cargo": funcionario.cargo,
+            "bate_ponto": funcionario.bate_ponto,
+            "nome_completo": f"{funcionario.nome} {funcionario.sobrenome}"
         }
 def listar_funcionarios(quem_solicitou: Funcionario):
     with Session(engine) as session:
@@ -211,20 +215,40 @@ def verificar_permissao(funcionario: Funcionario, escopo: str):
         f_cargo = funcionario.cargo.lower().strip()
         is_gerente = "gerente" in f_cargo
         is_diretor = "diretor" in f_cargo
-        if s_tipo in ["admin", "gerencia"]: return
+        if s_tipo in ["admin", "gerencia"]: return True
+
+        if s_tipo == "compras":
+            if escopo in ["compras_ver", "compras_inserir", "estoque_ver"]: return True
+            if is_gerente and escopo in ["compras_dia", "compras_cancelar", "compras_encaminhar"]: return True
+
         if is_diretor:
-            if escopo in ["vendas_dia", "estoque_ver", "movimentacao", "equipe", "rh"]: return True
-            raise HTTPException(status_code=403, detail="Acesso negado")
+            if escopo in ["vendas_dia", "estoque_ver", "movimentacao", "equipe", "rh", "compras_gerenciar", "compras_cancelar", "compras_ver", "compras_dia", "vendas_cancelar", "comunicados_escrever"]: return True
+
         if escopo == "vendas":
             if s_tipo == "vendas": return True
         if escopo == "vendas_dia":
-            if (s_tipo == "vendas" and is_gerente) or s_tipo == "rh": return True
-        if escopo in ["estoque_ver", "estoque_inserir", "movimentacao"]:
-            if s_tipo in ["estoque", "rh"]: return True
+            if is_diretor or (s_tipo == "vendas" and is_gerente): return True
+        if escopo == "vendas_cancelar":
+            if is_diretor or (s_tipo == "vendas" and is_gerente): return True
+        if escopo == "estoque_ver":
+            if s_tipo in ["estoque", "vendas", "compras"]: return True
+        if escopo == "estoque_inserir":
+            if s_tipo == "estoque": return True
+        if escopo == "movimentacao":
+            if s_tipo == "estoque" and is_gerente: return True
         if escopo == "estoque_editar":
             if s_tipo == "estoque" and is_gerente: return True
-        if escopo in ["rh", "equipe", "hierarquia"]:
+        if escopo == "equipe":
+            if s_tipo == "rh" or is_gerente or is_diretor: return True
+        if escopo in ["rh", "hierarquia"]:
             if s_tipo == "rh": return True
+        if escopo == "comunicados_escrever":
+            if s_tipo == "rh" or is_gerente or is_diretor: return True
+        if escopo == "solicitacoes_criar":
+            if is_diretor: return True
+        if escopo in ["solicitacoes_ver", "solicitacoes_responder"]:
+            if is_diretor: return True
+            if s_tipo == "compras" and is_gerente: return True
     raise HTTPException(status_code=403, detail="Acesso negado")
 
 def renovar_token(funcionario_id: int):
@@ -320,9 +344,7 @@ def relatorio_mensal_funcionario(funcionario_id: int, mes: int, ano: int):
             h_normais = min(p.horas_trabalhadas, 8.0)
             h_extras = max(0.0, p.horas_trabalhadas - 8.0)
             
-            # Regra de Horas Extras:
-            # Domingo (weekday 6) = 100% (mult 2.0)
-            # Outros dias = 50% (mult 1.5) limitado a 2 horas. O que exceder 2h é pago como hora normal (1.0)
+            
             if p.data.weekday() == 6:
                 valor_extra = h_extras * valor_hora * 2.0
             else:
