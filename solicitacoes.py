@@ -38,6 +38,8 @@ def _notificar(session, autor_id: int, destinatarios_ids: List[int], titulo: str
 
 def criar_solicitacao(dados: SolicitacaoCompraCreate, diretor_id: int):
     from database import SolicitacaoVendas
+    sol_id = None
+    # Salva a solicitação em transação separada
     with Session(engine) as session:
         sol = SolicitacaoVendas(
             titulo=dados.titulo,
@@ -47,32 +49,40 @@ def criar_solicitacao(dados: SolicitacaoCompraCreate, diretor_id: int):
             status="pendente",
         )
         session.add(sol)
-        session.flush()
-        session.refresh(sol)
-
-        # Notifica todos os gerentes de compras
-        setor_compras = session.exec(select(Setor).where(Setor.tipo == "compras")).first()
-        gerentes_ids = []
-        if setor_compras:
-            funcionarios = session.exec(
-                select(Funcionario).where(Funcionario.setor_id == setor_compras.id)
-            ).all()
-            gerentes_ids = [f.id for f in funcionarios if "gerente" in f.cargo.lower()]
-
-        if gerentes_ids:
-            diretor = session.get(Funcionario, diretor_id)
-            nome_diretor = f"{diretor.nome} {diretor.sobrenome}" if diretor else "Diretor"
-            _notificar(
-                session, diretor_id, gerentes_ids,
-                f"Nova solicitação de compra #{sol.id}: {sol.titulo}",
-                f"O(a) {nome_diretor} enviou uma solicitação de compra para o setor de compras.\n\n"
-                f"Título: {sol.titulo}\n"
-                f"Descrição: {sol.descricao}\n"
-                f"Itens solicitados:\n{sol.itens}"
-            )
-
         session.commit()
-        return {"detail": "Solicitação enviada ao gerente de compras.", "id": sol.id}
+        session.refresh(sol)
+        sol_id = sol.id
+
+    # Envia notificação em transação separada (falha aqui não desfaz a solicitação)
+    try:
+        with Session(engine) as session:
+            setor_compras = session.exec(
+                select(Setor).where(Setor.tipo.ilike("compras"))
+            ).first()
+            gerentes_ids = []
+            if setor_compras:
+                funcionarios = session.exec(
+                    select(Funcionario).where(Funcionario.setor_id == setor_compras.id)
+                ).all()
+                gerentes_ids = [f.id for f in funcionarios if "gerente" in f.cargo.lower()]
+
+            if gerentes_ids:
+                diretor = session.get(Funcionario, diretor_id)
+                nome_diretor = f"{diretor.nome} {diretor.sobrenome}" if diretor else "Diretor"
+                titulo_curto = dados.titulo[:140] + "..." if len(dados.titulo) > 140 else dados.titulo
+                _notificar(
+                    session, diretor_id, gerentes_ids,
+                    f"Nova solicitação #{sol_id}: {titulo_curto}",
+                    f"O(a) {nome_diretor} enviou uma solicitação de compra para o setor de compras.\n\n"
+                    f"Título: {dados.titulo}\n"
+                    f"Descrição: {dados.descricao}\n"
+                    f"Itens solicitados:\n{dados.itens}"
+                )
+                session.commit()
+    except Exception:
+        pass  # Notificação falhou, mas a solicitação já foi salva
+
+    return {"detail": "Solicitação enviada ao gerente de compras.", "id": sol_id}
 
 
 def listar_solicitacoes(funcionario: Funcionario):

@@ -40,6 +40,24 @@ def listar_todas_compras():
     with Session(engine) as session:
         return session.exec(select(Compra).order_by(Compra.id.desc())).all()
 
+def listar_itens_compra(compra_id: int):
+    with Session(engine) as session:
+        compra = session.get(Compra, compra_id)
+        if not compra:
+            raise HTTPException(status_code=404, detail="Pedido não encontrado.")
+        itens = session.exec(select(ItemCompra).where(ItemCompra.compra_id == compra_id)).all()
+        resultado = []
+        for item in itens:
+            prod = session.exec(select(Estoque).where(Estoque.codigodebarras == item.codigodebarras)).first()
+            resultado.append({
+                "codigodebarras": item.codigodebarras,
+                "nomedoproduto": prod.nomedoproduto if prod else item.codigodebarras,
+                "quantidade": item.quantidade,
+                "preco_custo": item.preco_custo,
+                "total": round(item.quantidade * item.preco_custo, 2)
+            })
+        return resultado
+
 def encaminhar_compra(compra_id: int, gerente_id: int):
     with Session(engine) as session:
         compra = session.get(Compra, compra_id)
