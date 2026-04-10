@@ -1,8 +1,8 @@
 import os
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime, timezone, date, timedelta
 from sqlmodel import Field, SQLModel, create_engine, Session, select
-from sqlalchemy import text
+from sqlalchemy import Column, Text, text
 from jose import jwt
 from dotenv import load_dotenv
 
@@ -62,6 +62,7 @@ class Estoque(SQLModel, table=True):
     nomedoproduto: str
     quantidade: int
     preco: float
+    preco_custo: float = Field(default=0.0)
     codigodebarras: str = Field(unique=True, index=True, max_length=100)
     categoria: str
 
@@ -81,6 +82,8 @@ class Venda(SQLModel, table=True):
     )
 
     valor_total: float = 0.0
+    metodo_pagamento: str = Field(default="dinheiro")
+    parcelas: int = Field(default=1)
 
     funcionario_id: int = Field(
         foreign_key="funcionario.id",
@@ -90,14 +93,35 @@ class Venda(SQLModel, table=True):
 
 class ItemVenda(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
-
     venda_id: int = Field(foreign_key="venda.id", index=True)
-
     codigodebarras: str = Field(index=True)
     quantidade: int
-
     preco_unitario: float
     preco_total: float
+    preco_custo_total: float = Field(default=0.0)
+
+class Compra(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    data: datetime = Field(default_factory=lambda: datetime.now(), index=True)
+    valor_total: float = 0.0
+    status: str = Field(default="pendente")
+    gerente_id: Optional[int] = Field(default=None, foreign_key="funcionario.id")
+    funcionario_id: int = Field(foreign_key="funcionario.id", index=True)
+
+class ItemCompra(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    compra_id: int = Field(foreign_key="compra.id", index=True)
+    codigodebarras: str = Field(index=True)
+    quantidade: int
+    preco_custo: float
+
+class Despesa(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    descricao: str
+    valor: float
+    data: datetime = Field(default_factory=lambda: datetime.now(), index=True)
+    categoria: str
+    funcionario_id: int = Field(foreign_key="funcionario.id", index=True)
 
 
 class Log(SQLModel, table=True):
@@ -180,6 +204,31 @@ class SenhaHistorico(SQLModel, table=True):
         default_factory=lambda: datetime.now()
     )
 
+class Comunicado(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    titulo: str = Field(max_length=200)
+    conteudo: str = Field(sa_column=Column(Text, nullable=False))
+    autor_id: int = Field(foreign_key="funcionario.id", index=True)
+    data_criacao: datetime = Field(default_factory=lambda: datetime.now(), index=True)
+    para_todos: bool = Field(default=True)
+
+class SolicitacaoVendas(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    titulo: str = Field(max_length=200)
+    descricao: str = Field(sa_column=Column(Text, nullable=False))
+    itens: str = Field(sa_column=Column(Text, nullable=False))
+    diretor_id: int = Field(foreign_key="funcionario.id", index=True)
+    status: str = Field(default="pendente", max_length=30)
+    resposta: Optional[str] = Field(default=None, sa_column=Column(Text, nullable=True))
+    data_criacao: datetime = Field(default_factory=lambda: datetime.now(), index=True)
+    data_atualizacao: Optional[datetime] = None
+
+class ComunicadoDestinatario(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    comunicado_id: int = Field(foreign_key="comunicado.id", index=True)
+    funcionario_id: int = Field(foreign_key="funcionario.id", index=True)
+    lido: bool = Field(default=False)
+    data_leitura: Optional[datetime] = None
 
 engine = create_engine(
     MYSQL_URL,
@@ -228,7 +277,7 @@ def criar_admin_padrao():
         session.add(admin)
         session.commit()
 def criar_banco():
-    url_servidor = "mysql+pymysql://root:SuaNovaSenhaAqui@localhost:3306/"
+    url_servidor = MYSQL_URL.rsplit('/', 1)[0] + '/'
     engine_servidor = create_engine(url_servidor)
     with engine_servidor.connect() as conn:
         conn.execute(text("CREATE DATABASE IF NOT EXISTS estoque_mercado"))
@@ -247,5 +296,68 @@ def criar_banco():
         coluna_confianca = conn.execute(text("SHOW COLUMNS FROM funcionario LIKE 'cargo_confianca'")).fetchone()
         if not coluna_confianca:
             conn.execute(text("ALTER TABLE funcionario ADD COLUMN cargo_confianca BOOLEAN NOT NULL DEFAULT FALSE"))
+            conn.commit()
+        coluna_metodo = conn.execute(text("SHOW COLUMNS FROM venda LIKE 'metodo_pagamento'")).fetchone()
+        if not coluna_metodo:
+            conn.execute(text("ALTER TABLE venda ADD COLUMN metodo_pagamento VARCHAR(50) NOT NULL DEFAULT 'dinheiro'"))
+            conn.commit()
+        coluna_parcelas = conn.execute(text("SHOW COLUMNS FROM venda LIKE 'parcelas'")).fetchone()
+        if not coluna_parcelas:
+            conn.execute(text("ALTER TABLE venda ADD COLUMN parcelas INT NOT NULL DEFAULT 1"))
+            conn.commit()
+        coluna_status_compra = conn.execute(text("SHOW COLUMNS FROM compra LIKE 'status'")).fetchone()
+        if not coluna_status_compra:
+            conn.execute(text("ALTER TABLE compra ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'pendente'"))
+            conn.execute(text("ALTER TABLE compra ADD COLUMN gerente_id INT DEFAULT NULL"))
+            conn.commit()
+        coluna_custo = conn.execute(text("SHOW COLUMNS FROM estoque LIKE 'preco_custo'")).fetchone()
+        if not coluna_custo:
+            conn.execute(text("ALTER TABLE estoque ADD COLUMN preco_custo FLOAT NOT NULL DEFAULT 0.0"))
+            conn.commit()
+        coluna_item_custo = conn.execute(text("SHOW COLUMNS FROM itemvenda LIKE 'preco_custo_total'")).fetchone()
+        if not coluna_item_custo:
+            conn.execute(text("ALTER TABLE itemvenda ADD COLUMN preco_custo_total FLOAT NOT NULL DEFAULT 0.0"))
+            conn.commit()
+        tabela_sol = conn.execute(text("SHOW TABLES LIKE 'solicitacaovendas'")).fetchone()
+        if not tabela_sol:
+            conn.execute(text("""
+                CREATE TABLE solicitacaovendas (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    titulo VARCHAR(200) NOT NULL,
+                    descricao TEXT NOT NULL,
+                    itens TEXT NOT NULL,
+                    diretor_id INT NOT NULL,
+                    status VARCHAR(30) NOT NULL DEFAULT 'pendente',
+                    resposta TEXT NULL,
+                    data_criacao DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    data_atualizacao DATETIME NULL,
+                    FOREIGN KEY (diretor_id) REFERENCES funcionario(id)
+                )
+            """))
+            conn.commit()
+        tabela_comunicado = conn.execute(text("SHOW TABLES LIKE 'comunicado'")).fetchone()
+        if not tabela_comunicado:
+            conn.execute(text("""
+                CREATE TABLE comunicado (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    titulo VARCHAR(200) NOT NULL,
+                    conteudo TEXT NOT NULL,
+                    autor_id INT NOT NULL,
+                    data_criacao DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    para_todos BOOLEAN NOT NULL DEFAULT TRUE,
+                    FOREIGN KEY (autor_id) REFERENCES funcionario(id)
+                )
+            """))
+            conn.execute(text("""
+                CREATE TABLE comunicadodestinatario (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    comunicado_id INT NOT NULL,
+                    funcionario_id INT NOT NULL,
+                    lido BOOLEAN NOT NULL DEFAULT FALSE,
+                    data_leitura DATETIME NULL,
+                    FOREIGN KEY (comunicado_id) REFERENCES comunicado(id),
+                    FOREIGN KEY (funcionario_id) REFERENCES funcionario(id)
+                )
+            """))
             conn.commit()
     criar_admin_padrao()
