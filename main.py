@@ -184,6 +184,11 @@ def get_compras_lista(funcionario=Depends(get_funcionario)):
     verificar_permissao(funcionario, "compras_ver")
     return listar_todas_compras()
 
+@app.get("/compras/{id}/itens")
+def get_itens_compra(id: int, funcionario=Depends(get_funcionario)):
+    verificar_permissao(funcionario, "compras_ver")
+    return listar_itens_compra(id)
+
 @app.get("/compras/comprasdodia")
 def get_compras_dia(funcionario=Depends(get_funcionario)):
     verificar_permissao(funcionario, "compras_dia")

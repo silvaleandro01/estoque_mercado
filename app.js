@@ -134,7 +134,13 @@ window.baterPonto = baterPonto;
 window.autorizarCompra = autorizarCompra;
 window.cancelarCompra = cancelarCompra;
 window.encaminharCompra = encaminharCompra;
+window.verItensCompra = verItensCompra;
 window.recusarCompra = recusarCompra;
+window.enviarSolicitacao = enviarSolicitacao;
+window.carregarInfoEstoqueSolicitacao = carregarInfoEstoqueSolicitacao;
+window.abrirRespostaSolicitacao = abrirRespostaSolicitacao;
+window.fecharRespostaSolicitacao = fecharRespostaSolicitacao;
+window.confirmarResposta = confirmarResposta;
 
 function getToken() {
     return localStorage.getItem('api_token');
@@ -179,10 +185,11 @@ function checkAuth() {
                 const isGerenteCompras = inCompras && cargo.includes('gerente');
                 if (!isAdmin && !inGerencia && !isDiretor && !isGerenteCompras) visivel = false;
             } else if (acao.includes("'compras'")) {
-                if (!isAdmin && !inCompras && !inGerencia && !isDiretor) visivel = false;
+                // Oculto para setor de compras — eles usam "Solicitações de Compra"
+                if (!isAdmin && !inGerencia && !isDiretor) visivel = false;
             } else if (acao.includes("'solicitacoes'")) {
                 const isGerenteCompras = inCompras && cargo.includes('gerente');
-                if (!isAdmin && !isDiretor && !isGerenteCompras) visivel = false;
+                if (!isAdmin && !isDiretor && !isGerenteCompras && !inCompras) visivel = false;
             } else if (acao.includes("'movimentacao'")) {
                 const isGerenteEstoque = inEstoque && cargo.includes('gerente');
                 if (!isAdmin && !isDiretor && !isGerenteEstoque && !inGerencia) visivel = false;
@@ -860,8 +867,8 @@ function emitirNotaFiscal(venda, metodo, parcelas) {
     win.document.close();
 }
 
-async function carregarCompras() {
-    const container = document.getElementById('view-compras');
+async function carregarCompras(containerId = 'view-compras') {
+    const container = document.getElementById(containerId);
     const [produtos, compras] = await Promise.all([
         apiFetch('/estoque/mostrar'),
         apiFetch('/compras/listar')
@@ -898,7 +905,7 @@ async function carregarCompras() {
         <div class="card">
             <h3>Histórico de Pedidos</h3>
             <table>
-                <thead><tr><th>ID</th><th>Data</th><th>Total</th><th>Status</th><th>Ações</th></tr></thead>
+                <thead><tr><th>ID</th><th>Data</th><th>Total</th><th>Status</th><th>Produtos</th><th>Ações</th></tr></thead>
                 <tbody>
                     ${(compras || []).map(c => `
                         <tr>
@@ -906,6 +913,8 @@ async function carregarCompras() {
                             <td>${new Date(c.data).toLocaleString()}</td>
                             <td>R$ ${c.valor_total.toFixed(2)}</td>
                             <td><span class="badge" style="background:${corStatus[c.status] || '#95a5a6'}">${labelStatus[c.status] || c.status.toUpperCase()}</span></td>
+                            <td><button class="btn" style="padding:4px 8px; font-size:0.75rem;" onclick="verItensCompra(${c.id}, this)">🔍 Ver Itens</button>
+                                <div id="itens-compra-${c.id}" class="hidden" style="margin-top:6px; font-size:0.82rem;"></div></td>
                             <td>${renderBotoesAcao(c)}</td>
                         </tr>
                     `).join('')}
@@ -1055,6 +1064,41 @@ async function cancelarCompra(id) {
     if (confirm("Confirmar recusa deste pedido?") && await apiFetch(`/compras/cancelar/${id}`, { method: 'POST' })) {
         carregarCompras();
     }
+}
+
+async function verItensCompra(id, btn) {
+    const painel = document.getElementById(`itens-compra-${id}`);
+    if (!painel.classList.contains('hidden')) {
+        painel.classList.add('hidden');
+        btn.textContent = '🔍 Ver Itens';
+        return;
+    }
+    btn.textContent = '⏳';
+    const itens = await apiFetch(`/compras/${id}/itens`);
+    if (!itens) { btn.textContent = '🔍 Ver Itens'; return; }
+    painel.innerHTML = `
+        <table style="width:100%; border-collapse:collapse;">
+            <thead><tr style="background:#f0f0f0;">
+                <th style="padding:4px 6px; text-align:left;">Produto</th>
+                <th style="padding:4px 6px;">Cód. Barras</th>
+                <th style="padding:4px 6px;">Qtd</th>
+                <th style="padding:4px 6px;">Custo Unit.</th>
+                <th style="padding:4px 6px;">Total</th>
+            </tr></thead>
+            <tbody>
+                ${itens.map(i => `
+                    <tr style="border-top:1px solid #eee;">
+                        <td style="padding:4px 6px;">${i.nomedoproduto}</td>
+                        <td style="padding:4px 6px; color:#666;">${i.codigodebarras}</td>
+                        <td style="padding:4px 6px; text-align:center;">${i.quantidade}</td>
+                        <td style="padding:4px 6px; text-align:right;">R$ ${i.preco_custo.toFixed(2)}</td>
+                        <td style="padding:4px 6px; text-align:right; font-weight:bold;">R$ ${i.total.toFixed(2)}</td>
+                    </tr>
+                `).join('')}
+            </tbody>
+        </table>`;
+    painel.classList.remove('hidden');
+    btn.textContent = '▲ Ocultar';
 }
 
 function limparCamposCompra() {
@@ -1803,94 +1847,7 @@ async function baterPonto() {
 }
 
 async function carregarSolicitacoes() {
-    const container = document.getElementById('view-solicitacoes');
-    container.innerHTML = '<h3>Carregando...</h3>';
-
-    const isAdmin = localStorage.getItem('is_admin') === 'true';
-    const cargo = (localStorage.getItem('user_cargo') || '').toLowerCase();
-    const setor = (localStorage.getItem('user_setor') || '').toLowerCase();
-    const isDiretor = isAdmin || cargo.includes('direto');
-    const isGerenteCompras = setor.includes('compras') && cargo.includes('gerente') && !isDiretor;
-
-    const solicitacoes = await apiFetch('/solicitacoes/listar');
-    if (!solicitacoes) return;
-
-    const corStatus = { pendente: '#f39c12', em_andamento: '#3498db', concluida: '#27ae60', recusada: '#e74c3c' };
-    const labelStatus = { pendente: 'PENDENTE', em_andamento: 'EM ANDAMENTO', concluida: 'CONCLUÍDA', recusada: 'RECUSADA' };
-
-    let formHtml = '';
-    if (isDiretor) {
-        formHtml = `
-        <div class="card">
-            <h3>Nova Solicitação de Compra</h3>
-            <p style="font-size:0.85rem; color:#666;">Descreva o que precisa ser comprado. O gerente de compras receberá uma notificação.</p>
-            <div class="form-group">
-                <input class="form-control" type="text" id="sol-titulo" placeholder="Título (ex: Reposição de higiene)">
-                <textarea class="form-control" id="sol-descricao" rows="2" placeholder="Descrição geral da necessidade..." style="resize:vertical;"></textarea>
-                <textarea class="form-control" id="sol-itens" rows="4" placeholder="Itens solicitados (ex:&#10;- 50x Papel Higiênico&#10;- 20x Sabão em Pó)" style="resize:vertical;"></textarea>
-            </div>
-            <button class="btn-success" onclick="enviarSolicitacao()">Enviar ao Gerente de Compras</button>
-        </div>`;
-    }
-
-    const lista = (solicitacoes || []).map(s => `
-        <div class="card" style="border-left:5px solid ${corStatus[s.status] || '#bdc3c7'};">
-            <div style="display:flex; justify-content:space-between; align-items:flex-start; flex-wrap:wrap; gap:10px;">
-                <div style="flex:1;">
-                    <h4 style="margin:0 0 4px;">#${s.id} — ${s.titulo}</h4>
-                    <small style="color:#888;">Solicitado por: <strong>${s.diretor}</strong> &nbsp;|&nbsp; ${new Date(s.data_criacao).toLocaleString()}</small>
-                    <p style="margin:10px 0 4px;"><strong>Descrição:</strong> ${s.descricao}</p>
-                    ${s.resposta ? `<p style="margin:8px 0 0; padding:8px; background:#f8f9fa; border-radius:4px;"><strong>Resposta do Gerente:</strong> ${s.resposta}</p>` : ''}
-                </div>
-                <div style="display:flex; flex-direction:column; align-items:flex-end; gap:6px; min-width:160px;">
-                    <span class="badge" style="background:${corStatus[s.status] || '#bdc3c7'}">${labelStatus[s.status] || s.status.toUpperCase()}</span>
-                    <button class="btn" style="padding:5px 10px; font-size:0.8rem;" onclick="toggleDetalhesSolicitacao(${s.id})">🔍 Ver Detalhes</button>
-                    ${isGerenteCompras && s.status !== 'concluida' ? `
-                        <button class="btn-success" style="padding:5px 10px; font-size:0.8rem; background:#3498db;" onclick="abrirRespostaSolicitacao(${s.id})">Atualizar Status</button>
-                    ` : ''}
-                </div>
-            </div>
-
-            <div id="detalhes-sol-${s.id}" class="hidden" style="margin-top:12px; border-top:1px solid #eee; padding-top:12px;">
-                <div style="display:flex; gap:20px; flex-wrap:wrap;">
-                    <div style="flex:1; min-width:250px;">
-                        <h4 style="margin:0 0 8px; color:#2c3e50;">📋 Itens Solicitados</h4>
-                        <div style="background:#f8f9fa; padding:10px; border-radius:6px; white-space:pre-wrap; font-size:0.9rem;">${s.itens}</div>
-                    </div>
-                    <div style="flex:2; min-width:300px;">
-                        <h4 style="margin:0 0 8px; color:#2c3e50;">📦 Situação no Estoque Atual</h4>
-                        <div id="estoque-info-${s.id}">
-                            <button class="btn" style="padding:5px 12px; font-size:0.8rem;" onclick="carregarInfoEstoqueSolicitacao(${s.id}, \`${s.itens.replace(/`/g, "'")}\`)">Consultar Estoque</button>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <div id="form-resposta-${s.id}" class="hidden" style="margin-top:12px; border-top:1px dashed #ddd; padding-top:10px;">
-                <div class="form-group">
-                    <select class="form-control" id="sol-status-${s.id}">
-                        <option value="em_andamento">Em Andamento</option>
-                        <option value="concluida">Concluída</option>
-                        <option value="recusada">Recusada</option>
-                    </select>
-                    <textarea class="form-control" id="sol-resposta-${s.id}" rows="2" placeholder="Observação (opcional)..." style="resize:vertical;"></textarea>
-                </div>
-                <div style="display:flex; gap:8px;">
-                    <button class="btn-success" style="padding:5px 12px;" onclick="confirmarResposta(${s.id})">Confirmar</button>
-                    <button class="btn" style="padding:5px 12px;" onclick="fecharRespostaSolicitacao(${s.id})">Cancelar</button>
-                </div>
-            </div>
-        </div>
-    `).join('');
-
-    container.innerHTML = `
-        <h2>Solicitações de Compra</h2>
-        ${formHtml}
-        <div class="card">
-            <h3>Histórico de Solicitações</h3>
-            ${lista || '<p style="color:#888;">Nenhuma solicitação registrada.</p>'}
-        </div>
-    `;
+    await carregarCompras('view-solicitacoes');
 }
 
 async function enviarSolicitacao() {
@@ -1905,12 +1862,8 @@ async function enviarSolicitacao() {
     if (res) { alert(res.detail); carregarSolicitacoes(); }
 }
 
-function toggleDetalhesSolicitacao(id) {
-    const painel = document.getElementById(`detalhes-sol-${id}`);
-    painel.classList.toggle('hidden');
-}
-
-async function carregarInfoEstoqueSolicitacao(solId, itensTexto) {
+async function carregarInfoEstoqueSolicitacao(solId) {
+    const itensTexto = (window._solItens && window._solItens[solId]) || '';
     const container = document.getElementById(`estoque-info-${solId}`);
     container.innerHTML = '<small style="color:#888;">Consultando estoque...</small>';
 
