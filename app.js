@@ -135,6 +135,8 @@ window.autorizarCompra = autorizarCompra;
 window.cancelarCompra = cancelarCompra;
 window.encaminharCompra = encaminharCompra;
 window.verItensCompra = verItensCompra;
+window.abrirDetalheCompra = abrirDetalheCompra;
+window.fecharDetalheCompra = fecharDetalheCompra;
 window.recusarCompra = recusarCompra;
 window.enviarSolicitacao = enviarSolicitacao;
 window.carregarInfoEstoqueSolicitacao = carregarInfoEstoqueSolicitacao;
@@ -905,22 +907,22 @@ async function carregarCompras(containerId = 'view-compras') {
         <div class="card">
             <h3>Histórico de Pedidos</h3>
             <table>
-                <thead><tr><th>ID</th><th>Data</th><th>Total</th><th>Status</th><th>Produtos</th><th>Ações</th></tr></thead>
+                <thead><tr><th>ID</th><th>Data / Hora</th><th>Solicitante</th><th>Total</th><th>Status</th><th>Ações</th></tr></thead>
                 <tbody>
                     ${(compras || []).map(c => `
                         <tr>
-                            <td>#${c.id}</td>
+                            <td><button class="btn" style="padding:3px 8px; font-size:0.75rem; background:#8e44ad; color:#fff;" onclick="abrirDetalheCompra(${c.id})">🗒️ #${c.id}</button></td>
                             <td>${new Date(c.data).toLocaleString()}</td>
+                            <td>${c.solicitante || '-'}</td>
                             <td>R$ ${c.valor_total.toFixed(2)}</td>
                             <td><span class="badge" style="background:${corStatus[c.status] || '#95a5a6'}">${labelStatus[c.status] || c.status.toUpperCase()}</span></td>
-                            <td><button class="btn" style="padding:4px 8px; font-size:0.75rem;" onclick="verItensCompra(${c.id}, this)">🔍 Ver Itens</button>
-                                <div id="itens-compra-${c.id}" class="hidden" style="margin-top:6px; font-size:0.82rem;"></div></td>
                             <td>${renderBotoesAcao(c)}</td>
                         </tr>
                     `).join('')}
                 </tbody>
             </table>
-        </div>`;
+        </div>
+        <div id="detalhe-compra-painel" class="hidden"></div>`;
 
     let html = `<h2>Gestão de Compras</h2>`;
 
@@ -934,20 +936,31 @@ async function carregarCompras(containerId = 'view-compras') {
         html += `
         <div class="card">
             <h3>Registrar Novo Pedido de Compra</h3>
-            <div class="form-group">
-                <input class="form-control" type="text" id="compra-codigo" placeholder="Cód. Barras" onchange="verificarNovoProdutoCompra()">
-                <input class="form-control" type="number" id="compra-qtd" placeholder="Qtd" value="1">
-                <input class="form-control" type="number" id="compra-custo" placeholder="Preço Custo Unit. (R$)">
-                <div id="campos-novo-produto" class="hidden" style="width:100%; border:1px dashed #3498db; padding:10px; margin-top:10px;">
-                    <p style="color:#3498db; font-size:0.8rem;">Produto novo! Preencha os dados básicos:</p>
-                    <input class="form-control" type="text" id="compra-nome" placeholder="Nome do Produto">
-                    <input class="form-control" type="number" id="compra-venda" placeholder="Preço Sugerido Venda (R$)">
-                    <input class="form-control" type="text" id="compra-cat" placeholder="Categoria">
+            <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap;">
+                <div style="flex:2; min-width:120px;">
+                    <label style="font-size:0.75rem; color:#666;">Cód. Barras</label>
+                    <input class="form-control" type="text" id="compra-codigo" placeholder="Cód. Barras" onchange="verificarNovoProdutoCompra()" style="margin:0;">
                 </div>
-                <button class="btn-success" onclick="adicionarItemCompra()">Adicionar ao Pedido</button>
+                <div style="flex:1; min-width:60px; max-width:90px;">
+                    <label style="font-size:0.75rem; color:#666;">Qtd</label>
+                    <input class="form-control" type="number" id="compra-qtd" placeholder="Qtd" value="1" style="margin:0;">
+                </div>
+                <div style="flex:2; min-width:130px;">
+                    <label style="font-size:0.75rem; color:#666;">Custo Unit. (R$)</label>
+                    <input class="form-control" type="number" id="compra-custo" placeholder="0.00" style="margin:0;">
+                </div>
+                <button class="btn-success" style="height:38px; white-space:nowrap;" onclick="adicionarItemCompra()">+ Adicionar</button>
             </div>
-            <table class="card">
-                <thead><tr><th>Produto</th><th>Qtd</th><th>Custo Unit.</th><th>Total</th><th>Ação</th></tr></thead>
+            <div id="campos-novo-produto" class="hidden" style="margin-top:10px; border:1px dashed #3498db; padding:10px; border-radius:6px;">
+                <p style="color:#3498db; font-size:0.8rem; margin:0 0 8px;">Produto novo — preencha os dados básicos:</p>
+                <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                    <input class="form-control" type="text" id="compra-nome" placeholder="Nome do Produto" style="flex:3; min-width:140px; margin:0;">
+                    <input class="form-control" type="number" id="compra-venda" placeholder="Preço Venda (R$)" style="flex:2; min-width:120px; margin:0;">
+                    <input class="form-control" type="text" id="compra-cat" placeholder="Categoria" style="flex:2; min-width:100px; margin:0;">
+                </div>
+            </div>
+            <table style="width:100%; border-collapse:collapse; margin-top:12px;">
+                <thead><tr style="background:#f5f5f5;"><th style="padding:6px;">Produto</th><th style="padding:6px;">Qtd</th><th style="padding:6px;">Custo Unit.</th><th style="padding:6px;">Total</th><th style="padding:6px;">Ação</th></tr></thead>
                 <tbody id="lista-carrinho-compra"></tbody>
             </table>
             <div style="text-align:right; margin-top:10px;">
@@ -959,21 +972,32 @@ async function carregarCompras(containerId = 'view-compras') {
         html += `
         <div class="card">
             <h3>Montar Catálogo de Compras</h3>
-            <p style="font-size:0.85rem; color:#666;">Monte o pedido e envie ao gerente para análise. Você não pode editar ou excluir pedidos já enviados.</p>
-            <div class="form-group">
-                <input class="form-control" type="text" id="compra-codigo" placeholder="Cód. Barras" onchange="verificarNovoProdutoCompra()">
-                <input class="form-control" type="number" id="compra-qtd" placeholder="Qtd" value="1">
-                <input class="form-control" type="number" id="compra-custo" placeholder="Preço Custo Unit. (R$)">
-                <div id="campos-novo-produto" class="hidden" style="width:100%; border:1px dashed #3498db; padding:10px; margin-top:10px;">
-                    <p style="color:#3498db; font-size:0.8rem;">Produto novo! Preencha os dados básicos:</p>
-                    <input class="form-control" type="text" id="compra-nome" placeholder="Nome do Produto">
-                    <input class="form-control" type="number" id="compra-venda" placeholder="Preço Sugerido Venda (R$)">
-                    <input class="form-control" type="text" id="compra-cat" placeholder="Categoria">
+            <p style="font-size:0.85rem; color:#666;">Monte o pedido e envie ao gerente para análise.</p>
+            <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap;">
+                <div style="flex:2; min-width:120px;">
+                    <label style="font-size:0.75rem; color:#666;">Cód. Barras</label>
+                    <input class="form-control" type="text" id="compra-codigo" placeholder="Cód. Barras" onchange="verificarNovoProdutoCompra()" style="margin:0;">
                 </div>
-                <button class="btn-success" onclick="adicionarItemCompra()">Adicionar ao Pedido</button>
+                <div style="flex:1; min-width:60px; max-width:90px;">
+                    <label style="font-size:0.75rem; color:#666;">Qtd</label>
+                    <input class="form-control" type="number" id="compra-qtd" placeholder="Qtd" value="1" style="margin:0;">
+                </div>
+                <div style="flex:2; min-width:130px;">
+                    <label style="font-size:0.75rem; color:#666;">Custo Unit. (R$)</label>
+                    <input class="form-control" type="number" id="compra-custo" placeholder="0.00" style="margin:0;">
+                </div>
+                <button class="btn-success" style="height:38px; white-space:nowrap;" onclick="adicionarItemCompra()">+ Adicionar</button>
             </div>
-            <table class="card">
-                <thead><tr><th>Produto</th><th>Qtd</th><th>Custo Unit.</th><th>Total</th><th>Ação</th></tr></thead>
+            <div id="campos-novo-produto" class="hidden" style="margin-top:10px; border:1px dashed #3498db; padding:10px; border-radius:6px;">
+                <p style="color:#3498db; font-size:0.8rem; margin:0 0 8px;">Produto novo — preencha os dados básicos:</p>
+                <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                    <input class="form-control" type="text" id="compra-nome" placeholder="Nome do Produto" style="flex:3; min-width:140px; margin:0;">
+                    <input class="form-control" type="number" id="compra-venda" placeholder="Preço Venda (R$)" style="flex:2; min-width:120px; margin:0;">
+                    <input class="form-control" type="text" id="compra-cat" placeholder="Categoria" style="flex:2; min-width:100px; margin:0;">
+                </div>
+            </div>
+            <table style="width:100%; border-collapse:collapse; margin-top:12px;">
+                <thead><tr style="background:#f5f5f5;"><th style="padding:6px;">Produto</th><th style="padding:6px;">Qtd</th><th style="padding:6px;">Custo Unit.</th><th style="padding:6px;">Total</th><th style="padding:6px;">Ação</th></tr></thead>
                 <tbody id="lista-carrinho-compra"></tbody>
             </table>
             <div style="text-align:right; margin-top:10px;">
@@ -1064,6 +1088,73 @@ async function cancelarCompra(id) {
     if (confirm("Confirmar recusa deste pedido?") && await apiFetch(`/compras/cancelar/${id}`, { method: 'POST' })) {
         carregarCompras();
     }
+}
+
+async function abrirDetalheCompra(id) {
+    const compras = await apiFetch('/compras/listar');
+    const itens = await apiFetch(`/compras/${id}/itens`);
+    if (!itens) return;
+
+    const c = (compras || []).find(x => x.id === id);
+    const corStatus = { autorizada: '#27ae60', pendente: '#f39c12', aguardando_diretor: '#3498db', recusada: '#e74c3c', cancelada: '#95a5a6' };
+    const labelStatus = { autorizada: 'AUTORIZADA', pendente: 'PENDENTE', aguardando_diretor: 'AGUARD. DIRETOR', recusada: 'RECUSADA', cancelada: 'CANCELADA' };
+
+    const painel = document.getElementById('detalhe-compra-painel');
+
+    painel.innerHTML = `
+        <div class="card" style="border-top:5px solid #8e44ad; animation: fadeIn 0.3s;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:16px;">
+                <h3 style="margin:0;">Detalhes do Pedido #${id}</h3>
+                <button class="btn-danger" onclick="fecharDetalheCompra()">✕ Fechar</button>
+            </div>
+
+            <div style="display:flex; gap:20px; flex-wrap:wrap; margin-bottom:16px;">
+                <div class="ponto-stamp">Data:<br><strong>${c ? new Date(c.data).toLocaleDateString() : '-'}</strong></div>
+                <div class="ponto-stamp">Hora:<br><strong>${c ? new Date(c.data).toLocaleTimeString() : '-'}</strong></div>
+                <div class="ponto-stamp">Solicitante:<br><strong>${c?.solicitante || '-'}</strong></div>
+                <div class="ponto-stamp">Aprovador:<br><strong>${c?.aprovador || 'Aguardando'}</strong></div>
+                <div class="ponto-stamp" style="background:${c ? (corStatus[c.status] || '#95a5a6') : '#95a5a6'}; color:#fff;">
+                    Status:<br><strong>${c ? (labelStatus[c.status] || c.status.toUpperCase()) : '-'}</strong>
+                </div>
+                <div class="ponto-stamp" style="background:#2c3e50; color:#fff;">Total:<br><strong>R$ ${c ? c.valor_total.toFixed(2) : '0.00'}</strong></div>
+            </div>
+
+            <h4 style="margin:0 0 10px; color:#2c3e50;">Produtos do Pedido</h4>
+            <table style="width:100%; border-collapse:collapse;">
+                <thead>
+                    <tr style="background:#f0f0f0;">
+                        <th style="padding:8px; text-align:left;">Produto</th>
+                        <th style="padding:8px; text-align:left;">Cód. Barras</th>
+                        <th style="padding:8px; text-align:center;">Qtd</th>
+                        <th style="padding:8px; text-align:right;">Custo Unit.</th>
+                        <th style="padding:8px; text-align:right;">Total</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    ${itens.map(i => `
+                        <tr style="border-top:1px solid #eee;">
+                            <td style="padding:8px;">${i.nomedoproduto}</td>
+                            <td style="padding:8px; color:#666; font-size:0.85rem;">${i.codigodebarras}</td>
+                            <td style="padding:8px; text-align:center;">${i.quantidade}</td>
+                            <td style="padding:8px; text-align:right;">R$ ${i.preco_custo.toFixed(2)}</td>
+                            <td style="padding:8px; text-align:right; font-weight:bold;">R$ ${i.total.toFixed(2)}</td>
+                        </tr>
+                    `).join('')}
+                    <tr style="border-top:2px solid #2c3e50; background:#f9f9f9;">
+                        <td colspan="4" style="padding:8px; text-align:right; font-weight:bold;">TOTAL DO PEDIDO</td>
+                        <td style="padding:8px; text-align:right; font-weight:bold; font-size:1.1rem;">R$ ${c ? c.valor_total.toFixed(2) : '0.00'}</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>`;
+
+    painel.classList.remove('hidden');
+    painel.scrollIntoView({ behavior: 'smooth' });
+}
+
+function fecharDetalheCompra() {
+    const painel = document.getElementById('detalhe-compra-painel');
+    if (painel) { painel.innerHTML = ''; painel.classList.add('hidden'); }
 }
 
 async function verItensCompra(id, btn) {
