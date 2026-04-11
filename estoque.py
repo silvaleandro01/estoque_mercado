@@ -14,7 +14,6 @@ class EstoqueUpdate(SQLModel):
 
 def registrar_compra(dados, funcionario_id: int, is_gerente: bool = False):
     with Session(engine) as session:
-        # Mesmo gerente agora cria como pendente para aprovação do diretor
         status_inicial = "pendente"
         compra = Compra(funcionario_id=funcionario_id, status=status_inicial)
 

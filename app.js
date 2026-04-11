@@ -108,7 +108,6 @@ window.submeterNovaSenha = async function () {
             feedback.style.display = 'none';
             pendingFuncionarioId = null;
         } else {
-            // apiFetch já exibe o alerta de erro, mas podemos adicionar feedback visual aqui
             feedback.innerText = "Erro ao definir senha. Verifique os requisitos.";
             feedback.className = 'feedback-msg feedback-error';
             feedback.style.display = 'block';
@@ -187,7 +186,6 @@ function checkAuth() {
                 const isGerenteCompras = inCompras && cargo.includes('gerente');
                 if (!isAdmin && !inGerencia && !isDiretor && !isGerenteCompras) visivel = false;
             } else if (acao.includes("'compras'")) {
-                // Oculto para setor de compras — eles usam "Solicitações de Compra"
                 if (!isAdmin && !inGerencia && !isDiretor) visivel = false;
             } else if (acao.includes("'solicitacoes'")) {
                 const isGerenteCompras = inCompras && cargo.includes('gerente');
@@ -1964,7 +1962,6 @@ async function carregarInfoEstoqueSolicitacao(solId) {
         return;
     }
 
-    // Extrai palavras-chave dos itens solicitados (linhas não vazias, sem marcadores)
     const linhas = itensTexto.split('\n')
         .map(l => l.replace(/^[-*•\d.]+\s*/, '').trim())
         .filter(l => l.length > 2);
@@ -1974,7 +1971,6 @@ async function carregarInfoEstoqueSolicitacao(solId) {
         return;
     }
 
-    // Para cada linha, busca produtos que contenham palavras da linha
     const resultados = linhas.map(linha => {
         const palavras = linha.toLowerCase().split(/\s+/).filter(p => p.length > 2);
         const encontrados = produtos.filter(p =>
@@ -2178,5 +2174,4 @@ async function marcarLidoComunicado(destinatarioId) {
     }
 }
 
-// Garante que o arquivo termina sem blocos abertos
 checkAuth();

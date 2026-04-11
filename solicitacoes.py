@@ -10,7 +10,7 @@ from database import engine, Funcionario, Setor, Comunicado, ComunicadoDestinata
 class SolicitacaoCompraCreate(BaseModel):
     titulo: str
     descricao: str
-    itens: str  # texto livre descrevendo os itens/produtos solicitados
+    itens: str
 
 
 class SolicitacaoCompraUpdate(BaseModel):
@@ -39,7 +39,6 @@ def _notificar(session, autor_id: int, destinatarios_ids: List[int], titulo: str
 def criar_solicitacao(dados: SolicitacaoCompraCreate, diretor_id: int):
     from database import SolicitacaoVendas
     sol_id = None
-    # Salva a solicitação em transação separada
     with Session(engine) as session:
         sol = SolicitacaoVendas(
             titulo=dados.titulo,
@@ -53,7 +52,6 @@ def criar_solicitacao(dados: SolicitacaoCompraCreate, diretor_id: int):
         session.refresh(sol)
         sol_id = sol.id
 
-    # Envia notificação em transação separada (falha aqui não desfaz a solicitação)
     try:
         with Session(engine) as session:
             setor_compras = session.exec(
@@ -80,7 +78,7 @@ def criar_solicitacao(dados: SolicitacaoCompraCreate, diretor_id: int):
                 )
                 session.commit()
     except Exception:
-        pass  # Notificação falhou, mas a solicitação já foi salva
+        pass
 
     return {"detail": "Solicitação enviada ao gerente de compras.", "id": sol_id}
 
