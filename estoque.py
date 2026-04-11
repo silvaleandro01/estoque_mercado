@@ -14,7 +14,6 @@ class EstoqueUpdate(SQLModel):
 
 def registrar_compra(dados, funcionario_id: int, is_gerente: bool = False):
     with Session(engine) as session:
-        # Mesmo gerente agora cria como pendente para aprovação do diretor
         status_inicial = "pendente"
         compra = Compra(funcionario_id=funcionario_id, status=status_inicial)
 
@@ -38,7 +37,21 @@ def registrar_compra(dados, funcionario_id: int, is_gerente: bool = False):
 
 def listar_todas_compras():
     with Session(engine) as session:
-        return session.exec(select(Compra).order_by(Compra.id.desc())).all()
+        compras = session.exec(select(Compra).order_by(Compra.id.desc())).all()
+        resultado = []
+        for c in compras:
+            func = session.get(Funcionario, c.funcionario_id)
+            gerente = session.get(Funcionario, c.gerente_id) if c.gerente_id else None
+            resultado.append({
+                "id": c.id,
+                "data": c.data.isoformat(),
+                "valor_total": c.valor_total,
+                "status": c.status,
+                "solicitante": f"{func.nome} {func.sobrenome}" if func else f"ID {c.funcionario_id}",
+                "aprovador": f"{gerente.nome} {gerente.sobrenome}" if gerente else None,
+                "funcionario_id": c.funcionario_id,
+            })
+        return resultado
 
 def listar_itens_compra(compra_id: int):
     with Session(engine) as session:

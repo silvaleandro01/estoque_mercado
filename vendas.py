@@ -77,7 +77,6 @@ def vendas_do_dia():
 def listar_vendas_detalhado():
     with Session(engine) as session:
         hoje = date.today()
-        # Retorna apenas vendas de hoje para performance
         vendas = session.exec(select(Venda).where(Venda.data >= hoje).order_by(Venda.id.desc())).all()
         return vendas
 
