@@ -1,5 +1,6 @@
 const API_URL = "http://127.0.0.1:8000";
 
+let viewAtual = null;
 let carrinho = [];
 let pendingFuncionarioId = null;
 let editandoFuncionarioId = null;
@@ -135,6 +136,7 @@ window.cancelarCompra = cancelarCompra;
 window.encaminharCompra = encaminharCompra;
 window.verItensCompra = verItensCompra;
 window.abrirDetalheCompra = abrirDetalheCompra;
+window.lancarPendente = lancarPendente;
 window.fecharDetalheCompra = fecharDetalheCompra;
 window.recusarCompra = recusarCompra;
 window.enviarSolicitacao = enviarSolicitacao;
@@ -283,10 +285,11 @@ function navegar(viewId) {
     }
 
     document.querySelectorAll('.view').forEach(el => el.classList.add('hidden'));
-    
+
     const target = document.getElementById(`view-${viewId}`);
     if (target) {
         target.classList.remove('hidden');
+        viewAtual = viewId;
         carregarDadosView(viewId);
     }
 }
@@ -310,9 +313,12 @@ async function carregarEstoque() {
     const container = document.getElementById('view-estoque');
     container.innerHTML = '<h3>Carregando...</h3>';
 
-    const produtos = await apiFetch('/estoque/mostrar');
+    const [produtos, pendentes] = await Promise.all([
+        apiFetch('/estoque/mostrar'),
+        apiFetch('/estoque/pendentes', {}, true)
+    ]);
     cacheProdutos = produtos || [];
-    
+
     if (!produtos) {
         container.innerHTML = '<h3>Erro ao carregar estoque. Verifique suas permissões.</h3>';
         return;
@@ -355,6 +361,48 @@ async function carregarEstoque() {
                 <button class="btn-success" onclick="adicionarProduto()">Salvar Produto</button>
             </div>
         </div>` : ''}
+        ${pendentes && pendentes.length > 0 ? `
+        <div class="card" style="border-top: 5px solid #e67e22;">
+            <h3 style="color:#e67e22;">📦 Produtos Aguardando Lançamento (${pendentes.length})</h3>
+            <p style="font-size:0.85rem; color:#666; margin-bottom:16px;">Estes produtos chegaram via compra aprovada. Confirme o nome, código de barras, <strong>preço de venda</strong> e categoria para lançar no estoque.</p>
+            <div style="display:flex; flex-direction:column; gap:12px;">
+                ${pendentes.map(p => `
+                <div style="border:1px solid #fad7a0; border-radius:8px; padding:14px; background:#fffdf7;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; flex-wrap:wrap; gap:6px;">
+                        <span style="font-weight:bold; color:#e67e22;">Pedido #${p.compra_id}</span>
+                        <span style="font-size:0.82rem; color:#888;">Entrada: ${new Date(p.data_entrada).toLocaleDateString()}</span>
+                    </div>
+                    <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px; margin-bottom:12px;">
+                        <div>
+                            <label style="font-size:0.75rem; color:#666; display:block; margin-bottom:3px;">Nome do Produto</label>
+                            <input class="form-control" style="margin:0;" id="pend-nome-${p.id}" value="${p.nomedoproduto}">
+                        </div>
+                        <div>
+                            <label style="font-size:0.75rem; color:#666; display:block; margin-bottom:3px;">Código de Barras</label>
+                            <input class="form-control" style="margin:0;" id="pend-cod-${p.id}" value="${p.codigodebarras}">
+                        </div>
+                        <div>
+                            <label style="font-size:0.75rem; color:#666; display:block; margin-bottom:3px;">Qtd. Recebida</label>
+                            <input class="form-control" style="margin:0; background:#f5f5f5;" value="${p.quantidade}" disabled>
+                        </div>
+                        <div>
+                            <label style="font-size:0.75rem; color:#666; display:block; margin-bottom:3px;">Custo Unitário (pago)</label>
+                            <input class="form-control" style="margin:0; background:#f5f5f5;" value="R$ ${p.preco_custo.toFixed(2)}" disabled>
+                        </div>
+                        <div>
+                            <label style="font-size:0.75rem; color:#e67e22; font-weight:bold; display:block; margin-bottom:3px;">⭐ Preço de Venda (R$)</label>
+                            <input class="form-control" style="margin:0; border:2px solid #e67e22;" type="number" step="0.01" id="pend-preco-${p.id}" placeholder="Ex: 9.99" value="${p.preco_venda != null ? p.preco_venda : ''}">
+                        </div>
+                        <div>
+                            <label style="font-size:0.75rem; color:#666; display:block; margin-bottom:3px;">Categoria</label>
+                            <input class="form-control" style="margin:0;" id="pend-cat-${p.id}" placeholder="Ex: Limpeza">
+                        </div>
+                    </div>
+                    <button class="btn-success" style="width:100%; padding:10px;" onclick="lancarPendente(${p.id})">✅ Lançar no Estoque</button>
+                </div>
+                `).join('')}
+            </div>
+        </div>` : ''}
         <div class="card">
         <h3>Produtos Cadastrados</h3>
         <table>
@@ -382,6 +430,25 @@ async function carregarEstoque() {
 
     html += '</tbody></table></div>';
     container.innerHTML = html;
+}
+
+async function lancarPendente(id) {
+    const nome = document.getElementById(`pend-nome-${id}`).value.trim();
+    const cod = document.getElementById(`pend-cod-${id}`).value.trim();
+    const preco = parseFloat(document.getElementById(`pend-preco-${id}`).value);
+    const cat = document.getElementById(`pend-cat-${id}`).value.trim();
+    if (!nome || !cod || isNaN(preco) || preco <= 0 || !cat) {
+        alert('Preencha Nome, Código de Barras, Preço de Venda e Categoria.');
+        return;
+    }
+    const res = await apiFetch(`/estoque/pendentes/${id}/confirmar`, {
+        method: 'POST',
+        body: JSON.stringify({ nomedoproduto: nome, codigodebarras: cod, preco_venda: preco, categoria: cat })
+    });
+    if (res) {
+        alert(res.detail);
+        carregarEstoque();
+    }
 }
 
 async function removerProduto(id) {
@@ -1011,13 +1078,13 @@ async function carregarCompras(containerId = 'view-compras') {
 async function encaminharCompra(id) {
     if (!confirm("Encaminhar este pedido ao diretor para aprovação?")) return;
     const res = await apiFetch(`/compras/encaminhar/${id}`, { method: 'POST' });
-    if (res) { alert(res.msg); carregarCompras(); }
+    if (res) { alert(res.msg); carregarDadosView(viewAtual); }
 }
 
 async function recusarCompra(id) {
     if (!confirm("Confirmar RECUSA deste pedido de compra?")) return;
     const res = await apiFetch(`/compras/recusar/${id}`, { method: 'POST' });
-    if (res) { alert(res.msg); carregarCompras(); }
+    if (res) { alert(res.msg); carregarDadosView(viewAtual); }
 }
 
 function verificarNovoProdutoCompra() {
@@ -1070,7 +1137,7 @@ async function enviarPedidoCompra() {
     if (res) {
         alert(res.status === 'autorizada' ? "Compra realizada e estoque atualizado!" : "Pedido enviado para autorização do gerente.");
         carrinhoCompra = [];
-        carregarCompras();
+        carregarDadosView(viewAtual);
     }
 }
 
@@ -1078,13 +1145,13 @@ async function autorizarCompra(id) {
     const res = await apiFetch(`/compras/autorizar/${id}`, { method: 'POST' });
     if (res) {
         alert("Compra autorizada e estoque abastecido.");
-        carregarCompras();
+        carregarDadosView(viewAtual);
     }
 }
 
 async function cancelarCompra(id) {
     if (confirm("Confirmar recusa deste pedido?") && await apiFetch(`/compras/cancelar/${id}`, { method: 'POST' })) {
-        carregarCompras();
+        carregarDadosView(viewAtual);
     }
 }
 

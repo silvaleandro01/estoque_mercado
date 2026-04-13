@@ -146,12 +146,13 @@ def obter_estatisticas_dashboard():
             total_despesas = sum(d.valor for d in res_despesas)
             total_investimento = sum(c.valor_total for c in res_compras)
             
+            total_saidas = total_despesas + total_investimento
             return {
                 "faturamento": round(float(faturamento), 2),
                 "lucro_bruto": round(float(faturamento - cogs), 2),
-                "despesas": round(float(total_despesas), 2),
+                "despesas": round(float(total_saidas), 2),
                 "investimento": round(float(total_investimento), 2),
-                "lucro_liquido": round(float(faturamento - cogs - total_despesas), 2),
+                "lucro_liquido": round(float(faturamento - cogs - total_saidas), 2),
                 "vendas_count": len(set(venda.id for venda, item in res_vendas))
             }
 

@@ -112,8 +112,20 @@ class ItemCompra(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     compra_id: int = Field(foreign_key="compra.id", index=True)
     codigodebarras: str = Field(index=True)
+    nomedoproduto: Optional[str] = None
     quantidade: int
     preco_custo: float
+    preco_venda: Optional[float] = None
+
+class EstoquePendente(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    nomedoproduto: str
+    codigodebarras: str = Field(index=True)
+    quantidade: int
+    preco_custo: float
+    preco_venda: Optional[float] = None
+    compra_id: int = Field(foreign_key="compra.id", index=True)
+    data_entrada: datetime = Field(default_factory=lambda: datetime.now())
 
 class Despesa(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
