@@ -1,7 +1,7 @@
 from fastapi import HTTPException
 from sqlmodel import Session, select, SQLModel
 from datetime import datetime, date
-from database import Estoque, engine, Compra, ItemCompra, Funcionario, Setor, ComunicadoDestinatario, Comunicado
+from database import Estoque, EstoquePendente, engine, Compra, ItemCompra, Funcionario, Setor, ComunicadoDestinatario, Comunicado
 from logs import criar_log
 
 class EstoqueUpdate(SQLModel):
@@ -26,7 +26,9 @@ def registrar_compra(dados, funcionario_id: int, is_gerente: bool = False):
             valor_item = item.quantidade * item.preco_custo
             total_compra += valor_item
             
-            item_compra = ItemCompra(compra_id=compra.id, codigodebarras=item.codigodebarras, quantidade=item.quantidade, preco_custo=item.preco_custo)
+            prod = session.exec(select(Estoque).where(Estoque.codigodebarras == item.codigodebarras)).first()
+            nome = item.nomedoproduto or (prod.nomedoproduto if prod else item.codigodebarras)
+            item_compra = ItemCompra(compra_id=compra.id, codigodebarras=item.codigodebarras, nomedoproduto=nome, quantidade=item.quantidade, preco_custo=item.preco_custo, preco_venda=item.preco_venda)
             session.add(item_compra)
 
         compra.valor_total = round(total_compra, 2)
@@ -64,7 +66,7 @@ def listar_itens_compra(compra_id: int):
             prod = session.exec(select(Estoque).where(Estoque.codigodebarras == item.codigodebarras)).first()
             resultado.append({
                 "codigodebarras": item.codigodebarras,
-                "nomedoproduto": prod.nomedoproduto if prod else item.codigodebarras,
+                "nomedoproduto": item.nomedoproduto or (prod.nomedoproduto if prod else item.codigodebarras),
                 "quantidade": item.quantidade,
                 "preco_custo": item.preco_custo,
                 "total": round(item.quantidade * item.preco_custo, 2)
@@ -166,8 +168,30 @@ def _proc_estoque_item(session, item, func_id):
         prod.quantidade += item.quantidade
         prod.preco_custo = item.preco_custo
     else:
-        nova_mercadoria = Estoque(nomedoproduto=getattr(item, 'nomedoproduto', 'Novo'), quantidade=item.quantidade, preco=getattr(item, 'preco_venda', 0.0), preco_custo=item.preco_custo, codigodebarras=item.codigodebarras, categoria="Geral", funcionario_id=func_id)
-        session.add(nova_mercadoria)
+        pendente = session.exec(select(EstoquePendente).where(EstoquePendente.codigodebarras == item.codigodebarras, EstoquePendente.compra_id == item.compra_id)).first()
+        if not pendente:
+            nome = (item.nomedoproduto or item.codigodebarras)
+            session.add(EstoquePendente(nomedoproduto=nome, codigodebarras=item.codigodebarras, quantidade=item.quantidade, preco_custo=item.preco_custo, preco_venda=item.preco_venda, compra_id=item.compra_id))
+
+def listar_pendentes():
+    with Session(engine) as session:
+        pendentes = session.exec(select(EstoquePendente)).all()
+        return [{"id": p.id, "nomedoproduto": p.nomedoproduto, "codigodebarras": p.codigodebarras, "quantidade": p.quantidade, "preco_custo": p.preco_custo, "preco_venda": p.preco_venda, "compra_id": p.compra_id, "data_entrada": p.data_entrada} for p in pendentes]
+
+def confirmar_pendente(pendente_id: int, nomedoproduto: str, codigodebarras: str, preco_venda: float, categoria: str, funcionario_id: int):
+    with Session(engine) as session:
+        pendente = session.get(EstoquePendente, pendente_id)
+        if not pendente:
+            raise HTTPException(status_code=404, detail="Produto pendente não encontrado.")
+        existente = session.exec(select(Estoque).where(Estoque.codigodebarras == codigodebarras)).first()
+        if existente:
+            existente.quantidade += pendente.quantidade
+            existente.preco_custo = pendente.preco_custo
+        else:
+            session.add(Estoque(titulo=nomedoproduto, nomedoproduto=nomedoproduto, codigodebarras=codigodebarras, quantidade=pendente.quantidade, preco=preco_venda, preco_custo=pendente.preco_custo, categoria=categoria, funcionario_id=funcionario_id))
+        session.delete(pendente)
+        session.commit()
+        return {"detail": "Produto lançado no estoque com sucesso."}
 
 def listar_compras_do_dia():
     with Session(engine) as session:

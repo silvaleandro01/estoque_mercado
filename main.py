@@ -137,6 +137,22 @@ def deletar_estoque_route(estoque_id: int, funcionario=Depends(get_funcionario))
     verificar_permissao(funcionario, "estoque_editar")
     return deletar_estoque(estoque_id)
 
+@app.get("/estoque/pendentes")
+def get_pendentes(funcionario=Depends(get_funcionario)):
+    verificar_permissao(funcionario, "estoque_ver")
+    return listar_pendentes()
+
+class ConfirmarPendenteInput(BaseModel):
+    nomedoproduto: str
+    codigodebarras: str
+    preco_venda: float
+    categoria: str
+
+@app.post("/estoque/pendentes/{pendente_id}/confirmar")
+def confirmar_pendente_route(pendente_id: int, dados: ConfirmarPendenteInput, funcionario=Depends(get_funcionario)):
+    verificar_permissao(funcionario, "estoque_inserir")
+    return confirmar_pendente(pendente_id, dados.nomedoproduto, dados.codigodebarras, dados.preco_venda, dados.categoria, funcionario.id)
+
 @app.post("/vendas/inserir")
 def inserir_vendas(dados: VendaInput, funcionario=Depends(get_funcionario)):
     verificar_permissao(funcionario, "vendas")
