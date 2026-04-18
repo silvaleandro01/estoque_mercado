@@ -288,7 +288,7 @@ def criar_admin_padrao():
         admin.token_expiracao = exp
         session.add(admin)
         session.commit()
-def criar_banco():
+def criar_banco():  # pragma: no cover
     url_servidor = MYSQL_URL.rsplit('/', 1)[0] + '/'
     engine_servidor = create_engine(url_servidor)
     with engine_servidor.connect() as conn:

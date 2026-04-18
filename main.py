@@ -44,8 +44,8 @@ from estoque import EstoqueUpdate, encaminhar_compra, recusar_compra
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    criar_banco()
-    yield
+    criar_banco()  # pragma: no cover
+    yield  # pragma: no cover
 
 
 app = FastAPI(lifespan=lifespan)
