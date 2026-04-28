@@ -6,3 +6,8 @@ venv/
 __pycache__/
 *.py[cod]
 .env
+
+tests/
+pytest.ini
+.coveragerc
+.coverage
