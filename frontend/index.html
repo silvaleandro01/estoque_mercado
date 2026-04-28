@@ -7,20 +7,61 @@
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <div id="login-screen" class="container hidden">
+    <div id="login-screen" class="container">
         <h2>Acesso ao Sistema</h2>
-        <p>Insira seu Token de acesso (Bearer Token)</p>
-        <input type="text" id="token-input" placeholder="Cole seu token aqui...">
+        <p>Utilize seu usuário (nome.sobrenome)</p>
+        <div class="input-group-auth">
+            <input type="text" id="user-input" placeholder="usuario.sobrenome">
+        </div>
+        <div class="input-group-auth">
+            <input type="password" id="pass-input" placeholder="Sua senha">
+            <button type="button" class="toggle-btn" onclick="togglePassword('pass-input')">👁️</button>
+        </div>
         <button onclick="login()">Entrar</button>
     </div>
+
+    <div id="password-screen" class="container hidden">
+        <div class="card" style="width: 400px; text-align: center;">
+            <h2 id="pwd-title">Nova Senha Requerida</h2>
+            <p id="pwd-msg" style="font-size: 0.9rem; color: #666;"></p>
+            <div class="form-group-auth">
+                <div class="password-wrapper">
+                    <input class="form-control" type="password" id="new-password" placeholder="Digite sua nova senha">
+                    <button type="button" class="toggle-btn" onclick="togglePassword('new-password')">👁️</button>
+                </div>
+                <div class="password-wrapper">
+                    <input class="form-control" type="password" id="confirm-password" placeholder="Confirme sua nova senha">
+                    <button type="button" class="toggle-btn" onclick="togglePassword('confirm-password')">👁️</button>
+                </div>
+                <ul style="text-align: left; font-size: 0.75rem; color: #7f8c8d; margin-top: 10px;">
+                    <li>Mínimo 8 caracteres</li>
+                    <li>Letras Maiúsculas e Minúsculas</li>
+                    <li>Números e Símbolos (!@#$...)</li>
+                </ul>
+                <div id="pwd-feedback" class="feedback-msg"></div>
+            </div>
+            <button class="btn-success" onclick="submeterNovaSenha()">Salvar Nova Senha</button>
+        </div>
+    </div>
+
     <div id="main-layout" class="container hidden">
         <nav class="sidebar">
-            <h3>Mercado 24h</h3>
+            <h3 id="sidebar-user-name">Mercado 24h</h3>
             <ul>
                 <li onclick="navegar('dashboard')">Dashboard</li>
                 <li onclick="navegar('estoque')">Estoque</li>
                 <li onclick="navegar('vendas')">Vendas</li>
+                <li onclick="navegar('vendas-dia')">Vendas do Dia</li>
+                <li onclick="navegar('pontos')">Ponto Eletrônico</li>
+                <li onclick="navegar('compras')">Compras</li>
+                <li onclick="navegar('compras-dia')">Compras do Dia</li>
+                <li onclick="navegar('despesas')">Despesas</li>
+                <li onclick="navegar('movimentacao')">Movimentação</li>
                 <li onclick="navegar('funcionarios')">Funcionários</li>
+                <li onclick="navegar('solicitacoes')" id="menu-solicitacoes">Solicitações de Compra</li>
+                <li onclick="navegar('comunicados')" id="menu-comunicados">
+                    Comunicados <span id="badge-comunicados" style="display:none; background:#e74c3c; color:#fff; border-radius:50%; padding:1px 6px; font-size:0.75rem; margin-left:4px;">0</span>
+                </li>
                 <li onclick="logout()" class="danger">Sair</li>
             </ul>
         </nav>
@@ -36,16 +77,26 @@
             </div>
             
             <div id="view-estoque" class="view hidden">
-                <!-- Injetado via JS -->
             </div>
             
             <div id="view-vendas" class="view hidden">
-                <!-- Injetado via JS -->
+            </div>
+
+            <div id="view-vendas-dia" class="view hidden">
             </div>
             
             <div id="view-funcionarios" class="view hidden">
-                <!-- Injetado via JS -->
             </div>
+
+            <div id="view-pontos" class="view hidden">
+            </div>
+
+            <div id="view-compras" class="view hidden"></div>
+            <div id="view-compras-dia" class="view hidden"></div>
+            <div id="view-despesas" class="view hidden"></div>
+            <div id="view-movimentacao" class="view hidden"></div>
+            <div id="view-solicitacoes" class="view hidden"></div>
+            <div id="view-comunicados" class="view hidden"></div>
         </main>
     </div>
 
