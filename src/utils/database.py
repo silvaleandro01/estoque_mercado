@@ -86,6 +86,15 @@ class Log(SQLModel, table=True):
     data_hora: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class Despesa(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    data: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+    descricao: str
+    valor: float
+    categoria: str
+    funcionario_id: int = Field(foreign_key="funcionario.id", index=True)
+
+
 class Compra(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     data: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)

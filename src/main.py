@@ -10,6 +10,7 @@ from routes.vendas import router as vendas_router
 from routes.setores import router as setores_router
 from routes.logs import router as logs_router
 from routes.compras import router as compras_router
+from routes.despesas import router as despesas_router
 
 _DEFAULT_ORIGINS = "http://127.0.0.1:5500,http://localhost:5500,http://127.0.0.1:8080,http://localhost:8080"
 ALLOWED_ORIGINS = [
@@ -41,3 +42,4 @@ app.include_router(vendas_router)
 app.include_router(setores_router)
 app.include_router(logs_router)
 app.include_router(compras_router)
+app.include_router(despesas_router)

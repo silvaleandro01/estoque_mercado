@@ -182,3 +182,9 @@ class ConfirmarPendenteInput(BaseModel):
     codigodebarras: str
     preco_venda: float = Field(..., gt=0)
     categoria: str
+
+
+class DespesaInput(BaseModel):
+    descricao: str
+    valor: float = Field(..., gt=0)
+    categoria: Literal["Fixo", "Variavel", "Manutencao", "Outros"]
