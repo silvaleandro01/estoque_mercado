@@ -1,4 +1,6 @@
 import os
+import secrets
+import string
 from typing import Optional
 from datetime import datetime, timezone, date
 from sqlmodel import Field, SQLModel, create_engine, Session, select
@@ -103,7 +105,9 @@ def criar_admin_padrao():
             session.add(setor_admin)
             session.flush()
 
-        password_hash = hash_senha("Admin@123")
+        chars = string.ascii_letters + string.digits
+        senha_inicial = "".join(secrets.choice(chars) for _ in range(14))
+        password_hash = hash_senha(senha_inicial)
         admin = Funcionario(
             nome="admin", sobrenome="master",
             data_nascimento=date(2000, 1, 1),
@@ -111,11 +115,18 @@ def criar_admin_padrao():
             setor_id=setor_admin.id, is_admin=True,
             password_hash=password_hash,
             senha_atualizada_em=datetime.now(timezone.utc),
+            senha_temporaria=True,
         )
         session.add(admin)
         session.flush()
         session.add(HistoricoSenha(funcionario_id=admin.id, password_hash=password_hash))
         session.commit()
+
+        print("=" * 60)  # noqa: T201
+        print("Admin padrão criado — usuário: admin.master")
+        print(f"Senha inicial (temporária, só exibida agora): {senha_inicial}")
+        print("Troque essa senha no primeiro login.")
+        print("=" * 60)
 
 
 def criar_banco():  # pragma: no cover
