@@ -1,9 +1,10 @@
+from datetime import datetime, timezone
 from fastapi import HTTPException
 from sqlmodel import Session, select
 
-from utils.database import Estoque, engine
+from utils.database import Estoque, Compra, ItemCompra, engine
 from logs.logs import criar_log
-from schemas.schemas import EstoqueCreate, EstoqueUpdate
+from schemas.schemas import EstoqueCreate, EstoqueUpdate, ConfirmarPendenteInput
 
 
 def criar_estoque(dados: EstoqueCreate, funcionario_id: int):
@@ -100,3 +101,69 @@ def deletar_estoque(estoque_id: int):
         except Exception:
             session.rollback()
             raise HTTPException(status_code=500, detail="Erro ao deletar estoque")
+
+
+def listar_pendentes():
+    with Session(engine) as session:
+        itens = session.exec(
+            select(ItemCompra, Compra)
+            .join(Compra, ItemCompra.compra_id == Compra.id)
+            .where(Compra.status == "autorizada", ItemCompra.lancado_em.is_(None))
+        ).all()
+        return [
+            {
+                "id": item.id,
+                "compra_id": compra.id,
+                "data_entrada": compra.data_autorizacao,
+                "nomedoproduto": item.nomedoproduto,
+                "codigodebarras": item.codigodebarras,
+                "quantidade": item.quantidade,
+                "preco_custo": item.preco_custo_unitario,
+                "preco_venda": item.preco_venda,
+            }
+            for item, compra in itens
+        ]
+
+
+def confirmar_pendente(item_id: int, dados: ConfirmarPendenteInput, funcionario_id: int):
+    with Session(engine) as session:
+        item = session.get(ItemCompra, item_id)
+        if not item:
+            raise HTTPException(status_code=404, detail="Item pendente não encontrado")
+        if item.lancado_em is not None:
+            raise HTTPException(status_code=400, detail="Item já foi lançado no estoque")
+
+        produto_existente = session.exec(
+            select(Estoque).where(Estoque.codigodebarras == dados.codigodebarras)
+        ).first()
+
+        if produto_existente:
+            produto_existente.quantidade += item.quantidade
+            produto_existente.preco_custo = item.preco_custo_unitario
+            produto_existente.funcionario_id = funcionario_id
+            session.add(produto_existente)
+            nome_produto = produto_existente.nomedoproduto
+        else:
+            novo = Estoque(
+                nomedoproduto=dados.nomedoproduto,
+                quantidade=item.quantidade,
+                preco=dados.preco_venda,
+                preco_custo=item.preco_custo_unitario,
+                codigodebarras=dados.codigodebarras,
+                categoria=dados.categoria,
+                funcionario_id=funcionario_id,
+            )
+            session.add(novo)
+            nome_produto = novo.nomedoproduto
+
+        item.lancado_em = datetime.now(timezone.utc)
+        session.add(item)
+
+        try:
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise HTTPException(status_code=500, detail="Erro ao lançar produto no estoque")
+
+        criar_log(funcionario_id, f"Lançamento de compra pendente: {nome_produto}")
+        return {"detail": "Produto lançado no estoque com sucesso"}

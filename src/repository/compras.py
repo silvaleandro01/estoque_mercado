@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from fastapi import HTTPException
 from sqlmodel import Session, select
 
-from utils.database import Compra, ItemCompra, Estoque, Funcionario, engine
+from utils.database import Compra, ItemCompra, Funcionario, engine
 from logs.logs import criar_log
 from schemas.schemas import CompraInput
 
@@ -123,28 +123,9 @@ def autorizar_compra(compra_id: int, funcionario_id: int):
                 detail=f"Pedido não pode sair do status '{compra.status}' para 'autorizada'",
             )
 
-        itens = session.exec(select(ItemCompra).where(ItemCompra.compra_id == compra_id)).all()
-        for item in itens:
-            produto = session.exec(
-                select(Estoque).where(Estoque.codigodebarras == item.codigodebarras)
-            ).first()
-            if produto:
-                produto.quantidade += item.quantidade
-                produto.preco_custo = item.preco_custo_unitario
-                session.add(produto)
-            else:
-                session.add(Estoque(
-                    nomedoproduto=item.nomedoproduto,
-                    quantidade=item.quantidade,
-                    preco=item.preco_venda or 0.0,
-                    preco_custo=item.preco_custo_unitario,
-                    codigodebarras=item.codigodebarras,
-                    categoria=item.categoria or "Geral",
-                    funcionario_id=funcionario_id,
-                ))
-
         compra.status = "autorizada"
         compra.aprovador_id = funcionario_id
+        compra.data_autorizacao = datetime.now(timezone.utc)
 
         try:
             session.add(compra)
@@ -153,8 +134,8 @@ def autorizar_compra(compra_id: int, funcionario_id: int):
             session.rollback()
             raise HTTPException(status_code=500, detail="Erro ao autorizar pedido de compra")
 
-        criar_log(funcionario_id, f"Pedido de compra autorizado e estoque abastecido: #{compra.id}")
-        return {"msg": f"Pedido #{compra.id} autorizado e estoque abastecido"}
+        criar_log(funcionario_id, f"Pedido de compra autorizado, aguardando lançamento no estoque: #{compra.id}")
+        return {"msg": f"Pedido #{compra.id} autorizado, aguardando lançamento no estoque"}
 
 
 def compras_do_dia():

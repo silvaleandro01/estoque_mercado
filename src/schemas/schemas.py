@@ -162,3 +162,23 @@ class CompraOut(BaseModel):
     status: str
 
     model_config = {"from_attributes": True}
+
+
+class EstoquePendenteOut(BaseModel):
+    id: int
+    compra_id: int
+    data_entrada: Optional[datetime] = None
+    nomedoproduto: str
+    codigodebarras: str
+    quantidade: int
+    preco_custo: float
+    preco_venda: Optional[float] = None
+
+    model_config = {"from_attributes": True}
+
+
+class ConfirmarPendenteInput(BaseModel):
+    nomedoproduto: str
+    codigodebarras: str
+    preco_venda: float = Field(..., gt=0)
+    categoria: str
