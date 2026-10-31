@@ -1,3 +1,4 @@
+from typing import Sequence, Union
 from fastapi import HTTPException, Header
 from sqlmodel import Session
 
@@ -12,12 +13,13 @@ def get_funcionario(authorization: str = Header(...)):
     return validar_funcionario_por_token(token)
 
 
-def verificar_permissao(funcionario: Funcionario, rota: str):
+def verificar_permissao(funcionario: Funcionario, rota: Union[str, Sequence[str]]):
     if funcionario.is_admin:
         return True
+    setores_permitidos = (rota,) if isinstance(rota, str) else tuple(rota)
     with Session(engine) as session:
         setor = session.get(Setor, funcionario.setor_id)
-        if not setor or setor.tipo != rota:
+        if not setor or setor.tipo not in setores_permitidos:
             raise HTTPException(status_code=403, detail="Acesso negado")
     return True
 
