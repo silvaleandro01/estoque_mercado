@@ -1434,7 +1434,7 @@ async function carregarFuncionarios() {
                 </select>
                 <select class="form-control" id="func-cargo">
                     <option value="operacional">Operacional</option>
-                    <option value="gerente de setor">Gerente de Setor</option>
+                    <option value="gerente">Gerente de Setor</option>
                     <option value="diretoria">Diretoria</option>
                 </select>
                 <div style="display:flex; align-items:center; gap:5px; padding: 5px;">

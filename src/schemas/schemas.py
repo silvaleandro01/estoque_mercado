@@ -1,8 +1,10 @@
 import re
-from typing import List, Optional
-from datetime import date
+from typing import List, Literal, Optional
+from datetime import date, datetime
 from pydantic import BaseModel, Field, field_validator
 from sqlmodel import SQLModel
+
+Cargo = Literal["operacional", "gerente", "diretoria"]
 
 
 class LoginRequest(BaseModel):
@@ -17,6 +19,7 @@ class FuncionarioCreate(BaseModel):
     genero: str
     possui_filhos: bool
     setor_id: int
+    cargo: Cargo = "operacional"
     senha: Optional[str] = None
     cpf: str
     email: str
@@ -65,6 +68,7 @@ class FuncionarioOut(BaseModel):
     genero: str
     possui_filhos: bool
     setor_id: int
+    cargo: Cargo
     is_admin: bool
     cpf: Optional[str] = None
     email: Optional[str] = None
@@ -124,3 +128,37 @@ class RecuperarSenhaRequest(BaseModel):
     @classmethod
     def validar_cpf(cls, v: str) -> str:
         return re.sub(r"\D", "", v)
+
+
+class ItemCompraInput(BaseModel):
+    codigodebarras: str
+    quantidade: int = Field(..., gt=0)
+    preco_custo: float = Field(..., gt=0)
+    nomedoproduto: str
+    preco_venda: float = Field(..., gt=0)
+    categoria: str
+
+
+class CompraInput(BaseModel):
+    itens: List[ItemCompraInput] = Field(..., min_length=1)
+
+
+class ItemCompraOut(BaseModel):
+    nomedoproduto: str
+    codigodebarras: str
+    quantidade: int
+    preco_custo: float
+    total: float
+
+    model_config = {"from_attributes": True}
+
+
+class CompraOut(BaseModel):
+    id: int
+    data: datetime
+    solicitante: str
+    aprovador: Optional[str] = None
+    valor_total: float
+    status: str
+
+    model_config = {"from_attributes": True}

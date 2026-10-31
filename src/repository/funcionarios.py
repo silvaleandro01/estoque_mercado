@@ -89,6 +89,7 @@ def criar_funcionario(dados: FuncionarioCreate):
             genero=dados.genero,
             possui_filhos=dados.possui_filhos,
             setor_id=dados.setor_id,
+            cargo=dados.cargo,
             cpf=dados.cpf,
             email=dados.email,
             cep=dados.cep,
@@ -99,6 +100,7 @@ def criar_funcionario(dados: FuncionarioCreate):
             numero=dados.numero,
             password_hash=password_hash,
             senha_atualizada_em=datetime.now(timezone.utc),
+            senha_temporaria=True,
         )
         try:
             session.add(funcionario)
@@ -149,6 +151,7 @@ def atualizar_funcionario(funcionario_id: int, dados: FuncionarioCreate):
         funcionario.genero = dados.genero
         funcionario.possui_filhos = dados.possui_filhos
         funcionario.setor_id = dados.setor_id
+        funcionario.cargo = dados.cargo
         funcionario.cpf = dados.cpf
         funcionario.email = dados.email
         funcionario.cep = dados.cep
