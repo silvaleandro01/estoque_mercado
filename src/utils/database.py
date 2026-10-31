@@ -95,6 +95,23 @@ class Despesa(SQLModel, table=True):
     funcionario_id: int = Field(foreign_key="funcionario.id", index=True)
 
 
+class Comunicado(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    titulo: str
+    conteudo: str
+    autor_id: int = Field(foreign_key="funcionario.id", index=True)
+    data_criacao: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+    para_todos: bool = Field(default=True)
+
+
+class ComunicadoDestinatario(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    comunicado_id: int = Field(foreign_key="comunicado.id", index=True)
+    funcionario_id: int = Field(foreign_key="funcionario.id", index=True)
+    lido: bool = Field(default=False)
+    data_leitura: Optional[datetime] = Field(default=None)
+
+
 class Compra(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     data: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)

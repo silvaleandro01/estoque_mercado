@@ -56,3 +56,13 @@ def exigir_ver_compras(funcionario: Funcionario) -> bool:
     if funcionario.is_admin or funcionario.cargo == "diretoria" or _setor_compras(funcionario):
         return True
     raise HTTPException(status_code=403, detail="Acesso negado")
+
+
+def exigir_escrever_comunicado(funcionario: Funcionario) -> bool:
+    if funcionario.is_admin or funcionario.cargo in ("gerente", "diretoria"):
+        return True
+    with Session(engine) as session:
+        setor = session.get(Setor, funcionario.setor_id)
+        if setor and setor.tipo == "rh":
+            return True
+    raise HTTPException(status_code=403, detail="Acesso negado")

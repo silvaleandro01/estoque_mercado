@@ -188,3 +188,10 @@ class DespesaInput(BaseModel):
     descricao: str
     valor: float = Field(..., gt=0)
     categoria: Literal["Fixo", "Variavel", "Manutencao", "Outros"]
+
+
+class ComunicadoInput(BaseModel):
+    titulo: str
+    conteudo: str
+    para_todos: bool = True
+    destinatarios: List[int] = []
