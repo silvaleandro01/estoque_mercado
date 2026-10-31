@@ -1,10 +1,12 @@
+from typing import List
 from fastapi import APIRouter, Depends
 
-from schemas.schemas import EstoqueCreate, EstoqueUpdate
+from schemas.schemas import EstoqueCreate, EstoqueUpdate, EstoquePendenteOut, ConfirmarPendenteInput
 from services.auth import get_funcionario, verificar_permissao
 from repository.estoque import (
     criar_estoque, mostrar_produtos, buscar_estoque,
     atualizar_estoque, deletar_estoque,
+    listar_pendentes, confirmar_pendente,
 )
 
 router = APIRouter(prefix="/estoque", tags=["Estoque"])
@@ -38,3 +40,15 @@ def atualizar(estoque_id: int, dados: EstoqueUpdate, funcionario=Depends(get_fun
 def deletar(estoque_id: int, funcionario=Depends(get_funcionario)):
     verificar_permissao(funcionario, "estoque")
     return deletar_estoque(estoque_id)
+
+
+@router.get("/pendentes", response_model=List[EstoquePendenteOut])
+def pendentes(funcionario=Depends(get_funcionario)):
+    verificar_permissao(funcionario, "estoque")
+    return listar_pendentes()
+
+
+@router.post("/pendentes/{item_id}/confirmar")
+def confirmar(item_id: int, dados: ConfirmarPendenteInput, funcionario=Depends(get_funcionario)):
+    verificar_permissao(funcionario, "estoque")
+    return confirmar_pendente(item_id, dados, funcionario.id)

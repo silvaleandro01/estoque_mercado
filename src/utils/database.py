@@ -93,6 +93,7 @@ class Compra(SQLModel, table=True):
     aprovador_id: Optional[int] = Field(default=None, foreign_key="funcionario.id")
     valor_total: float = 0.0
     status: str = Field(default="pendente", index=True)
+    data_autorizacao: Optional[datetime] = Field(default=None)
 
 
 class ItemCompra(SQLModel, table=True):
@@ -105,6 +106,7 @@ class ItemCompra(SQLModel, table=True):
     quantidade: int
     preco_custo_unitario: float
     preco_custo_total: float
+    lancado_em: Optional[datetime] = Field(default=None)
 
 
 engine = create_engine(DATABASE_URL, connect_args=_connect_args)
