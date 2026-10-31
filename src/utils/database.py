@@ -27,6 +27,7 @@ class Funcionario(SQLModel, table=True):
     genero: str
     possui_filhos: bool
     setor_id: int = Field(foreign_key="setor.id", index=True)
+    cargo: str = Field(default="operacional")
     is_admin: bool = Field(default=False)
     cpf: Optional[str] = Field(default=None, unique=True, index=True)
     email: Optional[str] = Field(default=None, unique=True, index=True)
@@ -85,6 +86,27 @@ class Log(SQLModel, table=True):
     data_hora: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class Compra(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    data: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+    solicitante_id: int = Field(foreign_key="funcionario.id", index=True)
+    aprovador_id: Optional[int] = Field(default=None, foreign_key="funcionario.id")
+    valor_total: float = 0.0
+    status: str = Field(default="pendente", index=True)
+
+
+class ItemCompra(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    compra_id: int = Field(foreign_key="compra.id", index=True)
+    codigodebarras: str = Field(index=True)
+    nomedoproduto: str
+    categoria: Optional[str] = Field(default=None)
+    preco_venda: Optional[float] = Field(default=None)
+    quantidade: int
+    preco_custo_unitario: float
+    preco_custo_total: float
+
+
 engine = create_engine(DATABASE_URL, connect_args=_connect_args)
 
 
@@ -112,7 +134,7 @@ def criar_admin_padrao():
             nome="admin", sobrenome="master",
             data_nascimento=date(2000, 1, 1),
             genero="outro", possui_filhos=False,
-            setor_id=setor_admin.id, is_admin=True,
+            setor_id=setor_admin.id, cargo="diretoria", is_admin=True,
             password_hash=password_hash,
             senha_atualizada_em=datetime.now(timezone.utc),
             senha_temporaria=True,
