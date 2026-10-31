@@ -57,6 +57,28 @@ class FuncionarioCreate(BaseModel):
         return v
 
 
+class FuncionarioOut(BaseModel):
+    id: int
+    nome: str
+    sobrenome: str
+    data_nascimento: date
+    genero: str
+    possui_filhos: bool
+    setor_id: int
+    is_admin: bool
+    cpf: Optional[str] = None
+    email: Optional[str] = None
+    cep: Optional[str] = None
+    estado: Optional[str] = None
+    cidade: Optional[str] = None
+    bairro: Optional[str] = None
+    rua: Optional[str] = None
+    numero: Optional[str] = None
+    senha_temporaria: bool
+
+    model_config = {"from_attributes": True}
+
+
 class SetorCreate(SQLModel):
     nome: str
     tipo: str

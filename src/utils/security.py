@@ -1,11 +1,21 @@
 import os
+from datetime import datetime, timedelta, timezone
+from dotenv import load_dotenv
 from fastapi import HTTPException
 from jose import jwt, JWTError
 from passlib.context import CryptContext
 from sqlmodel import Session
 
-SECRET_KEY = os.getenv("SECRET_KEY", "chave_padrao_temporaria")
+load_dotenv()
+
+SECRET_KEY = os.getenv("SECRET_KEY")
+if not SECRET_KEY:
+    raise RuntimeError(
+        "SECRET_KEY não configurada. Defina a variável de ambiente SECRET_KEY "
+        "(veja .env.exemplo) antes de iniciar a aplicação."
+    )
 ALGORITHM = "HS256"
+TOKEN_EXPIRA_HORAS = int(os.getenv("TOKEN_EXPIRA_HORAS", "8"))
 
 _pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -19,18 +29,19 @@ def verificar_senha(senha: str, hash: str) -> bool:
 
 
 def criar_token(funcionario_id: int, is_admin: bool) -> str:
-    from datetime import datetime, timezone
+    agora = datetime.now(timezone.utc)
     payload = {
         "sub": str(funcionario_id),
         "is_admin": is_admin,
-        "iat": datetime.now(timezone.utc).timestamp(),
+        "iat": agora.timestamp(),
+        "exp": (agora + timedelta(hours=TOKEN_EXPIRA_HORAS)).timestamp(),
     }
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 
 def verificar_token(token: str):
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM], options={"verify_exp": False})
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         sub = payload.get("sub")
         if sub is None:
             return None
