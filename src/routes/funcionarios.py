@@ -1,6 +1,10 @@
+from typing import List
+
 from fastapi import APIRouter, Depends
 
-from schemas.schemas import FuncionarioCreate, LoginRequest, TrocarSenhaRequest, RecuperarSenhaRequest
+from schemas.schemas import (
+    FuncionarioCreate, FuncionarioOut, LoginRequest, TrocarSenhaRequest, RecuperarSenhaRequest,
+)
 from services.auth import get_funcionario, verificar_permissao
 from repository.funcionarios import (
     autenticar_funcionario, criar_funcionario, listar_funcionarios, buscar_funcionario,
@@ -20,25 +24,25 @@ def recuperar(dados: RecuperarSenhaRequest):
     return recuperar_senha(dados)
 
 
-@router.post("/criar")
+@router.post("/criar", response_model=FuncionarioOut)
 def criar(dados: FuncionarioCreate, funcionario=Depends(get_funcionario)):
     verificar_permissao(funcionario, "rh")
     return criar_funcionario(dados)
 
 
-@router.get("/listar")
+@router.get("/listar", response_model=List[FuncionarioOut])
 def listar(funcionario=Depends(get_funcionario)):
     verificar_permissao(funcionario, "rh")
     return listar_funcionarios()
 
 
-@router.get("/buscar/{id}")
+@router.get("/buscar/{id}", response_model=FuncionarioOut)
 def buscar(id: int, funcionario=Depends(get_funcionario)):
     verificar_permissao(funcionario, "rh")
     return buscar_funcionario(id)
 
 
-@router.put("/atualizar/{id}")
+@router.put("/atualizar/{id}", response_model=FuncionarioOut)
 def atualizar(id: int, dados: FuncionarioCreate, funcionario=Depends(get_funcionario)):
     verificar_permissao(funcionario, "rh")
     return atualizar_funcionario(id, dados)

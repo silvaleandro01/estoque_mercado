@@ -1,8 +1,18 @@
 const API_URL = "http://127.0.0.1:8000";
 
+function escapeHtml(valor) {
+    if (valor === null || valor === undefined) return '';
+    return String(valor)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 let viewAtual = null;
 let carrinho = [];
-let pendingFuncionarioId = null;
+let senhaAtualPendente = null;
 let editandoFuncionarioId = null;
 let editandoProdutoId = null;
 let editandoSetorId = null;
@@ -27,10 +37,10 @@ window.login = async function () {
     }
 
     try {
-        const res = await fetch(`${API_URL}/login`, {
+        const res = await fetch(`${API_URL}/funcionarios/login`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ username: user, password: pass })
+            body: JSON.stringify({ username: user, senha: pass })
         });
 
         let data = null;
@@ -44,33 +54,29 @@ window.login = async function () {
             return;
         }
 
-        if (data?.status === "primeiro_acesso" || data?.status === "senha_expirada") {
-            pendingFuncionarioId = data?.funcionario_id;
-
-            const loginScr = document.getElementById('login-screen');
-            const pwdScr = document.getElementById('password-screen');
-
-            if (loginScr && pwdScr) {
-                loginScr.classList.add('hidden');
-                pwdScr.classList.remove('hidden');
-                if (document.getElementById('pwd-title'))
-                    document.getElementById('pwd-title').innerText = data?.status === "primeiro_acesso" ? "Primeiro Acesso" : "Senha Expirada";
-                if (document.getElementById('pwd-msg'))
-                    document.getElementById('pwd-msg').innerText = "Defina sua senha de acesso.";
-            } else {
-                alert("Erro: Telas de transição não encontradas no HTML (login-screen ou password-screen).");
-            }
-        } else if (data?.status === "sucesso") {
-            console.log("Login bem sucedido, token armazenado.");
+        if (data?.token) {
             localStorage.setItem('api_token', data?.token);
             localStorage.setItem('user_setor', data?.setor);
             localStorage.setItem('is_admin', data?.is_admin);
             localStorage.setItem('user_cargo', data?.cargo);
             localStorage.setItem('bate_ponto', data?.bate_ponto);
             localStorage.setItem('nome_completo', data?.nome_completo || '');
+
+            if (data?.senha_temporaria) {
+                senhaAtualPendente = pass;
+                const loginScr = document.getElementById('login-screen');
+                const pwdScr = document.getElementById('password-screen');
+                loginScr.classList.add('hidden');
+                pwdScr.classList.remove('hidden');
+                document.getElementById('pwd-title').innerText = "Primeiro Acesso";
+                document.getElementById('pwd-msg').innerText = "Defina sua senha de acesso.";
+                return;
+            }
+
+            console.log("Login bem sucedido, token armazenado.");
             checkAuth();
         } else {
-            alert("Servidor retornou um status desconhecido: " + data?.status);
+            alert("Servidor retornou uma resposta inesperada (sem token).");
         }
     } catch (err) {
         console.error("Erro catastrófico no login:", err);
@@ -95,19 +101,17 @@ window.submeterNovaSenha = async function () {
         return;
     }
     try {
-        const res = await apiFetch('/funcionarios/definir-senha', {
-            method: 'POST',
-            body: JSON.stringify({ funcionario_id: pendingFuncionarioId, nova_senha: novaSenha })
+        const res = await apiFetch('/funcionarios/trocar-senha', {
+            method: 'PATCH',
+            body: JSON.stringify({ senha_atual: senhaAtualPendente, nova_senha: novaSenha })
         });
         if (res) {
-            alert("Senha cadastrada com sucesso! Por favor, realize o login com sua nova senha.");
             document.getElementById('password-screen').classList.add('hidden');
-            document.getElementById('login-screen').classList.remove('hidden');
             document.getElementById('new-password').value = '';
             document.getElementById('confirm-password').value = '';
-            document.getElementById('pass-input').value = '';
             feedback.style.display = 'none';
-            pendingFuncionarioId = null;
+            senhaAtualPendente = null;
+            checkAuth();
         } else {
             feedback.innerText = "Erro ao definir senha. Verifique os requisitos.";
             feedback.className = 'feedback-msg feedback-error';
@@ -375,11 +379,11 @@ async function carregarEstoque() {
                     <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px; margin-bottom:12px;">
                         <div>
                             <label style="font-size:0.75rem; color:#666; display:block; margin-bottom:3px;">Nome do Produto</label>
-                            <input class="form-control" style="margin:0;" id="pend-nome-${p.id}" value="${p.nomedoproduto}">
+                            <input class="form-control" style="margin:0;" id="pend-nome-${p.id}" value="${escapeHtml(p.nomedoproduto)}">
                         </div>
                         <div>
                             <label style="font-size:0.75rem; color:#666; display:block; margin-bottom:3px;">Código de Barras</label>
-                            <input class="form-control" style="margin:0;" id="pend-cod-${p.id}" value="${p.codigodebarras}">
+                            <input class="form-control" style="margin:0;" id="pend-cod-${p.id}" value="${escapeHtml(p.codigodebarras)}">
                         </div>
                         <div>
                             <label style="font-size:0.75rem; color:#666; display:block; margin-bottom:3px;">Qtd. Recebida</label>
@@ -416,8 +420,8 @@ async function carregarEstoque() {
         html += `
             <tr>
                 <td>${p.id}</td>
-                <td>${p.nomedoproduto}</td>
-                <td>${p.codigodebarras}</td>
+                <td>${escapeHtml(p.nomedoproduto)}</td>
+                <td>${escapeHtml(p.codigodebarras)}</td>
                 <td>${p.quantidade}</td>
                 <td>R$ ${p.preco}</td>
                 ${podeEditar ? `<td>
@@ -478,7 +482,7 @@ async function carregarMovimentacao() {
                         <tr>
                             <td>${new Date(l.data_hora).toLocaleString()}</td>
                             <td>${l.funcionario_id}</td>
-                            <td>${l.tipo_movimentacao}</td>
+                            <td>${escapeHtml(l.tipo_movimentacao)}</td>
                         </tr>
                     `).join('')}
                 </tbody>
@@ -766,7 +770,7 @@ function atualizarCarrinhoUI() {
 
         tbody.innerHTML += `
             <tr>
-                <td>${nome}<br><small>${item.codigodebarras}</small></td>
+                <td>${escapeHtml(nome)}<br><small>${escapeHtml(item.codigodebarras)}</small></td>
                 <td>${item.quantidade}</td>
                 <td><button class="btn-danger" onclick="removerDoCarrinho(${index})">X</button></td>
             </tr>
@@ -902,7 +906,7 @@ function emitirNotaFiscal(venda, metodo, parcelas) {
         const preco = Number(i.preco_total) || 0;
         const unitario = Number(i.preco_unitario) || 0;
 
-        itensHtml += `<tr><td>${nome}<br><small>${i.codigodebarras}</small></td><td>${i.quantidade}x</td><td>R$ ${unitario.toFixed(2)}</td><td>R$ ${preco.toFixed(2)}</td></tr>`;
+        itensHtml += `<tr><td>${escapeHtml(nome)}<br><small>${escapeHtml(i.codigodebarras)}</small></td><td>${i.quantidade}x</td><td>R$ ${unitario.toFixed(2)}</td><td>R$ ${preco.toFixed(2)}</td></tr>`;
     });
 
     const totalFinal = Number(venda.valor_total) || 0;
@@ -978,7 +982,7 @@ async function carregarCompras(containerId = 'view-compras') {
                         <tr>
                             <td><button class="btn" style="padding:3px 8px; font-size:0.75rem; background:#8e44ad; color:#fff;" onclick="abrirDetalheCompra(${c.id})">🗒️ #${c.id}</button></td>
                             <td>${new Date(c.data).toLocaleString()}</td>
-                            <td>${c.solicitante || '-'}</td>
+                            <td>${escapeHtml(c.solicitante) || '-'}</td>
                             <td>R$ ${c.valor_total.toFixed(2)}</td>
                             <td><span class="badge" style="background:${corStatus[c.status] || '#95a5a6'}">${labelStatus[c.status] || c.status.toUpperCase()}</span></td>
                             <td>${renderBotoesAcao(c)}</td>
@@ -1119,7 +1123,7 @@ function atualizarCarrinhoCompraUI() {
     if (!tbody) return;
     tbody.innerHTML = carrinhoCompra.map((i, index) => `
         <tr>
-            <td>${i.nomedoproduto}<br><small>${i.codigodebarras}</small></td>
+            <td>${escapeHtml(i.nomedoproduto)}<br><small>${escapeHtml(i.codigodebarras)}</small></td>
             <td>${i.quantidade}</td>
             <td>R$ ${i.preco_custo.toFixed(2)}</td>
             <td>R$ ${(i.quantidade * i.preco_custo).toFixed(2)}</td>
@@ -1176,8 +1180,8 @@ async function abrirDetalheCompra(id) {
             <div style="display:flex; gap:20px; flex-wrap:wrap; margin-bottom:16px;">
                 <div class="ponto-stamp">Data:<br><strong>${c ? new Date(c.data).toLocaleDateString() : '-'}</strong></div>
                 <div class="ponto-stamp">Hora:<br><strong>${c ? new Date(c.data).toLocaleTimeString() : '-'}</strong></div>
-                <div class="ponto-stamp">Solicitante:<br><strong>${c?.solicitante || '-'}</strong></div>
-                <div class="ponto-stamp">Aprovador:<br><strong>${c?.aprovador || 'Aguardando'}</strong></div>
+                <div class="ponto-stamp">Solicitante:<br><strong>${escapeHtml(c?.solicitante) || '-'}</strong></div>
+                <div class="ponto-stamp">Aprovador:<br><strong>${escapeHtml(c?.aprovador) || 'Aguardando'}</strong></div>
                 <div class="ponto-stamp" style="background:${c ? (corStatus[c.status] || '#95a5a6') : '#95a5a6'}; color:#fff;">
                     Status:<br><strong>${c ? (labelStatus[c.status] || c.status.toUpperCase()) : '-'}</strong>
                 </div>
@@ -1198,8 +1202,8 @@ async function abrirDetalheCompra(id) {
                 <tbody>
                     ${itens.map(i => `
                         <tr style="border-top:1px solid #eee;">
-                            <td style="padding:8px;">${i.nomedoproduto}</td>
-                            <td style="padding:8px; color:#666; font-size:0.85rem;">${i.codigodebarras}</td>
+                            <td style="padding:8px;">${escapeHtml(i.nomedoproduto)}</td>
+                            <td style="padding:8px; color:#666; font-size:0.85rem;">${escapeHtml(i.codigodebarras)}</td>
                             <td style="padding:8px; text-align:center;">${i.quantidade}</td>
                             <td style="padding:8px; text-align:right;">R$ ${i.preco_custo.toFixed(2)}</td>
                             <td style="padding:8px; text-align:right; font-weight:bold;">R$ ${i.total.toFixed(2)}</td>
@@ -1244,8 +1248,8 @@ async function verItensCompra(id, btn) {
             <tbody>
                 ${itens.map(i => `
                     <tr style="border-top:1px solid #eee;">
-                        <td style="padding:4px 6px;">${i.nomedoproduto}</td>
-                        <td style="padding:4px 6px; color:#666;">${i.codigodebarras}</td>
+                        <td style="padding:4px 6px;">${escapeHtml(i.nomedoproduto)}</td>
+                        <td style="padding:4px 6px; color:#666;">${escapeHtml(i.codigodebarras)}</td>
                         <td style="padding:4px 6px; text-align:center;">${i.quantidade}</td>
                         <td style="padding:4px 6px; text-align:right;">R$ ${i.preco_custo.toFixed(2)}</td>
                         <td style="padding:4px 6px; text-align:right; font-weight:bold;">R$ ${i.total.toFixed(2)}</td>
@@ -1382,8 +1386,8 @@ async function carregarFuncionarios() {
                     ${listaSetores.map(s => `
                         <tr>
                             <td>${s.id}</td>
-                            <td>${s.nome}</td>
-                            <td>${s.tipo.charAt(0).toUpperCase() + s.tipo.slice(1)}</td>
+                            <td>${escapeHtml(s.nome)}</td>
+                            <td>${escapeHtml(s.tipo.charAt(0).toUpperCase() + s.tipo.slice(1))}</td>
                             <td>
                                 ${s.tipo !== 'admin' && isRH ? `
                                     <button class="btn" style="padding: 5px 10px; font-size: 0.8rem; background: #ff9800; color: white;" onclick="prepararEdicaoSetor(${s.id})">Editar</button>
@@ -1426,7 +1430,7 @@ async function carregarFuncionarios() {
                 </select>
                 <select class="form-control" id="func-setor">
                     <option value="">Selecione o Setor</option>
-                    ${listaSetores.filter(s => s.tipo !== 'admin').map(s => `<option value="${s.id}">${s.nome} (${s.tipo})</option>`).join('')}
+                    ${listaSetores.filter(s => s.tipo !== 'admin').map(s => `<option value="${s.id}">${escapeHtml(s.nome)} (${escapeHtml(s.tipo)})</option>`).join('')}
                 </select>
                 <select class="form-control" id="func-cargo">
                     <option value="operacional">Operacional</option>
@@ -1461,19 +1465,19 @@ async function carregarFuncionarios() {
         html += `
             <tr>
                 <td>${f.id}</td>
-                <td>${f.nome} ${f.sobrenome}</td>
-                <td>${setor ? setor.nome : f.setor_id}</td>
+                <td>${escapeHtml(f.nome)} ${escapeHtml(f.sobrenome)}</td>
+                <td>${setor ? escapeHtml(setor.nome) : f.setor_id}</td>
                 <td>${f.cargo.charAt(0).toUpperCase() + f.cargo.slice(1)}</td>
                 <td>${f.is_admin ? 'Sim' : 'Não'}</td>
                 <td>
                     ${isRH ? `<button class="btn" style="padding: 5px 10px; font-size: 0.8rem; background: #ff9800; color: white;"
                         onclick="prepararEdicaoFuncionario(${f.id})">Editar</button>` : ""}
-                    <button class="btn" style="padding: 5px 10px; font-size: 0.8rem;" 
-                        onclick="verRelatorioPontoIndividual(${f.id}, '${(f.nome + ' ' + f.sobrenome).replace(/'/g, "\\\\'")}')">Ver Ponto Mensal</button>
-                    <button class="btn" style="padding: 5px 10px; font-size: 0.8rem; background: #673ab7; color: white;" 
-                        onclick="verHoleriteRH(${f.id}, '${(f.nome + ' ' + f.sobrenome).replace(/'/g, "\\\\'")}')">Holerite</button>
-                    ${isRH ? `<button class="btn-success" style="padding: 5px 10px; font-size: 0.8rem;" 
-                        onclick="abrirGerenciamentoSalario(${f.id}, '${(f.nome + ' ' + f.sobrenome).replace(/'/g, "\\\\'")}')">$ Salário</button>` : ""}
+                    <button class="btn" style="padding: 5px 10px; font-size: 0.8rem;"
+                        onclick="verRelatorioPontoIndividual(${f.id})">Ver Ponto Mensal</button>
+                    <button class="btn" style="padding: 5px 10px; font-size: 0.8rem; background: #673ab7; color: white;"
+                        onclick="verHoleriteRH(${f.id})">Holerite</button>
+                    ${isRH ? `<button class="btn-success" style="padding: 5px 10px; font-size: 0.8rem;"
+                        onclick="abrirGerenciamentoSalario(${f.id})">$ Salário</button>` : ""}
                 </td>
             </tr>
         `;
@@ -1490,7 +1494,7 @@ async function carregarFuncionarios() {
                     ${(pontosGerais || []).map(p => `
                         <tr>
                             <td>${formatarDataSimples(p.data)}</td>
-                            <td>${p.funcionario}</td>
+                            <td>${escapeHtml(p.funcionario)}</td>
                             <td>${p.entrada ? new Date(p.entrada).toLocaleTimeString() : '--'}</td>
                             <td>${p.saida ? new Date(p.saida).toLocaleTimeString() : '--'}</td>
                             <td>${formatarHorasRelogio(p.trabalhadas)}</td>
@@ -1569,11 +1573,17 @@ async function fecharFolhaMensal() {
     }
 }
 
-async function abrirGerenciamentoSalario(id, nome) {
+function nomeFuncionarioCache(id) {
+    const f = cacheFuncionarios.find(emp => emp.id === id);
+    return f ? `${f.nome} ${f.sobrenome}` : '';
+}
+
+async function abrirGerenciamentoSalario(id) {
+    const nome = nomeFuncionarioCache(id);
     const container = document.getElementById('gerenciamento-salario-individual');
     const dashboard = document.getElementById('rh-dashboard');
     if (dashboard) dashboard.classList.add('hidden');
-    
+
     container.classList.remove('hidden');
     container.innerHTML = '<h3>Processando...</h3>';
     const historico = await apiFetch(`/funcionarios/salario-historico/${id}`) || [];
@@ -1581,15 +1591,15 @@ async function abrirGerenciamentoSalario(id, nome) {
     container.innerHTML = `
         <div class="card" style="border-top: 5px solid #27ae60;">
             <div style="display: flex; justify-content: space-between; align-items: center;">
-                <h3>Gestão Salarial: ${nome}</h3>
+                <h3>Gestão Salarial: ${escapeHtml(nome)}</h3>
                 <button class="btn-danger" onclick="fecharJanelaIndividual('gerenciamento-salario-individual')">Voltar</button>
             </div>
-            
+
             <div class="card" style="background: #f9f9f9; margin: 20px 0;">
                 <h4>Alterar Salário Atual</h4>
                 <div class="form-group" style="display: flex; gap: 10px;">
                     <input type="number" id="novo-valor-salario" class="form-control" placeholder="Novo Salário Mensal (R$)">
-                    <button class="btn-success" onclick="confirmarAlteracaoSalario(${id}, '${nome}')">Atualizar Salário</button>
+                    <button class="btn-success" onclick="confirmarAlteracaoSalario(${id})">Atualizar Salário</button>
                 </div>
             </div>
 
@@ -1612,7 +1622,8 @@ async function abrirGerenciamentoSalario(id, nome) {
     `;
 }
 
-async function confirmarAlteracaoSalario(id, nome) {
+async function confirmarAlteracaoSalario(id) {
+    const nome = nomeFuncionarioCache(id);
     const valor = document.getElementById('novo-valor-salario').value;
     if (!valor || valor <= 0) return alert("Insira um valor válido.");
 
@@ -1624,11 +1635,12 @@ async function confirmarAlteracaoSalario(id, nome) {
     });
     if (res) {
         alert("Salário atualizado com sucesso!");
-        abrirGerenciamentoSalario(id, nome);
+        abrirGerenciamentoSalario(id);
     }
 }
 
-async function verRelatorioPontoIndividual(id, nomeCompleto) {
+async function verRelatorioPontoIndividual(id) {
+    const nomeCompleto = nomeFuncionarioCache(id);
     const container = document.getElementById('detalhe-ponto-individual');
     const dashboard = document.getElementById('rh-dashboard');
     if (dashboard) dashboard.classList.add('hidden');
@@ -1648,7 +1660,7 @@ async function verRelatorioPontoIndividual(id, nomeCompleto) {
     let html = `
         <div class="card" style="border-top: 5px solid #3498db; animation: fadeIn 0.5s;">
             <div style="display: flex; justify-content: space-between; align-items: center;">
-                <h3>Relatório Detalhado: ${nomeCompleto} (${mes}/${ano})</h3>
+                <h3>Relatório Detalhado: ${escapeHtml(nomeCompleto)} (${mes}/${ano})</h3>
                 <button class="btn-danger" onclick="fecharJanelaIndividual('detalhe-ponto-individual')">Voltar</button>
             </div>
             
@@ -1873,7 +1885,7 @@ async function carregarPontos() {
     const btnDis = (status?.saida || !podeBaterPonto) ? 'disabled' : '';
 
     let html = `
-        <h2>Ponto Eletrônico - ${relatorio?.funcionario || 'Carregando...'} - ${hojeStr}</h2>
+        <h2>Ponto Eletrônico - ${escapeHtml(relatorio?.funcionario) || 'Carregando...'} - ${hojeStr}</h2>
         <div class="card" style="text-align: center;">
             <div class="form-group" style="display: flex; justify-content: center; gap: 20px; margin-bottom: 20px;">
                 <div class="ponto-stamp">Entrada:<br><strong>${fH(status?.entrada)}</strong></div>
@@ -1923,7 +1935,7 @@ async function carregarPontos() {
     container.innerHTML = html;
 }
 
-async function verHoleriteRH(id, nome) {
+async function verHoleriteRH(id) {
     const agora = new Date();
     const mes = prompt("Informe o mês do holerite (1-12):", agora.getMonth() + 1);
     const ano = prompt("Informe o ano do holerite:", agora.getFullYear());
@@ -2057,15 +2069,15 @@ async function carregarInfoEstoqueSolicitacao(solId) {
     resultados.forEach(({ linha, encontrados }) => {
         if (encontrados.length === 0) {
             html += `<tr style="border-bottom:1px solid #eee;">
-                <td style="padding:6px;">${linha}</td>
+                <td style="padding:6px;">${escapeHtml(linha)}</td>
                 <td colspan="3" style="padding:6px; color:#e74c3c; font-style:italic;">Produto não encontrado no estoque</td>
             </tr>`;
         } else {
             encontrados.forEach((p, i) => {
                 const corQtd = p.quantidade <= 5 ? '#e74c3c' : p.quantidade <= 20 ? '#f39c12' : '#27ae60';
                 html += `<tr style="border-bottom:1px solid #eee;">
-                    ${i === 0 ? `<td style="padding:6px;" rowspan="${encontrados.length}">${linha}</td>` : ''}
-                    <td style="padding:6px;">${p.nomedoproduto}<br><small style="color:#888;">${p.codigodebarras}</small></td>
+                    ${i === 0 ? `<td style="padding:6px;" rowspan="${encontrados.length}">${escapeHtml(linha)}</td>` : ''}
+                    <td style="padding:6px;">${escapeHtml(p.nomedoproduto)}<br><small style="color:#888;">${escapeHtml(p.codigodebarras)}</small></td>
                     <td style="padding:6px; text-align:center;"><strong style="color:${corQtd}">${p.quantidade}</strong></td>
                     <td style="padding:6px; text-align:right;">R$ ${Number(p.preco).toFixed(2)}</td>
                 </tr>`;
@@ -2133,7 +2145,7 @@ async function carregarComunicados() {
     let formHtml = '';
     if (podeEscrever) {
         const opcoesFunc = (funcionarios || []).map(f =>
-            `<option value="${f.id}">${f.nome} ${f.sobrenome}</option>`
+            `<option value="${f.id}">${escapeHtml(f.nome)} ${escapeHtml(f.sobrenome)}</option>`
         ).join('');
 
         formHtml = `
@@ -2170,9 +2182,9 @@ async function carregarComunicados() {
         <div class="card" id="com-card-${c.destinatario_id}" style="border-left: 5px solid ${c.lido ? '#bdc3c7' : '#3498db'}; opacity: ${c.lido ? '0.75' : '1'};">
             <div style="display:flex; justify-content:space-between; align-items:flex-start;">
                 <div style="flex:1;">
-                    <h4 style="margin:0 0 5px;">${c.titulo}</h4>
-                    <small style="color:#888;">De: <strong>${c.autor}</strong> &nbsp;|&nbsp; ${new Date(c.data_criacao).toLocaleString()} &nbsp;|&nbsp; ${c.para_todos ? 'Para todos' : 'Destinatário específico'}</small>
-                    <p style="margin:12px 0 0; white-space:pre-wrap;">${c.conteudo}</p>
+                    <h4 style="margin:0 0 5px;">${escapeHtml(c.titulo)}</h4>
+                    <small style="color:#888;">De: <strong>${escapeHtml(c.autor)}</strong> &nbsp;|&nbsp; ${new Date(c.data_criacao).toLocaleString()} &nbsp;|&nbsp; ${c.para_todos ? 'Para todos' : 'Destinatário específico'}</small>
+                    <p style="margin:12px 0 0; white-space:pre-wrap;">${escapeHtml(c.conteudo)}</p>
                 </div>
                 <div style="margin-left:15px; flex-shrink:0;">
                     ${c.lido
