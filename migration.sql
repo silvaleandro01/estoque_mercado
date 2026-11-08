@@ -283,6 +283,9 @@ CREATE TABLE IF NOT EXISTS `historico_senha` (
 -- DROP/TRUNCATE, idempotente (pode rodar mais de uma vez sem erro).
 -- ============================================================================
 
+-- Mesmo padrão da Fase 1 (ver comentário completo mais acima, perto da
+-- primeira definição desta mesma procedure): define uma vez no início desta
+-- seção, chama várias vezes ao longo dela, dropa uma vez no fim.
 DELIMITER $$
 DROP PROCEDURE IF EXISTS `_add_column_if_not_exists`$$
 CREATE PROCEDURE `_add_column_if_not_exists`(
@@ -308,8 +311,6 @@ DELIMITER ;
 -- constraint do banco.
 CALL `_add_column_if_not_exists`('estoque', 'unidade_medida', "VARCHAR(2) NOT NULL DEFAULT 'UN'");
 
-DROP PROCEDURE IF EXISTS `_add_column_if_not_exists`;
-
 -- `estoque.quantidade`, `itemvenda.quantidade` e `itemcompra.quantidade`
 -- eram INT; produtos vendidos por peso/volume (unidade_medida KG/L)
 -- precisam de fração de unidade (ex.: 0.350 kg). `MODIFY COLUMN` muda o
@@ -326,27 +327,7 @@ ALTER TABLE `itemcompra` MODIFY COLUMN `quantidade` DECIMAL(10, 3) NOT NULL;
 -- valor informativo mostrado no cadastro/listagem de produtos; o endpoint
 -- de reposição automática que vai consumir esse valor é de uma fase futura
 -- do projeto (fora do escopo desta migração).
-DELIMITER $$
-DROP PROCEDURE IF EXISTS `_add_column_if_not_exists`$$
-CREATE PROCEDURE `_add_column_if_not_exists`(
-    IN p_table VARCHAR(64), IN p_column VARCHAR(64), IN p_definition TEXT
-)
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_schema = DATABASE() AND table_name = p_table AND column_name = p_column
-    ) THEN
-        SET @ddl = CONCAT('ALTER TABLE `', p_table, '` ADD COLUMN `', p_column, '` ', p_definition);
-        PREPARE stmt FROM @ddl;
-        EXECUTE stmt;
-        DEALLOCATE PREPARE stmt;
-    END IF;
-END$$
-DELIMITER ;
-
 CALL `_add_column_if_not_exists`('estoque', 'estoque_minimo', 'DECIMAL(10, 3) NOT NULL DEFAULT 0.000');
-
-DROP PROCEDURE IF EXISTS `_add_column_if_not_exists`;
 
 -- Fornecedor: nova tabela (CREATE TABLE IF NOT EXISTS, mesmo padrão já
 -- usado nas tabelas `compra`/`itemcompra`/etc. acima), com vínculo opcional
@@ -362,24 +343,6 @@ CREATE TABLE IF NOT EXISTS `fornecedor` (
     prazo_medio_entrega_dias INT,
     UNIQUE KEY `unique_fornecedor_documento` (`documento`)
 ) ENGINE=InnoDB;
-
-DELIMITER $$
-DROP PROCEDURE IF EXISTS `_add_column_if_not_exists`$$
-CREATE PROCEDURE `_add_column_if_not_exists`(
-    IN p_table VARCHAR(64), IN p_column VARCHAR(64), IN p_definition TEXT
-)
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_schema = DATABASE() AND table_name = p_table AND column_name = p_column
-    ) THEN
-        SET @ddl = CONCAT('ALTER TABLE `', p_table, '` ADD COLUMN `', p_column, '` ', p_definition);
-        PREPARE stmt FROM @ddl;
-        EXECUTE stmt;
-        DEALLOCATE PREPARE stmt;
-    END IF;
-END$$
-DELIMITER ;
 
 -- MySQL também não entende `ADD CONSTRAINT IF NOT EXISTS`, mesmo problema
 -- do ADD COLUMN acima -- outra stored procedure temporária, desta vez
