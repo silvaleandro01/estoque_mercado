@@ -26,7 +26,7 @@ DUAS_CASAS = Decimal("0.01")
 DecimalMoeda = Annotated[Decimal, PlainSerializer(lambda v: float(v), return_type=float, when_used="json")]
 
 
-def to_decimal(valor: Numero) -> Decimal:
+def para_decimal(valor: Numero) -> Decimal:
     """Converte int/float/str/Decimal para Decimal de forma segura.
 
     Floats são convertidos via `str()` (não diretamente), porque
@@ -42,4 +42,4 @@ def to_decimal(valor: Numero) -> Decimal:
 
 def arredondar(valor: Numero) -> Decimal:
     """Arredonda um valor monetário para 2 casas decimais (ROUND_HALF_UP)."""
-    return to_decimal(valor).quantize(DUAS_CASAS, rounding=ROUND_HALF_UP)
+    return para_decimal(valor).quantize(DUAS_CASAS, rounding=ROUND_HALF_UP)

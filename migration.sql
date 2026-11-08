@@ -126,6 +126,8 @@ CREATE TABLE IF NOT EXISTS `holerite` (
     FOREIGN KEY (funcionario_id) REFERENCES funcionario(id)
 ) ENGINE=InnoDB;
 
+-- ATENÇÃO: tabela órfã, não usada por nenhum código atual (ver comentário
+-- completo perto da criação de `historico_senha`, mais abaixo neste arquivo).
 CREATE TABLE IF NOT EXISTS `senhahistorico` (
     id INT AUTO_INCREMENT PRIMARY KEY,
     funcionario_id INT NOT NULL,
