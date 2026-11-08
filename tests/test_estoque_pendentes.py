@@ -1,8 +1,12 @@
 import pytest
+from datetime import date
+from decimal import Decimal
 from fastapi import HTTPException
+from sqlmodel import select
 
 from repository.estoque import listar_pendentes, confirmar_pendente, mostrar_produtos
 from schemas.schemas import ConfirmarPendenteInput
+from utils.database import Lote
 from conftest import make_setor, make_funcionario, make_produto, make_compra, make_fornecedor, set_token
 
 
@@ -72,6 +76,7 @@ def test_confirmar_pendente_cria_produto_novo(engine, session):
     dados = ConfirmarPendenteInput(
         nomedoproduto="Nome Corrigido", codigodebarras="CODIGO-CORRIGIDO",
         preco_venda=18.0, categoria="Limpeza",
+        codigo_lote="LOTE-CONF001", validade=date(2030, 1, 1),
     )
     resultado = confirmar_pendente(item_id, dados, func_estoque.id)
     assert resultado["detail"] == "Produto lançado no estoque com sucesso"
@@ -85,6 +90,11 @@ def test_confirmar_pendente_cria_produto_novo(engine, session):
     assert produto.categoria == "Limpeza"
 
     assert listar_pendentes() == []
+
+    lote = session.exec(select(Lote).where(Lote.estoque_id == produto.id)).first()
+    assert lote.codigo_lote == "LOTE-CONF001"
+    assert lote.quantidade == 10
+    assert lote.validade == date(2030, 1, 1)
 
 
 def test_confirmar_pendente_incrementa_produto_existente(engine, session):
@@ -102,6 +112,7 @@ def test_confirmar_pendente_incrementa_produto_existente(engine, session):
     dados = ConfirmarPendenteInput(
         nomedoproduto="Produto Existente", codigodebarras="EXIST-PEND",
         preco_venda=9.0, categoria="Geral",
+        codigo_lote="LOTE-EXIST-PEND", validade=date(2030, 6, 1),
     )
     confirmar_pendente(item_id, dados, func_estoque.id)
 
@@ -109,6 +120,24 @@ def test_confirmar_pendente_incrementa_produto_existente(engine, session):
     produto = next(p for p in produtos if p.codigodebarras == "EXIST-PEND")
     assert produto.quantidade == 17
     assert produto.preco_custo == 4.0
+
+    # Produto já existia (qtd=5, sem lote cadastrado) -- a confirmação cria
+    # um lote RASTREADO de 12 unidades (quantidade do item pendente) e
+    # reconcilia o lote "sem validade" na hora, cobrindo as 5 unidades
+    # antigas (sem proveniência conhecida). Antes, essas 5 unidades só
+    # ganhariam um lote "sem validade" na primeira venda (consumir_fefo) --
+    # mas, como a lista de lotes do produto deixava de estar vazia aqui,
+    # essa materialização nunca mais disparava, perdendo o saldo antigo do
+    # rastreamento por lote para sempre (ver CRÍTICO 1, cenário C).
+    lotes = session.exec(select(Lote).where(Lote.estoque_id == produto.id)).all()
+    assert len(lotes) == 2
+    lote_datado = next(l for l in lotes if l.validade is not None)
+    lote_legado = next(l for l in lotes if l.validade is None)
+    assert lote_datado.codigo_lote == "LOTE-EXIST-PEND"
+    assert lote_datado.quantidade == 12
+    assert lote_datado.validade == date(2030, 6, 1)
+    assert lote_legado.quantidade == 5
+    assert sum((l.quantidade for l in lotes), Decimal("0.000")) == produto.quantidade
 
 
 def test_confirmar_pendente_herda_fornecedor_da_compra(engine, session):
@@ -125,7 +154,7 @@ def test_confirmar_pendente_herda_fornecedor_da_compra(engine, session):
 
     dados = ConfirmarPendenteInput(
         nomedoproduto="Produto Fornecido", codigodebarras="CONFFORN001",
-        preco_venda=15.0, categoria="Geral",
+        preco_venda=15.0, categoria="Geral", codigo_lote="LOTE-CONFFORN001",
     )
     confirmar_pendente(item_id, dados, func_estoque.id)
 
@@ -147,7 +176,7 @@ def test_confirmar_pendente_sem_fornecedor_na_compra_fica_sem_fornecedor(engine,
 
     dados = ConfirmarPendenteInput(
         nomedoproduto="Produto Sem Fornecedor", codigodebarras="CONFSFORN001",
-        preco_venda=15.0, categoria="Geral",
+        preco_venda=15.0, categoria="Geral", codigo_lote="LOTE-CONFSFORN001",
     )
     confirmar_pendente(item_id, dados, func_estoque.id)
 
@@ -159,6 +188,7 @@ def test_confirmar_pendente_sem_fornecedor_na_compra_fica_sem_fornecedor(engine,
 def test_confirmar_pendente_inexistente_404(engine, session):
     dados = ConfirmarPendenteInput(
         nomedoproduto="X", codigodebarras="X", preco_venda=1.0, categoria="X",
+        codigo_lote="LOTE-X",
     )
     with pytest.raises(HTTPException) as exc:
         confirmar_pendente(99999, dados, 1)
@@ -177,7 +207,7 @@ def test_confirmar_pendente_duas_vezes_falha(engine, session):
     func_estoque = make_funcionario(session, setor_id=setor_estoque.id)
     dados = ConfirmarPendenteInput(
         nomedoproduto="Produto Duplo", codigodebarras="DUPLO001",
-        preco_venda=10.0, categoria="Geral",
+        preco_venda=10.0, categoria="Geral", codigo_lote="LOTE-DUPLO001",
     )
     confirmar_pendente(item_id, dados, func_estoque.id)
 
@@ -217,7 +247,7 @@ def test_confirmar_pendente_incremento_consulta_produto_com_lock_for_update(engi
     func_estoque = make_funcionario(session, setor_id=setor_estoque.id)
     dados = ConfirmarPendenteInput(
         nomedoproduto="Produto Existente", codigodebarras="LOCKPEND001",
-        preco_venda=9.0, categoria="Geral",
+        preco_venda=9.0, categoria="Geral", codigo_lote="LOTE-LOCKPEND001",
     )
 
     statements = []
@@ -243,6 +273,49 @@ def test_confirmar_pendente_incremento_consulta_produto_com_lock_for_update(engi
     assert "FOR UPDATE" in compilada
 
 
+# ── tratamento de deadlock (IMPORTANTE da revisão da Fase 3) ────────────────
+
+
+def test_confirmar_pendente_deadlock_mysql_vira_409_nao_500(engine, session, monkeypatch):
+    """
+    IMPORTANTE (revisão da Fase 3): confirmar_pendente() não capturava o
+    deadlock do MySQL (OperationalError 1213) como repository/vendas.py já
+    fazia -- o erro subia cru como um 500. Reaproveita o mesmo tratamento
+    (utils/erros_banco.py) aqui.
+    """
+    import sqlmodel as sqlmodel_mod
+    from sqlalchemy.exc import OperationalError
+
+    setor = make_setor(session, tipo="deadlockpend1")
+    solicitante = make_funcionario(session, setor_id=setor.id)
+    make_produto(session, codigo="DLPEND001", qtd=5, preco=9.0, custo=3.0)
+    make_compra(session, solicitante.id, status="autorizada", itens=[
+        {"codigodebarras": "DLPEND001", "nomedoproduto": "Produto Existente", "categoria": "Geral",
+         "preco_venda": 9.0, "quantidade": 7, "preco_custo": 4.0},
+    ])
+    item_id = listar_pendentes()[0]["id"]
+    setor_estoque = make_setor(session, tipo="deadlockpend_estoque")
+    func_estoque = make_funcionario(session, setor_id=setor_estoque.id)
+    dados = ConfirmarPendenteInput(
+        nomedoproduto="Produto Existente", codigodebarras="DLPEND001",
+        preco_venda=9.0, categoria="Geral", codigo_lote="LOTE-DLPEND001",
+    )
+
+    class FakeOrigDeadlock(Exception):
+        args = (1213, "Deadlock found when trying to get lock; try restarting transaction")
+
+    def commit_que_falha(self, *args, **kwargs):
+        raise OperationalError("COMMIT", {}, FakeOrigDeadlock())
+
+    monkeypatch.setattr(sqlmodel_mod.Session, "commit", commit_que_falha)
+
+    with pytest.raises(HTTPException) as exc:
+        confirmar_pendente(item_id, dados, func_estoque.id)
+
+    assert exc.value.status_code == 409
+    assert "tente novamente" in exc.value.detail.lower()
+
+
 # ── permissão via rotas HTTP ─────────────────────────────────────────────────
 
 def test_rota_pendentes_nega_funcionario_fora_do_setor_estoque(client, session, engine):
@@ -265,5 +338,6 @@ def test_rota_confirmar_pendente_nega_funcionario_fora_do_setor_estoque(client, 
 
     r = client.post(f"/estoque/pendentes/{item_id}/confirmar", json={
         "nomedoproduto": "X", "codigodebarras": "X", "preco_venda": 1.0, "categoria": "X",
+        "codigo_lote": "LOTE-X",
     }, headers=_headers(token))
     assert r.status_code == 403

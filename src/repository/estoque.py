@@ -1,13 +1,16 @@
 from decimal import Decimal
 from datetime import datetime, timezone
 from fastapi import HTTPException
-from sqlmodel import Session, select
+from sqlalchemy.exc import OperationalError
+from sqlmodel import Session, select, delete
 
-from utils.database import Estoque, Compra, ItemCompra, Fornecedor, engine
+from utils.database import Estoque, Compra, ItemCompra, Fornecedor, Lote, engine
 from utils.money import arredondar
 from utils.quantidade import arredondar_quantidade, validar_quantidade_inteira_se_unidade
+from utils.erros_banco import tratar_operational_error
 from logs.logs import criar_log
 from schemas.schemas import EstoqueCreate, EstoqueUpdate, ConfirmarPendenteInput
+from repository.lotes import reconciliar_lote_sem_validade, criar_lote
 
 
 def _validar_fornecedor(session: Session, fornecedor_id):
@@ -45,11 +48,25 @@ def criar_estoque(dados: EstoqueCreate, funcionario_id: int):
             validar_quantidade_inteira_se_unidade(dados.quantidade, produto_existente.unidade_medida, produto_existente.nomedoproduto)
             produto_existente.quantidade = arredondar_quantidade(produto_existente.quantidade + dados.quantidade)
             produto_existente.funcionario_id = funcionario_id
+            # Incremento manual (sem lote/validade informados): reconcilia
+            # o lote "sem validade" do produto a partir do saldo final já
+            # atualizado acima (não um delta isolado -- ver docstring de
+            # reconciliar_lote_sem_validade sobre por que um delta isolado
+            # é frágil quando o produto já tinha saldo que não estava
+            # registrado em nenhum lote). Mantém a invariante soma(Lote.
+            # quantidade) == Estoque.quantidade (ver repository/lotes.py).
+            reconciliar_lote_sem_validade(session, produto_existente.id)
             try:
                 session.commit()
                 session.refresh(produto_existente)
                 criar_log(funcionario_id, f"Incremento de estoque: {produto_existente.nomedoproduto}")
                 return produto_existente
+            except OperationalError as exc:
+                session.rollback()
+                # with_for_update() acima pode colidir com outra transação
+                # que trave os mesmos produtos em ordem diferente (ex.:
+                # venda, outra entrada de estoque) -- ver utils/erros_banco.py.
+                tratar_operational_error(exc, "Não foi possível atualizar o estoque, tente novamente")
             except Exception:
                 session.rollback()
                 raise HTTPException(status_code=500, detail="Erro ao atualizar estoque")
@@ -77,10 +94,21 @@ def criar_estoque(dados: EstoqueCreate, funcionario_id: int):
         )
         try:
             session.add(estoque)
+            session.flush()
+            # Cadastro novo com quantidade inicial (sem lote/validade
+            # informados nesta tela) -- mesma lógica do incremento acima,
+            # reconcilia o lote "sem validade" para manter a invariante.
+            # reconciliar_lote_sem_validade já é um no-op quando a
+            # quantidade inicial é 0 (residual fica 0), então chama
+            # incondicionalmente.
+            reconciliar_lote_sem_validade(session, estoque.id)
             session.commit()
             session.refresh(estoque)
             criar_log(funcionario_id, f"Inclusão de produto: {estoque.nomedoproduto}")
             return estoque
+        except OperationalError as exc:
+            session.rollback()
+            tratar_operational_error(exc, "Não foi possível criar o produto, tente novamente")
         except Exception:
             session.rollback()
             raise HTTPException(status_code=500, detail="Erro ao criar produto")
@@ -101,7 +129,20 @@ def buscar_estoque(estoque_id: int):
 
 def atualizar_estoque(estoque_id: int, dados: EstoqueUpdate, funcionario_id: int):
     with Session(engine) as session:
-        estoque = session.get(Estoque, estoque_id)
+        # with_for_update(): mesma trava usada em criar_estoque/
+        # confirmar_pendente/criar_venda. Sem ela, duas edições concorrentes
+        # (ou uma edição concorrendo com qualquer outra entrada de estoque
+        # do mesmo produto) podiam ler a mesma `quantidade` "antiga" e uma
+        # sobrescrever o resultado da outra ao salvar (lost update) --
+        # pré-existente antes desta fase, mas que agora alimenta direto
+        # reconciliar_lote_sem_validade, amplificando o lost update de
+        # Estoque.quantidade para uma divergência permanente também em
+        # Lote.quantidade (confirmado: 15/15 rodadas de PUT concorrente
+        # real contra MySQL quebraram a invariante, sem nenhuma exceção
+        # reportada).
+        estoque = session.exec(
+            select(Estoque).where(Estoque.id == estoque_id).with_for_update()
+        ).first()
         if not estoque:
             raise HTTPException(status_code=404, detail="Estoque não localizado")
 
@@ -129,11 +170,21 @@ def atualizar_estoque(estoque_id: int, dados: EstoqueUpdate, funcionario_id: int
         estoque.funcionario_id = funcionario_id
         estoque.fornecedor_id = dados.fornecedor_id
 
+        # PUT sobrescreve a quantidade total (não é um delta como o
+        # incremento de criar_estoque) -- reconciliar_lote_sem_validade
+        # recalcula o residual do zero a partir do saldo final já
+        # atribuído acima, então funciona igual nos dois casos (não
+        # precisa calcular a diferença entre o valor novo e o antigo).
+        reconciliar_lote_sem_validade(session, estoque.id)
+
         try:
             session.commit()
             session.refresh(estoque)
             criar_log(funcionario_id, f"Atualização de produto: {estoque.nomedoproduto}")
             return estoque
+        except OperationalError as exc:
+            session.rollback()
+            tratar_operational_error(exc, "Não foi possível atualizar o estoque, tente novamente")
         except Exception:
             session.rollback()
             raise HTTPException(status_code=500, detail="Erro ao atualizar estoque")
@@ -145,6 +196,27 @@ def deletar_estoque(estoque_id: int):
         if not estoque:
             raise HTTPException(status_code=404, detail="Estoque não localizado")
         try:
+            # Lote é um detalhamento do saldo deste produto (não um
+            # histórico independente, diferente de ItemVenda/ItemCompra) --
+            # ao excluir o produto, os lotes dele deixam de fazer sentido.
+            # Excluídos aqui, na mesma transação, para não violar a FK
+            # (lote.estoque_id -> estoque.id) nem deixar lote órfão.
+            #
+            # DELETE explícito por query (em vez de carregar cada Lote com
+            # session.exec(select(...)) e marcar para exclusão um a um com
+            # session.delete()), seguido de um flush ANTES de deletar
+            # Estoque: sem isso, o SQLAlchemy decide por conta própria a
+            # ordem do flush (não há Relationship() do SQLModel ligando
+            # Lote<->Estoque neste projeto, só a FK crua) e podia emitir
+            # DELETE FROM estoque ANTES de DELETE FROM lote, batendo na FK
+            # e virando um IntegrityError (1451) cru -- reproduzido ao vivo
+            # contra MySQL real para TODO produto que já tivesse qualquer
+            # lote. O DELETE direto garante a ordem manualmente, sem
+            # depender do unit-of-work adivinhar, e sem introduzir
+            # Relationship()/cascade -- padrão que o resto do schema deste
+            # projeto não usa (só FK crua em todo lugar).
+            session.exec(delete(Lote).where(Lote.estoque_id == estoque_id))
+            session.flush()
             session.delete(estoque)
             session.commit()
             return {"msg": "Estoque deletado com sucesso"}
@@ -195,6 +267,21 @@ def confirmar_pendente(item_id: int, dados: ConfirmarPendenteInput, funcionario_
             produto_existente.preco_custo = arredondar(item.preco_custo_unitario)
             produto_existente.funcionario_id = funcionario_id
             session.add(produto_existente)
+            # Lote e validade (Fase 3): a confirmação de pendente agora
+            # sempre informa lote/validade -- diferente do incremento
+            # manual via /estoque/inserir, aqui cria um lote RASTREADO de
+            # verdade (não cai no lote "sem validade"), já que o
+            # lote/validade reais vieram do formulário de confirmação.
+            criar_lote(session, produto_existente.id, dados.codigo_lote, item.quantidade, dados.validade)
+            # Reconcilia o lote "sem validade" do produto: se o produto já
+            # tinha saldo pré-existente que não estava em NENHUM lote
+            # (produto legado, cadastrado antes desta fase, ou nunca
+            # tocado por ela), essa é a hora de materializá-lo -- senão
+            # essas unidades ficam fora do rastreamento por lote para
+            # sempre, já que a lista de lotes do produto deixa de estar
+            # vazia a partir daqui (ver docstring de
+            # reconciliar_lote_sem_validade, cenário C).
+            reconciliar_lote_sem_validade(session, produto_existente.id)
             nome_produto = produto_existente.nomedoproduto
         else:
             # Produto novo (não existia ainda com esse código de barras):
@@ -217,6 +304,13 @@ def confirmar_pendente(item_id: int, dados: ConfirmarPendenteInput, funcionario_
                 fornecedor_id=compra.fornecedor_id if compra else None,
             )
             session.add(novo)
+            session.flush()  # para ter novo.id antes de criar o lote abaixo
+            criar_lote(session, novo.id, dados.codigo_lote, item.quantidade, dados.validade)
+            # Produto novo: residual esperado é 0 (toda a quantidade já
+            # está no lote recém-criado acima), mas chama mesmo assim por
+            # consistência/defesa em profundidade -- é um no-op barato
+            # quando o residual já é 0.
+            reconciliar_lote_sem_validade(session, novo.id)
             nome_produto = novo.nomedoproduto
 
         item.lancado_em = datetime.now(timezone.utc)
@@ -224,6 +318,9 @@ def confirmar_pendente(item_id: int, dados: ConfirmarPendenteInput, funcionario_
 
         try:
             session.commit()
+        except OperationalError as exc:
+            session.rollback()
+            tratar_operational_error(exc, "Não foi possível lançar o produto no estoque, tente novamente")
         except Exception:
             session.rollback()
             raise HTTPException(status_code=500, detail="Erro ao lançar produto no estoque")
