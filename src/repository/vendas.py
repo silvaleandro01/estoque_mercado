@@ -16,8 +16,13 @@ def criar_venda(dados: VendaInput, funcionario_id: int):
 
         total = Decimal("0.00")
         for item in dados.itens:
+            # with_for_update() trava a linha do produto até o fim da
+            # transação (commit/rollback). Isso evita que duas vendas
+            # concorrentes leiam o mesmo saldo de estoque "velho" e ambas
+            # concluam a venda, o que poderia deixar `quantidade` negativo
+            # (ou vender mais itens do que existem fisicamente).
             produto = session.exec(
-                select(Estoque).where(Estoque.codigodebarras == item.codigodebarras)
+                select(Estoque).where(Estoque.codigodebarras == item.codigodebarras).with_for_update()
             ).first()
 
             if not produto:
