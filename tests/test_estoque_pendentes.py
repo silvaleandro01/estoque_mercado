@@ -1,5 +1,6 @@
 import pytest
 from datetime import date
+from decimal import Decimal
 from fastapi import HTTPException
 from sqlmodel import select
 
@@ -121,14 +122,22 @@ def test_confirmar_pendente_incrementa_produto_existente(engine, session):
     assert produto.preco_custo == 4.0
 
     # Produto já existia (qtd=5, sem lote cadastrado) -- a confirmação cria
-    # um lote RASTREADO de 12 unidades (quantidade do item pendente); as 5
-    # unidades antigas, sem proveniência conhecida, só ganhariam um lote
-    # "sem validade" na primeira venda (consumir_fefo), não aqui.
+    # um lote RASTREADO de 12 unidades (quantidade do item pendente) e
+    # reconcilia o lote "sem validade" na hora, cobrindo as 5 unidades
+    # antigas (sem proveniência conhecida). Antes, essas 5 unidades só
+    # ganhariam um lote "sem validade" na primeira venda (consumir_fefo) --
+    # mas, como a lista de lotes do produto deixava de estar vazia aqui,
+    # essa materialização nunca mais disparava, perdendo o saldo antigo do
+    # rastreamento por lote para sempre (ver CRÍTICO 1, cenário C).
     lotes = session.exec(select(Lote).where(Lote.estoque_id == produto.id)).all()
-    assert len(lotes) == 1
-    assert lotes[0].codigo_lote == "LOTE-EXIST-PEND"
-    assert lotes[0].quantidade == 12
-    assert lotes[0].validade == date(2030, 6, 1)
+    assert len(lotes) == 2
+    lote_datado = next(l for l in lotes if l.validade is not None)
+    lote_legado = next(l for l in lotes if l.validade is None)
+    assert lote_datado.codigo_lote == "LOTE-EXIST-PEND"
+    assert lote_datado.quantidade == 12
+    assert lote_datado.validade == date(2030, 6, 1)
+    assert lote_legado.quantidade == 5
+    assert sum((l.quantidade for l in lotes), Decimal("0.000")) == produto.quantidade
 
 
 def test_confirmar_pendente_herda_fornecedor_da_compra(engine, session):

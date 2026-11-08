@@ -42,7 +42,7 @@ CODIGO_LOTE_LEGADO = "LEGADO"
 
 def _lote_sem_validade(session: Session, estoque_id: int) -> Optional[Lote]:
     """Busca (travando) o lote "sem validade conhecida" do produto, se
-    existir. Não cria -- quem decide criar é `ajustar_lote_sem_validade`."""
+    existir. Não cria -- quem decide criar é `reconciliar_lote_sem_validade`."""
     return session.exec(
         select(Lote)
         .where(Lote.estoque_id == estoque_id, Lote.validade.is_(None))
@@ -50,28 +50,78 @@ def _lote_sem_validade(session: Session, estoque_id: int) -> Optional[Lote]:
     ).first()
 
 
-def ajustar_lote_sem_validade(session: Session, estoque_id: int, delta: Decimal) -> None:
+def reconciliar_lote_sem_validade(session: Session, estoque_id: int) -> None:
     """
-    Soma (ou subtrai, se `delta` negativo) `delta` no lote "sem validade"
-    do produto, criando esse lote se ainda não existir (só quando
-    `delta > 0` -- não faz sentido criar um lote já para subtrair dele).
-    Mantém a invariante soma(Lote.quantidade) == Estoque.quantidade quando
-    a quantidade total muda por um caminho que não informa lote/validade
-    (ver docstring do módulo).
+    Reconcilia a quantidade do lote "sem validade" (legado) do produto para
+    que a invariante
 
-    Satura em zero: um delta negativo maior que o saldo do lote sem
-    validade não deixa esse lote com quantidade negativa -- nesse caso a
-    edição manual upstream já estava reduzindo o estoque mais do que o
-    lote legado consegue "explicar", e zerar o lote é o melhor que dá para
-    fazer aqui sem inventar validade/proveniência que não existe.
+        soma(Lote.quantidade de um produto) == Estoque.quantidade desse produto
+
+    nunca divirja. Substitui a antiga `ajustar_lote_sem_validade`, que
+    recebia um `delta` e somava/subtraía nesse lote assumindo (de forma
+    frágil) que ele já refletia corretamente o saldo antes da operação --
+    suposição falsa em pelo menos 3 cenários reais, confirmados num painel
+    de revisão com MySQL real:
+
+      A) saldo todo em lote(s) COM validade real, PUT reduz
+         Estoque.quantidade -- a versão "delta" não achava nenhum lote sem
+         validade e não fazia nada, deixando soma(Lote) > Estoque.quantidade;
+      B) produto legado (saldo > 0, zero lotes) tocado pela primeira vez
+         por uma operação que não é venda (incremento manual, PUT,
+         confirmação de pendente) -- a versão "delta" só registrava o
+         delta daquela operação, ignorando o saldo pré-existente;
+      C) produto legado recebendo uma NOVA entrada com lote rastreado
+         (ex.: confirmação de compra pendente) -- a lista de lotes deixava
+         de estar vazia, então a materialização do lote sem validade (que
+         só rodava em `consumir_fefo` quando não havia NENHUM lote) nunca
+         mais disparava, perdendo o saldo antigo para sempre e causando
+         rejeição falsa de "estoque insuficiente" numa venda que deveria
+         passar.
+
+    Em vez de aplicar um delta, esta função CALCULA do zero, a cada
+    chamada:
+
+        residual = Estoque.quantidade - soma(Lote.quantidade dos lotes
+                                             COM validade real)
+
+    e faz o lote "sem validade" refletir EXATAMENTE esse residual --
+    criando a linha se ainda não existir (quando `residual != 0`) ou
+    atualizando a já existente, em qualquer direção -- inclusive para um
+    valor NEGATIVO: se os lotes datados somarem mais do que o total
+    declarado em `Estoque.quantidade` (cenário A, depois de um PUT que
+    reduz o total sem dizer de qual lote tirar), um residual negativo é a
+    única forma de a soma aritmética continuar batendo com o total. Esse
+    "lote" é uma linha de correção/placeholder, não um lote físico -- fica
+    de fora do consumo FEFO porque `consumir_fefo` só seleciona
+    `Lote.quantidade > 0`, e se autocorrige (pode voltar a ficar positivo
+    ou zerar) na próxima operação que recalcule o residual deste produto.
+
+    PRÉ-CONDIÇÕES (responsabilidade de quem chama, ver docstring do
+    módulo): `Estoque.quantidade` já precisa refletir o valor FINAL da
+    operação, qualquer lote com validade real desta operação já precisa
+    ter sido criado/ajustado, e a linha de `Estoque` já precisa estar
+    travada (`with_for_update()`) na MESMA transação -- senão duas
+    transações concorrentes podem calcular residuais a partir de saldos
+    desatualizados (o `session.get()` abaixo não pede lock por conta
+    própria: ele só reaproveita, dentro da mesma sessão/transação, o lock
+    que o chamador já adquiriu -- mesmo raciocínio já usado em
+    `consumir_fefo`).
     """
-    delta = arredondar_quantidade(delta)
-    if delta == 0:
-        return
+    produto = session.get(Estoque, estoque_id)
+    quantidade_total = produto.quantidade if produto else Decimal("0.000")
+
+    lotes_datados = session.exec(
+        select(Lote)
+        .where(Lote.estoque_id == estoque_id, Lote.validade.is_not(None))
+        .with_for_update()
+    ).all()
+    soma_datados = sum((l.quantidade for l in lotes_datados), Decimal("0.000"))
+
+    residual = arredondar_quantidade(quantidade_total - soma_datados)
 
     lote = _lote_sem_validade(session, estoque_id)
     if lote is None:
-        if delta <= 0:
+        if residual == 0:
             return
         lote = Lote(
             estoque_id=estoque_id,
@@ -83,8 +133,7 @@ def ajustar_lote_sem_validade(session: Session, estoque_id: int, delta: Decimal)
         session.add(lote)
         session.flush()
 
-    nova_quantidade = lote.quantidade + delta
-    lote.quantidade = arredondar_quantidade(nova_quantidade if nova_quantidade > 0 else Decimal("0.000"))
+    lote.quantidade = residual
     session.add(lote)
 
 
@@ -139,7 +188,7 @@ def consumir_fefo(session: Session, estoque_id: int, quantidade: Decimal, nome_p
         produto = session.get(Estoque, estoque_id)
         saldo_atual = produto.quantidade if produto else Decimal("0.000")
         if saldo_atual > 0:
-            ajustar_lote_sem_validade(session, estoque_id, saldo_atual)
+            reconciliar_lote_sem_validade(session, estoque_id)
             lotes = session.exec(
                 select(Lote)
                 .where(Lote.estoque_id == estoque_id, Lote.quantidade > 0)

@@ -8,7 +8,7 @@ from utils.money import arredondar
 from utils.quantidade import arredondar_quantidade, validar_quantidade_inteira_se_unidade
 from logs.logs import criar_log
 from schemas.schemas import EstoqueCreate, EstoqueUpdate, ConfirmarPendenteInput
-from repository.lotes import ajustar_lote_sem_validade, criar_lote
+from repository.lotes import reconciliar_lote_sem_validade, criar_lote
 
 
 def _validar_fornecedor(session: Session, fornecedor_id):
@@ -46,11 +46,14 @@ def criar_estoque(dados: EstoqueCreate, funcionario_id: int):
             validar_quantidade_inteira_se_unidade(dados.quantidade, produto_existente.unidade_medida, produto_existente.nomedoproduto)
             produto_existente.quantidade = arredondar_quantidade(produto_existente.quantidade + dados.quantidade)
             produto_existente.funcionario_id = funcionario_id
-            # Incremento manual (sem lote/validade informados) -- cai no
-            # lote "sem validade" do produto, para a invariante soma(Lote.
-            # quantidade) == Estoque.quantidade nunca divergir (ver
-            # repository/lotes.py).
-            ajustar_lote_sem_validade(session, produto_existente.id, dados.quantidade)
+            # Incremento manual (sem lote/validade informados): reconcilia
+            # o lote "sem validade" do produto a partir do saldo final já
+            # atualizado acima (não um delta isolado -- ver docstring de
+            # reconciliar_lote_sem_validade sobre por que um delta isolado
+            # é frágil quando o produto já tinha saldo que não estava
+            # registrado em nenhum lote). Mantém a invariante soma(Lote.
+            # quantidade) == Estoque.quantidade (ver repository/lotes.py).
+            reconciliar_lote_sem_validade(session, produto_existente.id)
             try:
                 session.commit()
                 session.refresh(produto_existente)
@@ -86,9 +89,11 @@ def criar_estoque(dados: EstoqueCreate, funcionario_id: int):
             session.flush()
             # Cadastro novo com quantidade inicial (sem lote/validade
             # informados nesta tela) -- mesma lógica do incremento acima,
-            # cai no lote "sem validade" para manter a invariante.
-            if estoque.quantidade > 0:
-                ajustar_lote_sem_validade(session, estoque.id, estoque.quantidade)
+            # reconcilia o lote "sem validade" para manter a invariante.
+            # reconciliar_lote_sem_validade já é um no-op quando a
+            # quantidade inicial é 0 (residual fica 0), então chama
+            # incondicionalmente.
+            reconciliar_lote_sem_validade(session, estoque.id)
             session.commit()
             session.refresh(estoque)
             criar_log(funcionario_id, f"Inclusão de produto: {estoque.nomedoproduto}")
@@ -130,12 +135,6 @@ def atualizar_estoque(estoque_id: int, dados: EstoqueUpdate, funcionario_id: int
         # valida contra o valor que o próprio PUT está definindo.
         validar_quantidade_inteira_se_unidade(dados.quantidade, dados.unidade_medida, dados.nomedoproduto)
 
-        # PUT sobrescreve a quantidade total (não é um delta como o
-        # incremento de criar_estoque) -- para manter a invariante, o ajuste
-        # no lote "sem validade" precisa ser a DIFERENÇA entre o valor novo
-        # e o antigo, não o valor novo em si.
-        quantidade_antiga = estoque.quantidade
-
         estoque.titulo = dados.titulo
         estoque.nomedoproduto = dados.nomedoproduto
         estoque.quantidade = arredondar_quantidade(dados.quantidade)
@@ -147,7 +146,12 @@ def atualizar_estoque(estoque_id: int, dados: EstoqueUpdate, funcionario_id: int
         estoque.funcionario_id = funcionario_id
         estoque.fornecedor_id = dados.fornecedor_id
 
-        ajustar_lote_sem_validade(session, estoque.id, estoque.quantidade - quantidade_antiga)
+        # PUT sobrescreve a quantidade total (não é um delta como o
+        # incremento de criar_estoque) -- reconciliar_lote_sem_validade
+        # recalcula o residual do zero a partir do saldo final já
+        # atribuído acima, então funciona igual nos dois casos (não
+        # precisa calcular a diferença entre o valor novo e o antigo).
+        reconciliar_lote_sem_validade(session, estoque.id)
 
         try:
             session.commit()
@@ -229,6 +233,15 @@ def confirmar_pendente(item_id: int, dados: ConfirmarPendenteInput, funcionario_
             # verdade (não cai no lote "sem validade"), já que o
             # lote/validade reais vieram do formulário de confirmação.
             criar_lote(session, produto_existente.id, dados.codigo_lote, item.quantidade, dados.validade)
+            # Reconcilia o lote "sem validade" do produto: se o produto já
+            # tinha saldo pré-existente que não estava em NENHUM lote
+            # (produto legado, cadastrado antes desta fase, ou nunca
+            # tocado por ela), essa é a hora de materializá-lo -- senão
+            # essas unidades ficam fora do rastreamento por lote para
+            # sempre, já que a lista de lotes do produto deixa de estar
+            # vazia a partir daqui (ver docstring de
+            # reconciliar_lote_sem_validade, cenário C).
+            reconciliar_lote_sem_validade(session, produto_existente.id)
             nome_produto = produto_existente.nomedoproduto
         else:
             # Produto novo (não existia ainda com esse código de barras):
@@ -253,6 +266,11 @@ def confirmar_pendente(item_id: int, dados: ConfirmarPendenteInput, funcionario_
             session.add(novo)
             session.flush()  # para ter novo.id antes de criar o lote abaixo
             criar_lote(session, novo.id, dados.codigo_lote, item.quantidade, dados.validade)
+            # Produto novo: residual esperado é 0 (toda a quantidade já
+            # está no lote recém-criado acima), mas chama mesmo assim por
+            # consistência/defesa em profundidade -- é um no-op barato
+            # quando o residual já é 0.
+            reconciliar_lote_sem_validade(session, novo.id)
             nome_produto = novo.nomedoproduto
 
         item.lancado_em = datetime.now(timezone.utc)

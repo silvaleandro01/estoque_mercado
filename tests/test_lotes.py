@@ -17,7 +17,7 @@ from sqlalchemy.dialects import mysql
 
 from repository.estoque import criar_estoque, atualizar_estoque, deletar_estoque, confirmar_pendente
 from repository.vendas import criar_venda
-from repository.lotes import ajustar_lote_sem_validade, consumir_fefo, CODIGO_LOTE_LEGADO
+from repository.lotes import reconciliar_lote_sem_validade, consumir_fefo, CODIGO_LOTE_LEGADO
 from schemas.schemas import EstoqueCreate, EstoqueUpdate, VendaInput, ItemVendaSchema, ConfirmarPendenteInput
 from utils.database import Lote, Estoque
 from conftest import make_setor, make_funcionario, make_produto, make_lote, make_compra, make_fornecedor
@@ -271,16 +271,197 @@ def test_invariante_soma_lotes_igual_estoque_apos_operacoes_mistas(engine, sessi
         assert _soma_lotes(s, criado.id) == s.get(Estoque, criado.id).quantidade
 
 
-def test_ajustar_lote_sem_validade_satura_em_zero_nao_fica_negativo(engine, session):
-    setor = make_setor(session, tipo="invariante2")
-    produto = make_produto(session, codigo="INV002", qtd=5, preco=5.0)
+def test_put_reduz_estoque_com_saldo_todo_em_lote_datado_mantem_invariante(engine, session):
+    """
+    CRÍTICO 1 (cenário A): saldo do produto está TODO em um lote COM
+    validade real (nenhum lote "sem validade"). Um PUT reduz
+    Estoque.quantidade direto, sem dizer de qual lote tirar -- a versão
+    antiga (delta) não achava nenhum lote sem validade, o delta era
+    negativo, e a função não fazia nada: soma(Lote) ficava MAIOR que o
+    saldo real. Agora o residual negativo é absorvido pelo lote "sem
+    validade" (criado na hora, mesmo que negativo -- ver docstring de
+    reconciliar_lote_sem_validade), mantendo a invariante. Confirma também
+    que uma venda subsequente, com estoque realmente suficiente, não é
+    rejeitada incorretamente.
+    """
+    setor = make_setor(session, tipo="critico1a")
+    func = make_funcionario(session, setor_id=setor.id)
+    produto = make_produto(session, codigo="CRIT1A", qtd=10, preco=5.0)
+    make_lote(session, produto.id, codigo_lote="L-DATADO", qtd=10, validade=date.today() + timedelta(days=15))
+
     with Session(engine) as s:
-        ajustar_lote_sem_validade(s, produto.id, Decimal("5"))  # materializa lote = 5
-        s.commit()
-        ajustar_lote_sem_validade(s, produto.id, Decimal("-999"))  # delta maior que o saldo
+        assert s.exec(
+            select(Lote).where(Lote.estoque_id == produto.id, Lote.validade.is_(None))
+        ).first() is None
+
+    atualizar_estoque(
+        produto.id,
+        EstoqueUpdate(nomedoproduto="Produto Teste", quantidade=Decimal("6"),
+                      unidade_medida="UN", estoque_minimo=Decimal("0"),
+                      preco=Decimal("5.00"), codigodebarras="CRIT1A", categoria="Geral"),
+        func.id,
+    )
+
+    with Session(engine) as s:
+        produto_db = s.get(Estoque, produto.id)
+        assert produto_db.quantidade == Decimal("6.000")
+        assert _soma_lotes(s, produto.id) == produto_db.quantidade
+
+    # Venda de 5: estoque real é 6, deveria passar.
+    criar_venda(_venda_input("CRIT1A", 5), func.id)
+    with Session(engine) as s:
+        produto_db = s.get(Estoque, produto.id)
+        assert produto_db.quantidade == Decimal("1.000")
+        assert _soma_lotes(s, produto.id) == produto_db.quantidade
+
+
+def test_incremento_manual_em_produto_legado_cobre_saldo_preexistente(engine, session):
+    """
+    CRÍTICO 1 (cenário B): produto "legado" (saldo > 0, ZERO lotes
+    cadastrados -- como um produto que já existia antes desta fase) é
+    tocado pela primeira vez por um incremento manual via
+    POST /estoque/inserir (mesmo código de barras), não por uma venda. A
+    versão antiga (delta) só registrava o delta daquele incremento,
+    ignorando o saldo pré-existente -- divergência permanente. Confirma
+    também que uma venda subsequente que precisa consumir TANTO do saldo
+    antigo quanto do incremento novo não é rejeitada incorretamente.
+    """
+    setor = make_setor(session, tipo="critico1b")
+    func = make_funcionario(session, setor_id=setor.id)
+    # Produto "legado": cadastrado direto no banco de teste (make_produto),
+    # sem passar por criar_estoque -- simula um produto que já existia
+    # antes da Fase 3, com saldo > 0 e NENHUM lote.
+    produto = make_produto(session, codigo="CRIT1B", qtd=8, preco=5.0)
+
+    with Session(engine) as s:
+        assert s.exec(select(Lote).where(Lote.estoque_id == produto.id)).all() == []
+
+    criar_estoque(
+        EstoqueCreate(nomedoproduto="Produto Teste", quantidade=Decimal("4"),
+                      preco=Decimal("5.00"), codigodebarras="CRIT1B", categoria="Geral"),
+        func.id,
+    )
+
+    with Session(engine) as s:
+        produto_db = s.get(Estoque, produto.id)
+        assert produto_db.quantidade == Decimal("12.000")  # 8 + 4
+        assert _soma_lotes(s, produto.id) == produto_db.quantidade
+
+    # Venda de 10: precisa consumir do saldo "antigo" (8) + parte do
+    # incremento (2) -- antes do fix, o lote legado só tinha o delta do
+    # incremento (4), insuficiente para 10, e a venda seria rejeitada com
+    # "estoque insuficiente" mesmo o saldo real sendo 12.
+    criar_venda(_venda_input("CRIT1B", 10), func.id)
+    with Session(engine) as s:
+        produto_db = s.get(Estoque, produto.id)
+        assert produto_db.quantidade == Decimal("2.000")
+        assert _soma_lotes(s, produto.id) == produto_db.quantidade
+
+
+def test_confirmar_pendente_em_produto_legado_cobre_saldo_preexistente(engine, session):
+    """
+    CRÍTICO 1 (cenário C): produto "legado" (saldo > 0, ZERO lotes) recebe
+    uma NOVA entrada com lote rastreado via confirmação de compra
+    pendente. Antes do fix, a lista de lotes do produto deixava de estar
+    vazia (passava a ter o lote novo), e a materialização do lote "sem
+    validade" (que só rodava em consumir_fefo quando a lista de lotes
+    estava totalmente vazia) nunca mais disparava -- o saldo antigo ficava
+    fora do rastreamento por lote para sempre, causando rejeição falsa de
+    "estoque insuficiente" numa venda que deveria passar.
+    """
+    setor = make_setor(session, tipo="critico1c")
+    func = make_funcionario(session, setor_id=setor.id)
+    produto = make_produto(session, codigo="CRIT1C", qtd=8, preco=5.0)
+
+    with Session(engine) as s:
+        assert s.exec(select(Lote).where(Lote.estoque_id == produto.id)).all() == []
+
+    make_compra(session, func.id, status="autorizada", itens=[
+        {"codigodebarras": "CRIT1C", "nomedoproduto": "Produto Teste", "categoria": "Geral",
+         "preco_venda": 5.0, "quantidade": 5, "preco_custo": 3.0},
+    ])
+    from repository.estoque import listar_pendentes
+    item_id = listar_pendentes()[0]["id"]
+    confirmar_pendente(
+        item_id,
+        ConfirmarPendenteInput(nomedoproduto="Produto Teste", codigodebarras="CRIT1C",
+                                preco_venda=5.0, categoria="Geral",
+                                codigo_lote="LOTE-CRIT1C", validade=date(2030, 1, 1)),
+        func.id,
+    )
+
+    with Session(engine) as s:
+        produto_db = s.get(Estoque, produto.id)
+        assert produto_db.quantidade == Decimal("13.000")  # 8 + 5
+        assert _soma_lotes(s, produto.id) == produto_db.quantidade
+        lote_datado = s.exec(
+            select(Lote).where(Lote.estoque_id == produto.id, Lote.validade.is_not(None))
+        ).first()
+        assert lote_datado.quantidade == Decimal("5.000")
+        lote_legado = s.exec(
+            select(Lote).where(Lote.estoque_id == produto.id, Lote.validade.is_(None))
+        ).first()
+        assert lote_legado.quantidade == Decimal("8.000")
+
+    # Venda de 10: precisa consumir do lote datado (5, vence primeiro no
+    # FEFO) + parte do lote legado (5) -- antes do fix, o lote legado nunca
+    # existia, então só o lote datado (5) estava disponível, insuficiente
+    # para 10.
+    criar_venda(_venda_input("CRIT1C", 10), func.id)
+    with Session(engine) as s:
+        produto_db = s.get(Estoque, produto.id)
+        assert produto_db.quantidade == Decimal("3.000")
+        assert _soma_lotes(s, produto.id) == produto_db.quantidade
+
+
+def test_reconciliar_lote_sem_validade_materializa_e_atualiza_em_qualquer_direcao(engine, session):
+    """
+    Unidade: `reconciliar_lote_sem_validade` sempre calcula o residual do
+    zero (Estoque.quantidade - soma dos lotes com validade real) e faz o
+    lote "sem validade" refletir exatamente esse valor -- cria quando não
+    existe e o residual é diferente de zero, atualiza para cima ou para
+    baixo quando já existe, e permite um residual NEGATIVO quando os lotes
+    datados somam mais do que o total declarado (ver docstring da função
+    sobre por que isso é necessário para a invariante nunca quebrar).
+    """
+    setor = make_setor(session, tipo="reconc1")
+    produto = make_produto(session, codigo="RECONC001", qtd=5, preco=5.0)
+
+    with Session(engine) as s:
+        # Sem nenhum lote ainda: materializa cobrindo o saldo total (5).
+        reconciliar_lote_sem_validade(s, produto.id)
         s.commit()
         lote = s.exec(select(Lote).where(Lote.estoque_id == produto.id)).first()
-    assert lote.quantidade == Decimal("0.000")
+        assert lote.quantidade == Decimal("5.000")
+
+    with Session(engine) as s:
+        # Saldo sobe para 12 sem nenhum lote datado novo: reconcilia para
+        # cima (mesmo lote legado).
+        produto_db = s.get(Estoque, produto.id)
+        produto_db.quantidade = Decimal("12.000")
+        s.add(produto_db)
+        reconciliar_lote_sem_validade(s, produto.id)
+        s.commit()
+        lote = s.exec(select(Lote).where(Lote.estoque_id == produto.id)).first()
+        assert lote.quantidade == Decimal("12.000")
+
+    with Session(engine) as s:
+        # Um lote DATADO de 20 é criado (ex.: nova entrada rastreada) e o
+        # saldo total cai para 15 -- os lotes datados (20) passam a somar
+        # MAIS do que o total declarado (15): o residual é negativo
+        # (15 - 20 = -5), e o lote legado precisa refletir esse valor
+        # negativo para a soma continuar batendo (20 + (-5) = 15).
+        make_lote(s, produto.id, codigo_lote="L-DATADO", qtd=20, validade=date.today() + timedelta(days=10))
+        produto_db = s.get(Estoque, produto.id)
+        produto_db.quantidade = Decimal("15.000")
+        s.add(produto_db)
+        reconciliar_lote_sem_validade(s, produto.id)
+        s.commit()
+        lote_legado = s.exec(
+            select(Lote).where(Lote.estoque_id == produto.id, Lote.validade.is_(None))
+        ).first()
+        assert lote_legado.quantidade == Decimal("-5.000")
+        assert _soma_lotes(s, produto.id) == s.get(Estoque, produto.id).quantidade
 
 
 # ── deletar produto com lotes não falha (FK lote.estoque_id -> estoque.id) ──
