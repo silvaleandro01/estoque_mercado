@@ -35,6 +35,21 @@ iniciar.bat                # Windows
 cd src && uvicorn main:app --reload  # Linux/Mac
 ```
 
+## Testes
+
+A suíte usa `pytest` com SQLite em memória (não precisa de MySQL rodando
+nem de `.env` configurado).
+
+```bash
+# com o venv já ativado (ver Instalação acima)
+pip install -r requirements-dev.txt
+
+pytest
+```
+
+`requirements-dev.txt` inclui `requirements.txt` (dependências de produção)
+mais `pytest` e `httpx` (usado pelo `TestClient` do FastAPI nos testes).
+
 ## Funcionalidades
 
 - Cadastro e gestão de funcionários com controle de acesso por cargo
