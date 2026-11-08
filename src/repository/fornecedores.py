@@ -1,4 +1,5 @@
 from fastapi import HTTPException
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
 
 from utils.database import Fornecedor, engine
@@ -80,6 +81,18 @@ def deletar_fornecedor(fornecedor_id: int):
             session.delete(fornecedor)
             session.commit()
             return {"msg": "Fornecedor deletado com sucesso"}
+        except IntegrityError:
+            # Em MySQL real, fornecedor_id em `estoque`/`compra` tem FK sem
+            # ON DELETE (fk_estoque_fornecedor/fk_compra_fornecedor, ver
+            # migration.sql) -- deletar um fornecedor ainda vinculado a
+            # produto ou compra bate nessa constraint. Antes, o `except
+            # Exception` genérico abaixo capturava isso também e devolvia um
+            # 500 cru; agora é um 409 claro e específico desse cenário.
+            session.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail="Fornecedor possui produtos ou compras vinculados, não pode ser excluído",
+            )
         except Exception:
             session.rollback()
             raise HTTPException(status_code=500, detail="Erro ao deletar fornecedor")

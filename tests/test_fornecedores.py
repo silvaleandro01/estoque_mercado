@@ -1,6 +1,9 @@
 import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
+from sqlalchemy import event, create_engine
+from sqlalchemy.pool import StaticPool
+from sqlmodel import SQLModel, Session as SQLSession
 
 from repository.fornecedores import (
     criar_fornecedor, mostrar_fornecedores, buscar_fornecedor,
@@ -147,6 +150,87 @@ def test_deletar_fornecedor_inexistente_404(engine, session):
     with pytest.raises(HTTPException) as exc:
         deletar_fornecedor(99999)
     assert exc.value.status_code == 404
+
+
+def _engine_com_fk_habilitada(monkeypatch):
+    """
+    Cria um engine de teste SQLite dedicado, com PRAGMA foreign_keys=ON
+    aplicado via event listener do SQLAlchemy na conexão, e substitui o
+    `engine` usado pelos repositories envolvidos (mesmo padrão da fixture
+    `engine` de conftest.py, mas com FK habilitada).
+
+    SQLite não aplica FOREIGN KEY por padrão -- o engine global da suíte
+    (fixture `engine` de conftest.py) não habilita essa checagem, então sem
+    isso o bug de deletar_fornecedor devolvendo 500 cru em vez de 409 numa
+    FK violada (em MySQL real) nunca seria pego por nenhum teste, como o
+    painel de revisão apontou.
+    """
+    from utils import database as db_mod
+    from logs import logs as logs_mod
+    from repository import fornecedores as forn_repo
+    from repository import estoque as est_repo
+    from repository import compras as compras_repo
+
+    eng = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+
+    @event.listens_for(eng, "connect")
+    def _habilitar_fk(dbapi_connection, connection_record):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    SQLModel.metadata.create_all(eng)
+    for mod in (db_mod, logs_mod, forn_repo, est_repo, compras_repo):
+        monkeypatch.setattr(mod, "engine", eng)
+    return eng
+
+
+def test_deletar_fornecedor_vinculado_a_produto_retorna_409(monkeypatch):
+    eng = _engine_com_fk_habilitada(monkeypatch)
+    with SQLSession(eng) as s:
+        setor = make_setor(s, tipo="forn_fk1")
+        make_funcionario(s, setor_id=setor.id)
+        fornecedor = make_fornecedor(s, documento="11144477735")
+        make_produto(s, codigo="FKPROD001", fornecedor_id=fornecedor.id)
+        fornecedor_id = fornecedor.id
+
+    with pytest.raises(HTTPException) as exc:
+        deletar_fornecedor(fornecedor_id)
+    assert exc.value.status_code == 409
+    assert "vinculad" in exc.value.detail.lower()
+
+
+def test_deletar_fornecedor_vinculado_a_compra_retorna_409(monkeypatch):
+    eng = _engine_com_fk_habilitada(monkeypatch)
+    with SQLSession(eng) as s:
+        setor = make_setor(s, tipo="forn_fk2")
+        func = make_funcionario(s, setor_id=setor.id, cargo="operacional")
+        fornecedor = make_fornecedor(s, documento="52998224725")
+        func_id = func.id
+        fornecedor_id = fornecedor.id
+
+    dados = CompraInput(
+        itens=[ItemCompraInput(
+            codigodebarras="FKCOMP001", quantidade=5, preco_custo=3.0,
+            nomedoproduto="Produto FK", preco_venda=6.0, categoria="Geral",
+        )],
+        fornecedor_id=fornecedor_id,
+    )
+    registrar_compra(dados, func_id)
+
+    with pytest.raises(HTTPException) as exc:
+        deletar_fornecedor(fornecedor_id)
+    assert exc.value.status_code == 409
+    assert "vinculad" in exc.value.detail.lower()
+
+
+def test_deletar_fornecedor_sem_vinculo_continua_funcionando_com_fk_habilitada(monkeypatch):
+    """Garante que a FK habilitada não quebra o caso feliz (sem vínculo)."""
+    eng = _engine_com_fk_habilitada(monkeypatch)
+    with SQLSession(eng) as s:
+        fornecedor = make_fornecedor(s, documento="11144477735")
+        fornecedor_id = fornecedor.id
+
+    resultado = deletar_fornecedor(fornecedor_id)
+    assert "deletado" in resultado["msg"]
 
 
 # ── vínculo opcional produto <-> fornecedor ─────────────────────────────────────
