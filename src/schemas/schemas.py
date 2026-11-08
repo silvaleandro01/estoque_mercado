@@ -9,6 +9,14 @@ from utils.money import DecimalMoeda
 
 Cargo = Literal["operacional", "gerente", "diretoria"]
 
+# Todas as colunas monetárias do banco são DECIMAL(10, 2): no máximo 8
+# dígitos inteiros + 2 decimais (até 99999999.99). Sem essa validação aqui,
+# um valor absurdamente grande (ex.: 999999999999.99) passa pelo Pydantic
+# sem erro e só quebra lá na frente, contra o banco, com um erro feio em vez
+# de um 422 claro. `max_digits`/`decimal_places` do Pydantic mapeiam 1:1
+# para essa mesma restrição do DECIMAL(10, 2).
+DECIMAL_10_2 = {"max_digits": 10, "decimal_places": 2}
+
 
 class LoginRequest(BaseModel):
     username: str
@@ -95,8 +103,8 @@ class EstoqueCreate(BaseModel):
     titulo: Optional[str] = None
     nomedoproduto: str
     quantidade: int = Field(..., ge=0)
-    preco: Decimal = Field(..., gt=0)
-    preco_custo: Optional[Decimal] = Field(default=Decimal("0.00"), ge=0)
+    preco: Decimal = Field(..., gt=0, **DECIMAL_10_2)
+    preco_custo: Optional[Decimal] = Field(default=Decimal("0.00"), ge=0, **DECIMAL_10_2)
     codigodebarras: str
     categoria: str
 
@@ -105,7 +113,7 @@ class EstoqueUpdate(BaseModel):
     titulo: Optional[str] = None
     nomedoproduto: str
     quantidade: int = Field(..., ge=0)
-    preco: Decimal = Field(..., gt=0)
+    preco: Decimal = Field(..., gt=0, **DECIMAL_10_2)
     codigodebarras: str
     categoria: str
 
@@ -136,9 +144,9 @@ class RecuperarSenhaRequest(BaseModel):
 class ItemCompraInput(BaseModel):
     codigodebarras: str
     quantidade: int = Field(..., gt=0)
-    preco_custo: Decimal = Field(..., gt=0)
+    preco_custo: Decimal = Field(..., gt=0, **DECIMAL_10_2)
     nomedoproduto: str
-    preco_venda: Decimal = Field(..., gt=0)
+    preco_venda: Decimal = Field(..., gt=0, **DECIMAL_10_2)
     categoria: str
 
 
@@ -183,13 +191,13 @@ class EstoquePendenteOut(BaseModel):
 class ConfirmarPendenteInput(BaseModel):
     nomedoproduto: str
     codigodebarras: str
-    preco_venda: Decimal = Field(..., gt=0)
+    preco_venda: Decimal = Field(..., gt=0, **DECIMAL_10_2)
     categoria: str
 
 
 class DespesaInput(BaseModel):
     descricao: str
-    valor: Decimal = Field(..., gt=0)
+    valor: Decimal = Field(..., gt=0, **DECIMAL_10_2)
     categoria: Literal["Fixo", "Variavel", "Manutencao", "Outros"]
 
 

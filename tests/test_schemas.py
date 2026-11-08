@@ -1,10 +1,12 @@
 import pytest
+from decimal import Decimal
 from datetime import date
 from pydantic import ValidationError
 
 from schemas.schemas import (
     FuncionarioCreate, EstoqueCreate, EstoqueUpdate,
     ItemVendaSchema, VendaInput, TrocarSenhaRequest, RecuperarSenhaRequest,
+    ItemCompraInput, ConfirmarPendenteInput, DespesaInput,
 )
 
 DADOS_BASE = dict(
@@ -173,6 +175,80 @@ def test_estoque_preco_custo_default_zero():
 def test_estoque_preco_custo_negativo_invalido():
     with pytest.raises(ValidationError):
         EstoqueCreate(nomedoproduto="X", quantidade=1, preco=5.0, preco_custo=-1.0, codigodebarras="1", categoria="A")
+
+
+# ── Magnitude de campos monetários (compatibilidade com DECIMAL(10, 2)) ────────
+#
+# Todas as colunas monetárias do banco são DECIMAL(10, 2): no máximo 8
+# dígitos inteiros + 2 decimais (até 99999999.99). Sem validação de magnitude
+# no schema de entrada, um valor absurdamente grande (ex.: 999999999999.99)
+# passava pelo Pydantic sem erro e só quebrava lá na frente, contra o banco,
+# com um erro de banco feio em vez de um 422 claro.
+
+def test_estoque_preco_acima_do_limite_decimal_10_2_invalido():
+    with pytest.raises(ValidationError):
+        EstoqueCreate(
+            nomedoproduto="X", quantidade=1, preco=Decimal("999999999999.99"),
+            codigodebarras="1", categoria="A",
+        )
+
+
+def test_estoque_preco_custo_acima_do_limite_decimal_10_2_invalido():
+    with pytest.raises(ValidationError):
+        EstoqueCreate(
+            nomedoproduto="X", quantidade=1, preco=5.0,
+            preco_custo=Decimal("999999999999.99"), codigodebarras="1", categoria="A",
+        )
+
+
+def test_estoque_preco_no_limite_maximo_do_decimal_10_2_valido():
+    m = EstoqueCreate(
+        nomedoproduto="X", quantidade=1, preco=Decimal("99999999.99"),
+        codigodebarras="1", categoria="A",
+    )
+    assert m.preco == Decimal("99999999.99")
+
+
+def test_estoque_update_preco_acima_do_limite_decimal_10_2_invalido():
+    with pytest.raises(ValidationError):
+        EstoqueUpdate(
+            nomedoproduto="X", quantidade=1, preco=Decimal("999999999999.99"),
+            codigodebarras="1", categoria="A",
+        )
+
+
+def test_item_compra_preco_custo_acima_do_limite_decimal_10_2_invalido():
+    with pytest.raises(ValidationError):
+        ItemCompraInput(
+            codigodebarras="1", quantidade=1, preco_custo=Decimal("999999999999.99"),
+            nomedoproduto="X", preco_venda=10.0, categoria="A",
+        )
+
+
+def test_item_compra_preco_venda_acima_do_limite_decimal_10_2_invalido():
+    with pytest.raises(ValidationError):
+        ItemCompraInput(
+            codigodebarras="1", quantidade=1, preco_custo=10.0,
+            nomedoproduto="X", preco_venda=Decimal("999999999999.99"), categoria="A",
+        )
+
+
+def test_confirmar_pendente_preco_venda_acima_do_limite_decimal_10_2_invalido():
+    with pytest.raises(ValidationError):
+        ConfirmarPendenteInput(
+            nomedoproduto="X", codigodebarras="1",
+            preco_venda=Decimal("999999999999.99"), categoria="A",
+        )
+
+
+def test_despesa_valor_acima_do_limite_decimal_10_2_invalido():
+    with pytest.raises(ValidationError):
+        DespesaInput(descricao="X", valor=Decimal("999999999999.99"), categoria="Outros")
+
+
+def test_despesa_valor_no_limite_maximo_do_decimal_10_2_valido():
+    m = DespesaInput(descricao="X", valor=Decimal("99999999.99"), categoria="Outros")
+    assert m.valor == Decimal("99999999.99")
 
 
 # ── Venda ─────────────────────────────────────────────────────────────────────
