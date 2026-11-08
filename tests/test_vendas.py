@@ -156,6 +156,130 @@ def test_criar_venda_consulta_produto_com_lock_for_update(engine, session, monke
     assert "FOR UPDATE" in compilada
 
 
+def test_criar_venda_ordena_itens_por_codigodebarras_antes_do_lock(engine, session, monkeypatch):
+    """
+    Numa venda com múltiplos itens, `criar_venda` trava um produto por vez
+    (`with_for_update()`) na ordem em que percorre `dados.itens`. Se essa
+    ordem for a ordem literal em que o carrinho chegou no payload, duas
+    vendas concorrentes com os MESMOS produtos em ordem invertida (venda A
+    trava X e depois Y; venda B trava Y e depois X) ficam cada uma
+    segurando o lock que a outra está esperando -- um deadlock clássico do
+    MySQL/InnoDB (reproduzido com 53% de falha, HTTP 500 cru, em teste de
+    carga real com vendas concorrentes).
+
+    A correção ordena os itens por `codigodebarras` (chave estável e
+    determinística) ANTES do loop que trava os produtos, garantindo que
+    toda venda adquira os locks sempre na mesma ordem, não importa a ordem
+    em que o cliente mandou no carrinho.
+
+    Esse deadlock só se manifesta entre transações de verdade competindo
+    pelo mesmo lock (SQLite não implementa bloqueio de linha com FOR
+    UPDATE, então não há como reproduzir o deadlock em si dentro da suíte).
+    O que dá para verificar aqui, e é o que realmente previne o problema, é
+    que as consultas que travam os produtos saem em ordem alfabética de
+    `codigodebarras` mesmo quando o payload chega em ordem invertida.
+    """
+    import sqlmodel as sqlmodel_mod
+
+    setor = make_setor(session, tipo="ordem1")
+    func = make_funcionario(session, setor_id=setor.id)
+    make_produto(session, codigo="Z999", qtd=5, preco=10.0)
+    make_produto(session, codigo="A001", qtd=5, preco=10.0)
+
+    codigos_consultados = []
+    orig_exec = sqlmodel_mod.Session.exec
+
+    def espiar_exec(self, statement, *args, **kwargs):
+        sql = str(statement.compile(compile_kwargs={"literal_binds": True}))
+        if "estoque" in sql.lower() and "codigodebarras" in sql.lower():
+            if "'Z999'" in sql:
+                codigos_consultados.append("Z999")
+            elif "'A001'" in sql:
+                codigos_consultados.append("A001")
+        return orig_exec(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(sqlmodel_mod.Session, "exec", espiar_exec)
+
+    # Payload em ordem invertida (Z antes de A) -- os locks precisam sair
+    # em ordem alfabética mesmo assim.
+    criar_venda(_input([("Z999", 1), ("A001", 1)]), func.id)
+
+    assert codigos_consultados == ["A001", "Z999"], (
+        "criar_venda precisa ordenar dados.itens por codigodebarras antes "
+        "do loop que trava os produtos (with_for_update()), para toda "
+        "venda adquirir os locks sempre na mesma ordem -- isso é o que "
+        "evita deadlock em vendas concorrentes com os mesmos produtos em "
+        "ordem invertida"
+    )
+
+
+# ── trava de concorrência (deadlock) ────────────────────────────────────────────
+
+def test_criar_venda_deadlock_mysql_vira_409_nao_500(engine, session, monkeypatch):
+    """
+    Mesmo com a ordenação eliminando o deadlock entre vendas concorrentes,
+    uma transação ainda pode colidir com outra parte do sistema que trave
+    os mesmos produtos em ordem diferente (defesa em profundidade). Nesse
+    caso o MySQL recusa a transação com OperationalError (código 1213,
+    "Deadlock found when trying to get lock; try restarting transaction").
+    Sem tratamento, isso vazava como um 500 cru pro cliente. Agora
+    `criar_venda` captura especificamente esse erro e devolve um 409
+    limpo, com uma mensagem que convida a tentar de novo.
+    """
+    import sqlmodel as sqlmodel_mod
+    from sqlalchemy.exc import OperationalError
+
+    setor = make_setor(session, tipo="deadlock1")
+    func = make_funcionario(session, setor_id=setor.id)
+    make_produto(session, codigo="DL001", qtd=5, preco=10.0)
+
+    class FakeOrigDeadlock(Exception):
+        args = (1213, "Deadlock found when trying to get lock; try restarting transaction")
+
+    orig_commit = sqlmodel_mod.Session.commit
+    chamadas = {"n": 0}
+
+    def commit_que_falha_com_deadlock(self, *args, **kwargs):
+        chamadas["n"] += 1
+        raise OperationalError("COMMIT", {}, FakeOrigDeadlock())
+
+    monkeypatch.setattr(sqlmodel_mod.Session, "commit", commit_que_falha_com_deadlock)
+
+    with pytest.raises(HTTPException) as exc:
+        criar_venda(_input([("DL001", 1)]), func.id)
+
+    assert exc.value.status_code == 409
+    assert "tente novamente" in exc.value.detail.lower()
+    assert chamadas["n"] == 1
+
+
+def test_criar_venda_outro_operational_error_nao_vira_409(engine, session, monkeypatch):
+    """
+    O tratamento de deadlock é específico do código de erro 1213 do MySQL.
+    Outro OperationalError qualquer (ex.: perda de conexão) não deve ser
+    mascarado como "tente novamente" -- precisa continuar propagando para
+    não esconder um problema de infraestrutura real por trás de uma
+    mensagem de concorrência.
+    """
+    import sqlmodel as sqlmodel_mod
+    from sqlalchemy.exc import OperationalError
+
+    setor = make_setor(session, tipo="deadlock2")
+    func = make_funcionario(session, setor_id=setor.id)
+    make_produto(session, codigo="DL002", qtd=5, preco=10.0)
+
+    class FakeOrigOutroErro(Exception):
+        args = (2006, "MySQL server has gone away")
+
+    def commit_que_falha_outro_erro(self, *args, **kwargs):
+        raise OperationalError("COMMIT", {}, FakeOrigOutroErro())
+
+    monkeypatch.setattr(sqlmodel_mod.Session, "commit", commit_que_falha_outro_erro)
+
+    with pytest.raises(OperationalError):
+        criar_venda(_input([("DL002", 1)]), func.id)
+
+
 # ── vendas_do_dia ─────────────────────────────────────────────────────────────
 
 def test_vendas_do_dia_sem_vendas(engine, session):
