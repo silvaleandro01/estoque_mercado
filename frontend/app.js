@@ -390,13 +390,32 @@ async function carregarEstoque() {
     const container = document.getElementById('view-estoque');
     container.innerHTML = '<h3>Carregando...</h3>';
 
-    const [produtos, pendentes, fornecedores] = await Promise.all([
+    const [produtos, pendentes, fornecedores, alertaVencimento] = await Promise.all([
         apiFetch('/estoque/mostrar'),
         apiFetch('/estoque/pendentes', {}, true),
-        apiFetch('/fornecedores/mostrar', {}, true)
+        apiFetch('/fornecedores/mostrar', {}, true),
+        apiFetch('/estoque/alerta-vencimento', {}, true),
     ]);
     cacheProdutos = produtos || [];
     cacheFornecedores = fornecedores || [];
+
+    // Mapa estoque_id -> pior situação de validade entre os lotes do
+    // produto (vencido tem prioridade sobre vencendo; dentro de cada
+    // situação, guarda o lote mais urgente). Usado só para destacar a linha
+    // na tabela -- o detalhamento por lote fica no endpoint, não na tela.
+    const mapaValidade = {};
+    (alertaVencimento?.vencendo || []).forEach(l => {
+        const atual = mapaValidade[l.estoque_id];
+        if (!atual || l.dias_restantes < atual.dias_restantes) {
+            mapaValidade[l.estoque_id] = { status: 'vencendo', ...l };
+        }
+    });
+    (alertaVencimento?.vencidos || []).forEach(l => {
+        const atual = mapaValidade[l.estoque_id];
+        if (!atual || atual.status !== 'vencido' || l.dias_restantes < atual.dias_restantes) {
+            mapaValidade[l.estoque_id] = { status: 'vencido', ...l };
+        }
+    });
 
     if (!produtos) {
         container.innerHTML = '<h3>Erro ao carregar estoque. Verifique suas permissões.</h3>';
@@ -498,8 +517,16 @@ async function carregarEstoque() {
                             <label style="font-size:0.75rem; color:#666; display:block; margin-bottom:3px;">Estoque Mínimo</label>
                             <input class="form-control" style="margin:0;" type="number" step="0.001" min="0" id="pend-estoque-minimo-${p.id}" placeholder="0">
                         </div>
+                        <div>
+                            <label style="font-size:0.75rem; color:#666; display:block; margin-bottom:3px;">Lote (código do fornecedor)</label>
+                            <input class="form-control" style="margin:0;" id="pend-lote-${p.id}" placeholder="Ex: L2026-0042">
+                        </div>
+                        <div>
+                            <label style="font-size:0.75rem; color:#666; display:block; margin-bottom:3px;">Validade (se perecível)</label>
+                            <input class="form-control" style="margin:0;" type="date" id="pend-validade-${p.id}">
+                        </div>
                     </div>
-                    <p style="font-size:0.72rem; color:#999; margin:0 0 8px;">Unidade de medida e estoque mínimo só se aplicam se este código de barras ainda não existir no estoque (produto novo). Se já existir, só a quantidade é somada.</p>
+                    <p style="font-size:0.72rem; color:#999; margin:0 0 8px;">Unidade de medida e estoque mínimo só se aplicam se este código de barras ainda não existir no estoque (produto novo). Se já existir, só a quantidade é somada. Lote é sempre obrigatório; validade só se o produto for perecível.</p>
                     <button class="btn-success" style="width:100%; padding:10px;" onclick="lancarPendente(${p.id})">✅ Lançar no Estoque</button>
                 </div>
                 `).join('')}
@@ -517,10 +544,18 @@ async function carregarEstoque() {
     produtos.forEach(p => {
         const abaixoDoMinimo = Number(p.quantidade) <= Number(p.estoque_minimo || 0) && Number(p.estoque_minimo || 0) > 0;
         const fornecedorNome = cacheFornecedores.find(f => f.id === p.fornecedor_id)?.nome;
+        const alertaValidade = mapaValidade[p.id];
+        const corLinha = alertaValidade?.status === 'vencido' ? 'background:#fdecea;'
+            : alertaValidade?.status === 'vencendo' ? 'background:#fff8e1;' : '';
+        const avisoValidade = alertaValidade?.status === 'vencido'
+            ? `<br><small style="color:#e74c3c; font-weight:bold;">⚠ Lote ${escapeHtml(alertaValidade.codigo_lote)} vencido há ${Math.abs(alertaValidade.dias_restantes)}d</small>`
+            : alertaValidade?.status === 'vencendo'
+                ? `<br><small style="color:#e67e22; font-weight:bold;">⏳ Lote ${escapeHtml(alertaValidade.codigo_lote)} vence em ${alertaValidade.dias_restantes}d</small>`
+                : '';
         html += `
-            <tr>
+            <tr style="${corLinha}">
                 <td>${p.id}</td>
-                <td>${escapeHtml(p.nomedoproduto)}</td>
+                <td>${escapeHtml(p.nomedoproduto)}${avisoValidade}</td>
                 <td>${escapeHtml(p.codigodebarras)}</td>
                 <td style="${abaixoDoMinimo ? 'color:#e74c3c; font-weight:bold;' : ''}">${formatarQuantidade(p.quantidade, p.unidade_medida)} ${labelUnidade(p.unidade_medida)}</td>
                 <td>${formatarQuantidade(p.estoque_minimo || 0, p.unidade_medida)} ${labelUnidade(p.unidade_medida)}</td>
@@ -639,8 +674,14 @@ async function lancarPendente(id) {
     const cat = document.getElementById(`pend-cat-${id}`).value.trim();
     const unidade = document.getElementById(`pend-unidade-${id}`).value;
     const estoqueMinimo = parseFloat(document.getElementById(`pend-estoque-minimo-${id}`).value) || 0;
+    const codigoLote = document.getElementById(`pend-lote-${id}`).value.trim();
+    const validade = document.getElementById(`pend-validade-${id}`).value || null;
     if (!nome || !cod || isNaN(preco) || preco <= 0 || !cat) {
         alert('Preencha Nome, Código de Barras, Preço de Venda e Categoria.');
+        return;
+    }
+    if (!codigoLote) {
+        alert('Informe o código do lote recebido (obrigatório para rastrear a validade do estoque).');
         return;
     }
     const res = await apiFetch(`/estoque/pendentes/${id}/confirmar`, {
@@ -648,6 +689,7 @@ async function lancarPendente(id) {
         body: JSON.stringify({
             nomedoproduto: nome, codigodebarras: cod, preco_venda: preco, categoria: cat,
             unidade_medida: unidade, estoque_minimo: estoqueMinimo,
+            codigo_lote: codigoLote, validade: validade,
         })
     });
     if (res) {
