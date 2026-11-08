@@ -1,14 +1,14 @@
 CREATE DATABASE IF NOT EXISTS estoque_mercado;
 USE `estoque_mercado`;
 
-CREATE TABLE `setor` (
+CREATE TABLE IF NOT EXISTS `setor` (
     `id` INT AUTO_INCREMENT PRIMARY KEY,
     `nome` VARCHAR(255) NOT NULL,
     `tipo` VARCHAR(50) NOT NULL,
     UNIQUE KEY `unique_tipo` (`tipo`)
 ) ENGINE=InnoDB;
 
-CREATE TABLE `funcionario` (
+CREATE TABLE IF NOT EXISTS `funcionario` (
     `id` INT AUTO_INCREMENT PRIMARY KEY,
     `nome` VARCHAR(100) NOT NULL,
     `sobrenome` VARCHAR(100) NOT NULL,
@@ -28,7 +28,7 @@ CREATE TABLE `funcionario` (
     CONSTRAINT `fk_func_setor` FOREIGN KEY (`setor_id`) REFERENCES `setor` (`id`)
 ) ENGINE=InnoDB;
 
-CREATE TABLE `estoque` (
+CREATE TABLE IF NOT EXISTS `estoque` (
     id INT AUTO_INCREMENT PRIMARY KEY,
     titulo VARCHAR(255),
     nomedoproduto VARCHAR(255) NOT NULL,
@@ -41,7 +41,7 @@ CREATE TABLE `estoque` (
     FOREIGN KEY (funcionario_id) REFERENCES funcionario(id)
 ) ENGINE=InnoDB;
 
-CREATE TABLE `venda` (
+CREATE TABLE IF NOT EXISTS `venda` (
     id INT AUTO_INCREMENT PRIMARY KEY,
     data DATETIME DEFAULT CURRENT_TIMESTAMP,
     valor_total DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
@@ -49,7 +49,7 @@ CREATE TABLE `venda` (
     FOREIGN KEY (funcionario_id) REFERENCES funcionario(id)
 ) ENGINE=InnoDB;
 
-CREATE TABLE `itemvenda` (
+CREATE TABLE IF NOT EXISTS `itemvenda` (
     id INT AUTO_INCREMENT PRIMARY KEY,
     venda_id INT NOT NULL,
     codigodebarras VARCHAR(100) NOT NULL,
@@ -59,7 +59,7 @@ CREATE TABLE `itemvenda` (
     FOREIGN KEY (venda_id) REFERENCES venda(id)
 ) ENGINE=InnoDB;
 
-CREATE TABLE `log` (
+CREATE TABLE IF NOT EXISTS `log` (
     id INT AUTO_INCREMENT PRIMARY KEY,
     funcionario_id INT NOT NULL,
     tipo_movimentacao VARCHAR(255) NOT NULL,
@@ -67,7 +67,7 @@ CREATE TABLE `log` (
     FOREIGN KEY (funcionario_id) REFERENCES funcionario(id)
 ) ENGINE=InnoDB;
 
-CREATE TABLE `ponto` (
+CREATE TABLE IF NOT EXISTS `ponto` (
     id INT AUTO_INCREMENT PRIMARY KEY,
     funcionario_id INT NOT NULL,
     data DATE NOT NULL,
@@ -81,7 +81,7 @@ CREATE TABLE `ponto` (
     FOREIGN KEY (funcionario_id) REFERENCES funcionario(id)
 ) ENGINE=InnoDB;
 
-CREATE TABLE `salario` (
+CREATE TABLE IF NOT EXISTS `salario` (
     id INT AUTO_INCREMENT PRIMARY KEY,
     funcionario_id INT NOT NULL UNIQUE,
     valor_mensal DECIMAL(10, 2) DEFAULT 0.00,
@@ -89,7 +89,7 @@ CREATE TABLE `salario` (
     FOREIGN KEY (funcionario_id) REFERENCES funcionario(id)
 ) ENGINE=InnoDB;
 
-CREATE TABLE `salariohistorico` (
+CREATE TABLE IF NOT EXISTS `salariohistorico` (
     id INT AUTO_INCREMENT PRIMARY KEY,
     funcionario_id INT NOT NULL,
     valor_antigo DECIMAL(10, 2) NOT NULL,
@@ -98,7 +98,7 @@ CREATE TABLE `salariohistorico` (
     FOREIGN KEY (funcionario_id) REFERENCES funcionario(id)
 ) ENGINE=InnoDB;
 
-CREATE TABLE `holerite` (
+CREATE TABLE IF NOT EXISTS `holerite` (
     id INT AUTO_INCREMENT PRIMARY KEY,
     funcionario_id INT NOT NULL,
     mes INT NOT NULL,
@@ -126,10 +126,152 @@ CREATE TABLE `holerite` (
     FOREIGN KEY (funcionario_id) REFERENCES funcionario(id)
 ) ENGINE=InnoDB;
 
-CREATE TABLE `senhahistorico` (
+-- ATENÇÃO: tabela órfã, não usada por nenhum código atual (ver comentário
+-- completo perto da criação de `historico_senha`, mais abaixo neste arquivo).
+CREATE TABLE IF NOT EXISTS `senhahistorico` (
     id INT AUTO_INCREMENT PRIMARY KEY,
     funcionario_id INT NOT NULL,
     password_hash VARCHAR(255) NOT NULL,
     data_criacao DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (funcionario_id) REFERENCES funcionario(id)
+) ENGINE=InnoDB;
+
+-- ============================================================================
+-- Migração aditiva (fix/base-tecnica-sistema-real) -- NÃO apaga nem recria
+-- nada acima. Só adiciona o que os modelos do SQLModel (src/utils/database.py)
+-- já esperam e que faltava aqui, para o projeto subir do zero só com este
+-- arquivo (sem depender do SQLModel.metadata.create_all() criar tabela por
+-- fora). Requer MySQL 8.0+ (usa information_schema e stored procedures,
+-- compatível desde o MySQL 5.x também, mas testado em 8.0.46).
+-- Regra seguida: toda alteração usa IF NOT EXISTS; nenhum DROP/TRUNCATE.
+-- ============================================================================
+
+-- MySQL (diferente do MariaDB) não entende `ADD COLUMN IF NOT EXISTS` em SQL
+-- puro, então a forma portátil e segura de fazer "adicione a coluna só se
+-- ela não existir" é com uma stored procedure temporária que consulta o
+-- information_schema e monta o ALTER TABLE dinamicamente.
+DELIMITER $$
+DROP PROCEDURE IF EXISTS `_add_column_if_not_exists`$$
+CREATE PROCEDURE `_add_column_if_not_exists`(
+    IN p_table VARCHAR(64), IN p_column VARCHAR(64), IN p_definition TEXT
+)
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = DATABASE() AND table_name = p_table AND column_name = p_column
+    ) THEN
+        SET @ddl = CONCAT('ALTER TABLE `', p_table, '` ADD COLUMN `', p_column, '` ', p_definition);
+        PREPARE stmt FROM @ddl;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+    END IF;
+END$$
+DELIMITER ;
+
+-- `funcionario` ganhou campos de documento/endereço e de senha temporária
+-- (ver classe Funcionario) depois que esta tabela já existia em produção.
+CALL `_add_column_if_not_exists`('funcionario', 'cpf', 'VARCHAR(11) NULL');
+CALL `_add_column_if_not_exists`('funcionario', 'email', 'VARCHAR(255) NULL');
+CALL `_add_column_if_not_exists`('funcionario', 'cep', 'VARCHAR(8) NULL');
+CALL `_add_column_if_not_exists`('funcionario', 'estado', 'VARCHAR(2) NULL');
+CALL `_add_column_if_not_exists`('funcionario', 'cidade', 'VARCHAR(100) NULL');
+CALL `_add_column_if_not_exists`('funcionario', 'bairro', 'VARCHAR(100) NULL');
+CALL `_add_column_if_not_exists`('funcionario', 'rua', 'VARCHAR(255) NULL');
+CALL `_add_column_if_not_exists`('funcionario', 'numero', 'VARCHAR(20) NULL');
+CALL `_add_column_if_not_exists`('funcionario', 'senha_temporaria', 'BOOLEAN NOT NULL DEFAULT FALSE');
+CALL `_add_column_if_not_exists`('funcionario', 'senha_atualizada_em', 'DATETIME NULL');
+
+-- NOTA: no modelo, `cpf` e `email` são `unique=True`. A constraint UNIQUE não
+-- foi adicionada automaticamente aqui porque, se já existir alguma linha
+-- duplicada (ou a tabela já tiver dados reais), o ALTER TABLE falharia no
+-- meio da migração. Antes de rodar em produção, confira duplicados e, se
+-- não houver, adicione manualmente:
+--   ALTER TABLE funcionario ADD UNIQUE KEY uq_funcionario_cpf (cpf);
+--   ALTER TABLE funcionario ADD UNIQUE KEY uq_funcionario_email (email);
+
+-- `estoque` ganhou preço de custo (Estoque.preco_custo) além do preço de
+-- venda, usado no cálculo de margem/compras.
+CALL `_add_column_if_not_exists`('estoque', 'preco_custo', 'DECIMAL(10, 2) NOT NULL DEFAULT 0.00');
+
+DROP PROCEDURE IF EXISTS `_add_column_if_not_exists`;
+
+-- Tabelas abaixo já existiam no banco (criadas pelo SQLModel.metadata.create_all
+-- na inicialização da aplicação), mas nunca tinham sido adicionadas aqui.
+CREATE TABLE IF NOT EXISTS `compra` (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    data DATETIME DEFAULT CURRENT_TIMESTAMP,
+    solicitante_id INT NOT NULL,
+    aprovador_id INT,
+    valor_total DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
+    status VARCHAR(50) NOT NULL DEFAULT 'pendente',
+    data_autorizacao DATETIME,
+    INDEX (solicitante_id),
+    INDEX (status),
+    FOREIGN KEY (solicitante_id) REFERENCES funcionario(id),
+    FOREIGN KEY (aprovador_id) REFERENCES funcionario(id)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS `itemcompra` (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    compra_id INT NOT NULL,
+    codigodebarras VARCHAR(100) NOT NULL,
+    nomedoproduto VARCHAR(255) NOT NULL,
+    categoria VARCHAR(100),
+    preco_venda DECIMAL(10, 2),
+    quantidade INT NOT NULL,
+    preco_custo_unitario DECIMAL(10, 2) NOT NULL,
+    preco_custo_total DECIMAL(10, 2) NOT NULL,
+    lancado_em DATETIME,
+    INDEX (compra_id),
+    INDEX (codigodebarras),
+    FOREIGN KEY (compra_id) REFERENCES compra(id)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS `despesa` (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    data DATETIME DEFAULT CURRENT_TIMESTAMP,
+    descricao VARCHAR(255) NOT NULL,
+    valor DECIMAL(10, 2) NOT NULL,
+    categoria VARCHAR(50) NOT NULL,
+    funcionario_id INT NOT NULL,
+    INDEX (funcionario_id),
+    FOREIGN KEY (funcionario_id) REFERENCES funcionario(id)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS `comunicado` (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    titulo VARCHAR(255) NOT NULL,
+    conteudo TEXT NOT NULL,
+    autor_id INT NOT NULL,
+    data_criacao DATETIME DEFAULT CURRENT_TIMESTAMP,
+    para_todos BOOLEAN NOT NULL DEFAULT TRUE,
+    INDEX (autor_id),
+    INDEX (data_criacao),
+    FOREIGN KEY (autor_id) REFERENCES funcionario(id)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS `comunicadodestinatario` (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    comunicado_id INT NOT NULL,
+    funcionario_id INT NOT NULL,
+    lido BOOLEAN NOT NULL DEFAULT FALSE,
+    data_leitura DATETIME,
+    INDEX (comunicado_id),
+    INDEX (funcionario_id),
+    FOREIGN KEY (comunicado_id) REFERENCES comunicado(id),
+    FOREIGN KEY (funcionario_id) REFERENCES funcionario(id)
+) ENGINE=InnoDB;
+
+-- Tabela realmente usada pelo modelo HistoricoSenha (__tablename__ =
+-- "historico_senha"). É DIFERENTE da `senhahistorico` já existente acima
+-- (nomes de tabela e de coluna de data não batem -- `senhahistorico` ficou
+-- órfã, sem nenhum código apontando para ela; mantida aqui intocada por
+-- segurança, já que apagar tabela está fora de cogitação nesta migração).
+CREATE TABLE IF NOT EXISTS `historico_senha` (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    funcionario_id INT NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    criado_em DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX (funcionario_id),
     FOREIGN KEY (funcionario_id) REFERENCES funcionario(id)
 ) ENGINE=InnoDB;

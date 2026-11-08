@@ -1,10 +1,13 @@
 import os
 import secrets
 import string
+from decimal import Decimal
 from typing import Optional
 from datetime import datetime, timezone, date
 from sqlmodel import Field, SQLModel, create_engine, Session, select
 from dotenv import load_dotenv
+
+from utils.money import DecimalMoeda
 
 load_dotenv()
 
@@ -56,8 +59,8 @@ class Estoque(SQLModel, table=True):
     titulo: Optional[str] = Field(default=None)
     nomedoproduto: str
     quantidade: int
-    preco: float
-    preco_custo: float = Field(default=0.0)
+    preco: DecimalMoeda = Field(max_digits=10, decimal_places=2)
+    preco_custo: DecimalMoeda = Field(default=Decimal("0.00"), max_digits=10, decimal_places=2)
     codigodebarras: str = Field(unique=True, index=True)
     categoria: str
     funcionario_id: Optional[int] = Field(default=None, foreign_key="funcionario.id", index=True)
@@ -66,7 +69,7 @@ class Estoque(SQLModel, table=True):
 class Venda(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     data: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
-    valor_total: float = 0.0
+    valor_total: DecimalMoeda = Field(default=Decimal("0.00"), max_digits=10, decimal_places=2)
     funcionario_id: int = Field(foreign_key="funcionario.id", index=True)
 
 
@@ -75,8 +78,8 @@ class ItemVenda(SQLModel, table=True):
     venda_id: int = Field(foreign_key="venda.id", index=True)
     codigodebarras: str = Field(index=True)
     quantidade: int
-    preco_unitario: float
-    preco_total: float
+    preco_unitario: DecimalMoeda = Field(max_digits=10, decimal_places=2)
+    preco_total: DecimalMoeda = Field(max_digits=10, decimal_places=2)
 
 
 class Log(SQLModel, table=True):
@@ -90,7 +93,7 @@ class Despesa(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     data: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
     descricao: str
-    valor: float
+    valor: DecimalMoeda = Field(max_digits=10, decimal_places=2)
     categoria: str
     funcionario_id: int = Field(foreign_key="funcionario.id", index=True)
 
@@ -117,7 +120,7 @@ class Compra(SQLModel, table=True):
     data: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
     solicitante_id: int = Field(foreign_key="funcionario.id", index=True)
     aprovador_id: Optional[int] = Field(default=None, foreign_key="funcionario.id")
-    valor_total: float = 0.0
+    valor_total: DecimalMoeda = Field(default=Decimal("0.00"), max_digits=10, decimal_places=2)
     status: str = Field(default="pendente", index=True)
     data_autorizacao: Optional[datetime] = Field(default=None)
 
@@ -128,10 +131,10 @@ class ItemCompra(SQLModel, table=True):
     codigodebarras: str = Field(index=True)
     nomedoproduto: str
     categoria: Optional[str] = Field(default=None)
-    preco_venda: Optional[float] = Field(default=None)
+    preco_venda: Optional[DecimalMoeda] = Field(default=None, max_digits=10, decimal_places=2)
     quantidade: int
-    preco_custo_unitario: float
-    preco_custo_total: float
+    preco_custo_unitario: DecimalMoeda = Field(max_digits=10, decimal_places=2)
+    preco_custo_total: DecimalMoeda = Field(max_digits=10, decimal_places=2)
     lancado_em: Optional[datetime] = Field(default=None)
 
 

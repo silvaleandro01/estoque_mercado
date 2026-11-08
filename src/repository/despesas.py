@@ -2,6 +2,7 @@ from fastapi import HTTPException
 from sqlmodel import Session, select
 
 from utils.database import Despesa, engine
+from utils.money import arredondar
 from logs.logs import criar_log
 from schemas.schemas import DespesaInput
 
@@ -10,7 +11,7 @@ def criar_despesa(dados: DespesaInput, funcionario_id: int):
     with Session(engine) as session:
         despesa = Despesa(
             descricao=dados.descricao,
-            valor=dados.valor,
+            valor=arredondar(dados.valor),
             categoria=dados.categoria,
             funcionario_id=funcionario_id,
         )

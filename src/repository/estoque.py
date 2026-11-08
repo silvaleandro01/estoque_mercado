@@ -1,16 +1,25 @@
+from decimal import Decimal
 from datetime import datetime, timezone
 from fastapi import HTTPException
 from sqlmodel import Session, select
 
 from utils.database import Estoque, Compra, ItemCompra, engine
+from utils.money import arredondar
 from logs.logs import criar_log
 from schemas.schemas import EstoqueCreate, EstoqueUpdate, ConfirmarPendenteInput
 
 
 def criar_estoque(dados: EstoqueCreate, funcionario_id: int):
     with Session(engine) as session:
+        # with_for_update(): mesma trava usada em repository/vendas.py.
+        # Sem ela, duas entradas de estoque simultâneas para o mesmo produto
+        # (ex.: dois lançamentos manuais, ou um lançamento concorrendo com a
+        # confirmação de um pendente de compra) podem ambas ler a mesma
+        # `quantidade` "antiga", cada uma somar o próprio incremento em cima
+        # dela e uma das duas sobrescrever o resultado da outra ao salvar --
+        # um incremento inteiro perdido (lost update).
         produto_existente = session.exec(
-            select(Estoque).where(Estoque.codigodebarras == dados.codigodebarras)
+            select(Estoque).where(Estoque.codigodebarras == dados.codigodebarras).with_for_update()
         ).first()
 
         if produto_existente:
@@ -29,8 +38,8 @@ def criar_estoque(dados: EstoqueCreate, funcionario_id: int):
             titulo=dados.titulo,
             nomedoproduto=dados.nomedoproduto,
             quantidade=dados.quantidade,
-            preco=dados.preco,
-            preco_custo=dados.preco_custo,
+            preco=arredondar(dados.preco),
+            preco_custo=arredondar(dados.preco_custo) if dados.preco_custo is not None else Decimal("0.00"),
             codigodebarras=dados.codigodebarras,
             categoria=dados.categoria,
             funcionario_id=funcionario_id,
@@ -74,7 +83,7 @@ def atualizar_estoque(estoque_id: int, dados: EstoqueUpdate, funcionario_id: int
         estoque.titulo = dados.titulo
         estoque.nomedoproduto = dados.nomedoproduto
         estoque.quantidade = dados.quantidade
-        estoque.preco = dados.preco
+        estoque.preco = arredondar(dados.preco)
         estoque.codigodebarras = dados.codigodebarras
         estoque.categoria = dados.categoria
         estoque.funcionario_id = funcionario_id
@@ -133,13 +142,16 @@ def confirmar_pendente(item_id: int, dados: ConfirmarPendenteInput, funcionario_
         if item.lancado_em is not None:
             raise HTTPException(status_code=400, detail="Item já foi lançado no estoque")
 
+        # Mesma trava de criar_estoque(): evita lost update quando a
+        # confirmação de um pendente de compra concorre com outra entrada de
+        # estoque para o mesmo produto.
         produto_existente = session.exec(
-            select(Estoque).where(Estoque.codigodebarras == dados.codigodebarras)
+            select(Estoque).where(Estoque.codigodebarras == dados.codigodebarras).with_for_update()
         ).first()
 
         if produto_existente:
             produto_existente.quantidade += item.quantidade
-            produto_existente.preco_custo = item.preco_custo_unitario
+            produto_existente.preco_custo = arredondar(item.preco_custo_unitario)
             produto_existente.funcionario_id = funcionario_id
             session.add(produto_existente)
             nome_produto = produto_existente.nomedoproduto
@@ -147,8 +159,8 @@ def confirmar_pendente(item_id: int, dados: ConfirmarPendenteInput, funcionario_
             novo = Estoque(
                 nomedoproduto=dados.nomedoproduto,
                 quantidade=item.quantidade,
-                preco=dados.preco_venda,
-                preco_custo=item.preco_custo_unitario,
+                preco=arredondar(dados.preco_venda),
+                preco_custo=arredondar(item.preco_custo_unitario),
                 codigodebarras=dados.codigodebarras,
                 categoria=dados.categoria,
                 funcionario_id=funcionario_id,
