@@ -21,10 +21,11 @@ def _dados_create(codigo="111", nome="Pao", qtd=10, preco=5.0, custo=2.0, cat="P
     )
 
 
-def _dados_update(codigo="111", nome="Pao Atualizado", qtd=20, preco=6.0, cat="Padaria"):
+def _dados_update(codigo="111", nome="Pao Atualizado", qtd=20, preco=6.0, cat="Padaria",
+                   unidade="UN", estoque_minimo=Decimal("0.000")):
     return EstoqueUpdate(
         titulo=nome, nomedoproduto=nome,
-        quantidade=qtd, preco=preco,
+        quantidade=qtd, unidade_medida=unidade, estoque_minimo=estoque_minimo, preco=preco,
         codigodebarras=codigo, categoria=cat,
     )
 
@@ -290,7 +291,7 @@ def test_atualizar_estoque_unidade_medida(engine, session):
     p = make_produto(session, codigo="UNIDUPD001", unidade="UN")
     dados = EstoqueUpdate(
         nomedoproduto="Produto Atualizado", quantidade=10, unidade_medida="KG",
-        preco=12.0, codigodebarras="UNIDUPD001", categoria="Geral",
+        estoque_minimo=Decimal("0.000"), preco=12.0, codigodebarras="UNIDUPD001", categoria="Geral",
     )
     resultado = atualizar_estoque(p.id, dados, func.id)
     assert resultado.unidade_medida == "KG"
@@ -378,8 +379,8 @@ def test_atualizar_estoque_minimo(engine, session):
     func = make_funcionario(session, setor_id=setor.id)
     p = make_produto(session, codigo="MINUPD001")
     dados = EstoqueUpdate(
-        nomedoproduto="Produto Atualizado", quantidade=10, estoque_minimo=Decimal("3.000"),
-        preco=12.0, codigodebarras="MINUPD001", categoria="Geral",
+        nomedoproduto="Produto Atualizado", quantidade=10, unidade_medida="UN",
+        estoque_minimo=Decimal("3.000"), preco=12.0, codigodebarras="MINUPD001", categoria="Geral",
     )
     resultado = atualizar_estoque(p.id, dados, func.id)
     assert resultado.estoque_minimo == Decimal("3.000")
@@ -447,7 +448,7 @@ def test_atualizar_estoque_un_rejeita_quantidade_fracionaria(engine, session):
     p = make_produto(session, codigo="UNFRACUPD001", unidade="UN")
     dados = EstoqueUpdate(
         nomedoproduto="Produto", quantidade=Decimal("1.500"), unidade_medida="UN",
-        preco=10.0, codigodebarras="UNFRACUPD001", categoria="Geral",
+        estoque_minimo=Decimal("0.000"), preco=10.0, codigodebarras="UNFRACUPD001", categoria="Geral",
     )
     with pytest.raises(HTTPException) as exc:
         atualizar_estoque(p.id, dados, func.id)

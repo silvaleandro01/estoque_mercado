@@ -124,8 +124,15 @@ class EstoqueUpdate(BaseModel):
     titulo: Optional[str] = None
     nomedoproduto: str
     quantidade: Decimal = Field(..., ge=0, **DECIMAL_10_3)
-    unidade_medida: UnidadeMedida = "UN"
-    estoque_minimo: Decimal = Field(default=Decimal("0.000"), ge=0, **DECIMAL_10_3)
+    # Diferente de EstoqueCreate (onde faz sentido ter default, já que é um
+    # cadastro novo), aqui os dois campos são obrigatórios -- sem default --
+    # igual aos outros campos deste schema (nomedoproduto, quantidade,
+    # preco, etc.). Um PUT que esqueça de enviar unidade_medida/
+    # estoque_minimo não pode resetar silenciosamente esses valores do
+    # produto para "UN"/0 -- precisa falhar com 422 e deixar claro que o
+    # payload está incompleto.
+    unidade_medida: UnidadeMedida
+    estoque_minimo: Decimal = Field(..., ge=0, **DECIMAL_10_3)
     preco: Decimal = Field(..., gt=0, **DECIMAL_10_2)
     codigodebarras: str
     categoria: str
