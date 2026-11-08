@@ -273,6 +273,49 @@ def test_confirmar_pendente_incremento_consulta_produto_com_lock_for_update(engi
     assert "FOR UPDATE" in compilada
 
 
+# ── tratamento de deadlock (IMPORTANTE da revisão da Fase 3) ────────────────
+
+
+def test_confirmar_pendente_deadlock_mysql_vira_409_nao_500(engine, session, monkeypatch):
+    """
+    IMPORTANTE (revisão da Fase 3): confirmar_pendente() não capturava o
+    deadlock do MySQL (OperationalError 1213) como repository/vendas.py já
+    fazia -- o erro subia cru como um 500. Reaproveita o mesmo tratamento
+    (utils/erros_banco.py) aqui.
+    """
+    import sqlmodel as sqlmodel_mod
+    from sqlalchemy.exc import OperationalError
+
+    setor = make_setor(session, tipo="deadlockpend1")
+    solicitante = make_funcionario(session, setor_id=setor.id)
+    make_produto(session, codigo="DLPEND001", qtd=5, preco=9.0, custo=3.0)
+    make_compra(session, solicitante.id, status="autorizada", itens=[
+        {"codigodebarras": "DLPEND001", "nomedoproduto": "Produto Existente", "categoria": "Geral",
+         "preco_venda": 9.0, "quantidade": 7, "preco_custo": 4.0},
+    ])
+    item_id = listar_pendentes()[0]["id"]
+    setor_estoque = make_setor(session, tipo="deadlockpend_estoque")
+    func_estoque = make_funcionario(session, setor_id=setor_estoque.id)
+    dados = ConfirmarPendenteInput(
+        nomedoproduto="Produto Existente", codigodebarras="DLPEND001",
+        preco_venda=9.0, categoria="Geral", codigo_lote="LOTE-DLPEND001",
+    )
+
+    class FakeOrigDeadlock(Exception):
+        args = (1213, "Deadlock found when trying to get lock; try restarting transaction")
+
+    def commit_que_falha(self, *args, **kwargs):
+        raise OperationalError("COMMIT", {}, FakeOrigDeadlock())
+
+    monkeypatch.setattr(sqlmodel_mod.Session, "commit", commit_que_falha)
+
+    with pytest.raises(HTTPException) as exc:
+        confirmar_pendente(item_id, dados, func_estoque.id)
+
+    assert exc.value.status_code == 409
+    assert "tente novamente" in exc.value.detail.lower()
+
+
 # ── permissão via rotas HTTP ─────────────────────────────────────────────────
 
 def test_rota_pendentes_nega_funcionario_fora_do_setor_estoque(client, session, engine):

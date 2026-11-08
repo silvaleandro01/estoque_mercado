@@ -7,23 +7,9 @@ from utils.database import engine, Estoque, Venda, ItemVenda
 from utils.money import arredondar
 from utils.quantidade import arredondar_quantidade, validar_quantidade_inteira_se_unidade
 from utils.timezone import hoje_brasil, limites_do_dia_brasil
+from utils.erros_banco import tratar_operational_error
 from repository.lotes import consumir_fefo
 from schemas.schemas import VendaInput
-
-# Código de erro do MySQL/InnoDB para "Deadlock found when trying to get
-# lock; try restarting transaction".
-MYSQL_ERRO_DEADLOCK = 1213
-
-
-def _e_deadlock_mysql(exc: OperationalError) -> bool:
-    """
-    Identifica se um OperationalError do SQLAlchemy é o deadlock do MySQL
-    (código 1213), e não outro erro operacional qualquer (perda de conexão,
-    timeout, etc.) que não deveria virar um 409 "tente de novo".
-    """
-    orig = getattr(exc, "orig", None)
-    args = getattr(orig, "args", None) or ()
-    return bool(args) and args[0] == MYSQL_ERRO_DEADLOCK
 
 
 def criar_venda(dados: VendaInput, funcionario_id: int):
@@ -104,18 +90,13 @@ def criar_venda(dados: VendaInput, funcionario_id: int):
             session.commit()
         except OperationalError as exc:
             session.rollback()
-            if _e_deadlock_mysql(exc):
-                # Defesa em profundidade: a ordenação acima elimina o
-                # deadlock entre vendas concorrentes, mas uma transação pode
-                # ainda assim colidir com outra parte do sistema que trave os
-                # mesmos produtos em ordem diferente (ex.: entrada de
-                # estoque). Nesse caso devolvemos um erro claro e recuperável
-                # em vez do 500 cru que o MySQL geraria.
-                raise HTTPException(
-                    status_code=409,
-                    detail="Não foi possível processar a venda, tente novamente",
-                )
-            raise
+            # Defesa em profundidade: a ordenação acima elimina o deadlock
+            # entre vendas concorrentes, mas uma transação pode ainda assim
+            # colidir com outra parte do sistema que trave os mesmos
+            # produtos em ordem diferente (ex.: entrada de estoque). Nesse
+            # caso devolvemos um erro claro e recuperável em vez do 500 cru
+            # que o MySQL geraria (ver utils/erros_banco.py).
+            tratar_operational_error(exc, "Não foi possível processar a venda, tente novamente")
 
         session.refresh(venda)
         return venda

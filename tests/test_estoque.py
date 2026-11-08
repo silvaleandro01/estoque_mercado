@@ -547,6 +547,111 @@ def test_criar_estoque_incremento_consulta_produto_com_lock_for_update(engine, s
     assert "FOR UPDATE" in compilada
 
 
+# ── tratamento de deadlock (IMPORTANTE da revisão da Fase 3) ────────────────────
+
+def _deadlock_mysql():
+    from sqlalchemy.exc import OperationalError
+
+    class FakeOrigDeadlock(Exception):
+        args = (1213, "Deadlock found when trying to get lock; try restarting transaction")
+
+    return OperationalError("COMMIT", {}, FakeOrigDeadlock())
+
+
+def test_criar_estoque_incremento_deadlock_mysql_vira_409_nao_500(engine, session, monkeypatch):
+    """
+    IMPORTANTE (revisão da Fase 3): nenhum dos 3 pontos de escrita que
+    passaram a usar with_for_update() nesta fase (criar_estoque,
+    atualizar_estoque, confirmar_pendente) capturava o deadlock do MySQL
+    (OperationalError 1213) como repository/vendas.py já fazia -- o erro
+    subia cru como um 500. Reaproveita o mesmo tratamento (agora extraído
+    para utils/erros_banco.py) no caminho de incremento de criar_estoque.
+    """
+    import sqlmodel as sqlmodel_mod
+
+    setor = make_setor(session, tipo="deadlockest1")
+    func = make_funcionario(session, setor_id=setor.id)
+    make_produto(session, codigo="DLEST001", qtd=5)
+
+    def commit_que_falha(self, *args, **kwargs):
+        raise _deadlock_mysql()
+
+    monkeypatch.setattr(sqlmodel_mod.Session, "commit", commit_que_falha)
+
+    with pytest.raises(HTTPException) as exc:
+        criar_estoque(_dados_create(codigo="DLEST001", qtd=1), func.id)
+
+    assert exc.value.status_code == 409
+    assert "tente novamente" in exc.value.detail.lower()
+
+
+def test_criar_estoque_novo_produto_deadlock_mysql_vira_409_nao_500(engine, session, monkeypatch):
+    """Mesmo tratamento no caminho de cadastro de produto NOVO de
+    criar_estoque (ramo que não encontra produto_existente)."""
+    import sqlmodel as sqlmodel_mod
+
+    setor = make_setor(session, tipo="deadlockest2")
+    func = make_funcionario(session, setor_id=setor.id)
+
+    def commit_que_falha(self, *args, **kwargs):
+        raise _deadlock_mysql()
+
+    monkeypatch.setattr(sqlmodel_mod.Session, "commit", commit_que_falha)
+
+    with pytest.raises(HTTPException) as exc:
+        criar_estoque(_dados_create(codigo="DLEST002", qtd=1), func.id)
+
+    assert exc.value.status_code == 409
+    assert "tente novamente" in exc.value.detail.lower()
+
+
+def test_atualizar_estoque_deadlock_mysql_vira_409_nao_500(engine, session, monkeypatch):
+    """Mesmo tratamento em atualizar_estoque (PUT)."""
+    import sqlmodel as sqlmodel_mod
+
+    setor = make_setor(session, tipo="deadlockest3")
+    func = make_funcionario(session, setor_id=setor.id)
+    produto = make_produto(session, codigo="DLEST003", qtd=5)
+
+    def commit_que_falha(self, *args, **kwargs):
+        raise _deadlock_mysql()
+
+    monkeypatch.setattr(sqlmodel_mod.Session, "commit", commit_que_falha)
+
+    with pytest.raises(HTTPException) as exc:
+        atualizar_estoque(produto.id, _dados_update(codigo="DLEST003", qtd=9), func.id)
+
+    assert exc.value.status_code == 409
+    assert "tente novamente" in exc.value.detail.lower()
+
+
+def test_atualizar_estoque_outro_operational_error_nao_vira_409(engine, session, monkeypatch):
+    """
+    O tratamento é específico do código de erro 1213 do MySQL -- outro
+    OperationalError qualquer (ex.: perda de conexão) continua propagando
+    em vez de ser mascarado como "tente novamente" (mesma regra já
+    validada em repository/vendas.py, agora centralizada em
+    utils/erros_banco.py e reaproveitada aqui).
+    """
+    import sqlmodel as sqlmodel_mod
+    from sqlalchemy.exc import OperationalError
+
+    setor = make_setor(session, tipo="deadlockest4")
+    func = make_funcionario(session, setor_id=setor.id)
+    produto = make_produto(session, codigo="DLEST004", qtd=5)
+
+    class FakeOrigOutroErro(Exception):
+        args = (2006, "MySQL server has gone away")
+
+    def commit_que_falha_outro_erro(self, *args, **kwargs):
+        raise OperationalError("COMMIT", {}, FakeOrigOutroErro())
+
+    monkeypatch.setattr(sqlmodel_mod.Session, "commit", commit_que_falha_outro_erro)
+
+    with pytest.raises(OperationalError):
+        atualizar_estoque(produto.id, _dados_update(codigo="DLEST004", qtd=9), func.id)
+
+
 def test_atualizar_estoque_consulta_produto_com_lock_for_update(engine, session, monkeypatch):
     """
     CRÍTICO 2 (revisão da Fase 3): diferente de criar_estoque/

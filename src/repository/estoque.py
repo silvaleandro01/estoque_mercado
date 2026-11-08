@@ -1,11 +1,13 @@
 from decimal import Decimal
 from datetime import datetime, timezone
 from fastapi import HTTPException
+from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, select, delete
 
 from utils.database import Estoque, Compra, ItemCompra, Fornecedor, Lote, engine
 from utils.money import arredondar
 from utils.quantidade import arredondar_quantidade, validar_quantidade_inteira_se_unidade
+from utils.erros_banco import tratar_operational_error
 from logs.logs import criar_log
 from schemas.schemas import EstoqueCreate, EstoqueUpdate, ConfirmarPendenteInput
 from repository.lotes import reconciliar_lote_sem_validade, criar_lote
@@ -59,6 +61,12 @@ def criar_estoque(dados: EstoqueCreate, funcionario_id: int):
                 session.refresh(produto_existente)
                 criar_log(funcionario_id, f"Incremento de estoque: {produto_existente.nomedoproduto}")
                 return produto_existente
+            except OperationalError as exc:
+                session.rollback()
+                # with_for_update() acima pode colidir com outra transação
+                # que trave os mesmos produtos em ordem diferente (ex.:
+                # venda, outra entrada de estoque) -- ver utils/erros_banco.py.
+                tratar_operational_error(exc, "Não foi possível atualizar o estoque, tente novamente")
             except Exception:
                 session.rollback()
                 raise HTTPException(status_code=500, detail="Erro ao atualizar estoque")
@@ -98,6 +106,9 @@ def criar_estoque(dados: EstoqueCreate, funcionario_id: int):
             session.refresh(estoque)
             criar_log(funcionario_id, f"Inclusão de produto: {estoque.nomedoproduto}")
             return estoque
+        except OperationalError as exc:
+            session.rollback()
+            tratar_operational_error(exc, "Não foi possível criar o produto, tente novamente")
         except Exception:
             session.rollback()
             raise HTTPException(status_code=500, detail="Erro ao criar produto")
@@ -171,6 +182,9 @@ def atualizar_estoque(estoque_id: int, dados: EstoqueUpdate, funcionario_id: int
             session.refresh(estoque)
             criar_log(funcionario_id, f"Atualização de produto: {estoque.nomedoproduto}")
             return estoque
+        except OperationalError as exc:
+            session.rollback()
+            tratar_operational_error(exc, "Não foi possível atualizar o estoque, tente novamente")
         except Exception:
             session.rollback()
             raise HTTPException(status_code=500, detail="Erro ao atualizar estoque")
@@ -304,6 +318,9 @@ def confirmar_pendente(item_id: int, dados: ConfirmarPendenteInput, funcionario_
 
         try:
             session.commit()
+        except OperationalError as exc:
+            session.rollback()
+            tratar_operational_error(exc, "Não foi possível lançar o produto no estoque, tente novamente")
         except Exception:
             session.rollback()
             raise HTTPException(status_code=500, detail="Erro ao lançar produto no estoque")
