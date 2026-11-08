@@ -275,3 +275,37 @@ CREATE TABLE IF NOT EXISTS `historico_senha` (
     INDEX (funcionario_id),
     FOREIGN KEY (funcionario_id) REFERENCES funcionario(id)
 ) ENGINE=InnoDB;
+
+-- ============================================================================
+-- Migração aditiva (feat/produto-completo) -- cadastro de produto completo:
+-- unidade de medida, quantidade decimal (venda por peso), estoque mínimo e
+-- fornecedor. Mesma regra das migrações anteriores: tudo aditivo, nenhum
+-- DROP/TRUNCATE, idempotente (pode rodar mais de uma vez sem erro).
+-- ============================================================================
+
+DELIMITER $$
+DROP PROCEDURE IF EXISTS `_add_column_if_not_exists`$$
+CREATE PROCEDURE `_add_column_if_not_exists`(
+    IN p_table VARCHAR(64), IN p_column VARCHAR(64), IN p_definition TEXT
+)
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = DATABASE() AND table_name = p_table AND column_name = p_column
+    ) THEN
+        SET @ddl = CONCAT('ALTER TABLE `', p_table, '` ADD COLUMN `', p_column, '` ', p_definition);
+        PREPARE stmt FROM @ddl;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+    END IF;
+END$$
+DELIMITER ;
+
+-- `estoque` ganhou unidade de medida (Estoque.unidade_medida): UN (unidade),
+-- KG (quilo) ou L (litro). Guardado como VARCHAR (não ENUM do MySQL) para
+-- seguir o mesmo padrão já usado em `funcionario.cargo` neste projeto --
+-- valor fixo validado na camada Pydantic (schemas.UnidadeMedida), não via
+-- constraint do banco.
+CALL `_add_column_if_not_exists`('estoque', 'unidade_medida', "VARCHAR(2) NOT NULL DEFAULT 'UN'");
+
+DROP PROCEDURE IF EXISTS `_add_column_if_not_exists`;

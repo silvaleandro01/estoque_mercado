@@ -38,6 +38,7 @@ def criar_estoque(dados: EstoqueCreate, funcionario_id: int):
             titulo=dados.titulo,
             nomedoproduto=dados.nomedoproduto,
             quantidade=dados.quantidade,
+            unidade_medida=dados.unidade_medida,
             preco=arredondar(dados.preco),
             preco_custo=arredondar(dados.preco_custo) if dados.preco_custo is not None else Decimal("0.00"),
             codigodebarras=dados.codigodebarras,
@@ -83,6 +84,7 @@ def atualizar_estoque(estoque_id: int, dados: EstoqueUpdate, funcionario_id: int
         estoque.titulo = dados.titulo
         estoque.nomedoproduto = dados.nomedoproduto
         estoque.quantidade = dados.quantidade
+        estoque.unidade_medida = dados.unidade_medida
         estoque.preco = arredondar(dados.preco)
         estoque.codigodebarras = dados.codigodebarras
         estoque.categoria = dados.categoria

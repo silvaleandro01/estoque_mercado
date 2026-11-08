@@ -110,12 +110,14 @@ def make_funcionario(session, nome="Joao", sobrenome="Silva", setor_id=None,
     return f
 
 
-def make_produto(session, nome="Produto Teste", codigo=None, qtd=50, preco=10.0, custo=5.0, cat="Geral"):
+def make_produto(session, nome="Produto Teste", codigo=None, qtd=50, preco=10.0, custo=5.0, cat="Geral",
+                  unidade="UN"):
     codigo = codigo or f"cod{next(_cpf_gen)}"
     p = Estoque(
         titulo=nome,
         nomedoproduto=nome,
         quantidade=qtd,
+        unidade_medida=unidade,
         preco=arredondar(preco),
         preco_custo=arredondar(custo),
         codigodebarras=codigo,

@@ -9,6 +9,14 @@ from utils.money import DecimalMoeda
 
 Cargo = Literal["operacional", "gerente", "diretoria"]
 
+# Unidade de medida do produto: UN (unidade, vendido em peças inteiras),
+# KG (quilo, venda por peso) ou L (litro, venda por volume). Seguindo o
+# mesmo padrão já usado para `Cargo` neste projeto, a validação do valor
+# fixo fica na camada Pydantic (Literal), e a coluna no banco é um simples
+# VARCHAR -- não um ENUM do MySQL -- para não duplicar a regra em dois
+# lugares (ver também `Funcionario.cargo`, que segue a mesma convenção).
+UnidadeMedida = Literal["UN", "KG", "L"]
+
 # Todas as colunas monetárias do banco são DECIMAL(10, 2): no máximo 8
 # dígitos inteiros + 2 decimais (até 99999999.99). Sem essa validação aqui,
 # um valor absurdamente grande (ex.: 999999999999.99) passa pelo Pydantic
@@ -103,6 +111,7 @@ class EstoqueCreate(BaseModel):
     titulo: Optional[str] = None
     nomedoproduto: str
     quantidade: int = Field(..., ge=0)
+    unidade_medida: UnidadeMedida = "UN"
     preco: Decimal = Field(..., gt=0, **DECIMAL_10_2)
     preco_custo: Optional[Decimal] = Field(default=Decimal("0.00"), ge=0, **DECIMAL_10_2)
     codigodebarras: str
@@ -113,6 +122,7 @@ class EstoqueUpdate(BaseModel):
     titulo: Optional[str] = None
     nomedoproduto: str
     quantidade: int = Field(..., ge=0)
+    unidade_medida: UnidadeMedida = "UN"
     preco: Decimal = Field(..., gt=0, **DECIMAL_10_2)
     codigodebarras: str
     categoria: str

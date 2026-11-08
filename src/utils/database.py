@@ -59,6 +59,10 @@ class Estoque(SQLModel, table=True):
     titulo: Optional[str] = Field(default=None)
     nomedoproduto: str
     quantidade: int
+    # UN (unidade), KG (quilo) ou L (litro) -- validado na camada Pydantic
+    # (schemas.UnidadeMedida), guardado aqui como texto simples, mesmo
+    # padrão já usado para `Funcionario.cargo`.
+    unidade_medida: str = Field(default="UN")
     preco: DecimalMoeda = Field(max_digits=10, decimal_places=2)
     preco_custo: DecimalMoeda = Field(default=Decimal("0.00"), max_digits=10, decimal_places=2)
     codigodebarras: str = Field(unique=True, index=True)

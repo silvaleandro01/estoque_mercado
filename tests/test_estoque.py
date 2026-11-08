@@ -1,4 +1,5 @@
 import pytest
+from pydantic import ValidationError
 from fastapi import HTTPException
 from unittest.mock import patch
 from sqlmodel import Session
@@ -229,6 +230,81 @@ def test_incremento_nao_substitui_preco(engine, session):
     dados = _dados_create(codigo="PRECO001", qtd=5, preco=20.0)
     resultado = criar_estoque(dados, func.id)
     assert resultado.preco == 10.0
+
+
+# ── unidade de medida (UN/KG/L) ────────────────────────────────────────────────
+
+def test_criar_estoque_unidade_medida_padrao_un(engine, session):
+    setor = make_setor(session, tipo="un_default")
+    func = make_funcionario(session, setor_id=setor.id)
+    dados = _dados_create(codigo="UN_DEFAULT001")
+    resultado = criar_estoque(dados, func.id)
+    assert resultado.unidade_medida == "UN"
+
+
+def test_criar_estoque_unidade_medida_un(engine, session):
+    setor = make_setor(session, tipo="un_un")
+    func = make_funcionario(session, setor_id=setor.id)
+    dados = EstoqueCreate(
+        nomedoproduto="Caixa de Leite", quantidade=10, unidade_medida="UN",
+        preco=5.0, codigodebarras="UNID001", categoria="Laticinios",
+    )
+    resultado = criar_estoque(dados, func.id)
+    assert resultado.unidade_medida == "UN"
+
+
+def test_criar_estoque_unidade_medida_kg(engine, session):
+    setor = make_setor(session, tipo="un_kg")
+    func = make_funcionario(session, setor_id=setor.id)
+    dados = EstoqueCreate(
+        nomedoproduto="Carne Bovina", quantidade=20, unidade_medida="KG",
+        preco=35.0, codigodebarras="UNID002", categoria="Acougue",
+    )
+    resultado = criar_estoque(dados, func.id)
+    assert resultado.unidade_medida == "KG"
+
+
+def test_criar_estoque_unidade_medida_litro(engine, session):
+    setor = make_setor(session, tipo="un_l")
+    func = make_funcionario(session, setor_id=setor.id)
+    dados = EstoqueCreate(
+        nomedoproduto="Oleo de Soja a Granel", quantidade=50, unidade_medida="L",
+        preco=8.0, codigodebarras="UNID003", categoria="Mercearia",
+    )
+    resultado = criar_estoque(dados, func.id)
+    assert resultado.unidade_medida == "L"
+
+
+def test_criar_estoque_unidade_medida_invalida_rejeitada(engine, session):
+    with pytest.raises(ValidationError):
+        EstoqueCreate(
+            nomedoproduto="Produto Invalido", quantidade=1, unidade_medida="KM",
+            preco=1.0, codigodebarras="UNIDINV001", categoria="Geral",
+        )
+
+
+def test_atualizar_estoque_unidade_medida(engine, session):
+    setor = make_setor(session, tipo="un_upd")
+    func = make_funcionario(session, setor_id=setor.id)
+    p = make_produto(session, codigo="UNIDUPD001", unidade="UN")
+    dados = EstoqueUpdate(
+        nomedoproduto="Produto Atualizado", quantidade=10, unidade_medida="KG",
+        preco=12.0, codigodebarras="UNIDUPD001", categoria="Geral",
+    )
+    resultado = atualizar_estoque(p.id, dados, func.id)
+    assert resultado.unidade_medida == "KG"
+
+
+def test_criar_estoque_incremento_mantem_unidade_medida_original(engine, session):
+    setor = make_setor(session, tipo="un_incr")
+    func = make_funcionario(session, setor_id=setor.id)
+    make_produto(session, codigo="UNIDINCR001", unidade="KG")
+    dados = EstoqueCreate(
+        nomedoproduto="Produto", quantidade=5, unidade_medida="UN",
+        preco=10.0, codigodebarras="UNIDINCR001", categoria="Geral",
+    )
+    resultado = criar_estoque(dados, func.id)
+    assert resultado.unidade_medida == "KG"
 
 
 # ── trava de concorrência (with_for_update) ────────────────────────────────────
