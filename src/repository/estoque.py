@@ -1,7 +1,7 @@
 from decimal import Decimal
 from datetime import datetime, timezone
 from fastapi import HTTPException
-from sqlmodel import Session, select
+from sqlmodel import Session, select, delete
 
 from utils.database import Estoque, Compra, ItemCompra, Fornecedor, Lote, engine
 from utils.money import arredondar
@@ -187,9 +187,22 @@ def deletar_estoque(estoque_id: int):
             # ao excluir o produto, os lotes dele deixam de fazer sentido.
             # Excluídos aqui, na mesma transação, para não violar a FK
             # (lote.estoque_id -> estoque.id) nem deixar lote órfão.
-            lotes = session.exec(select(Lote).where(Lote.estoque_id == estoque_id)).all()
-            for lote in lotes:
-                session.delete(lote)
+            #
+            # DELETE explícito por query (em vez de carregar cada Lote com
+            # session.exec(select(...)) e marcar para exclusão um a um com
+            # session.delete()), seguido de um flush ANTES de deletar
+            # Estoque: sem isso, o SQLAlchemy decide por conta própria a
+            # ordem do flush (não há Relationship() do SQLModel ligando
+            # Lote<->Estoque neste projeto, só a FK crua) e podia emitir
+            # DELETE FROM estoque ANTES de DELETE FROM lote, batendo na FK
+            # e virando um IntegrityError (1451) cru -- reproduzido ao vivo
+            # contra MySQL real para TODO produto que já tivesse qualquer
+            # lote. O DELETE direto garante a ordem manualmente, sem
+            # depender do unit-of-work adivinhar, e sem introduzir
+            # Relationship()/cascade -- padrão que o resto do schema deste
+            # projeto não usa (só FK crua em todo lugar).
+            session.exec(delete(Lote).where(Lote.estoque_id == estoque_id))
+            session.flush()
             session.delete(estoque)
             session.commit()
             return {"msg": "Estoque deletado com sucesso"}

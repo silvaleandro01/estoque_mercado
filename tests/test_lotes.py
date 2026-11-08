@@ -477,3 +477,62 @@ def test_deletar_estoque_com_lotes_remove_lotes_junto(engine, session):
     with Session(engine) as s:
         assert s.get(Estoque, produto.id) is None
         assert s.get(Lote, lote.id) is None
+
+
+def test_deletar_estoque_emite_delete_de_lotes_antes_do_delete_do_produto(engine, session, monkeypatch):
+    """
+    CRÍTICO 3 (revisão da Fase 3): `session.delete(lote)` um a um (deixando
+    o SQLAlchemy decidir a ordem do flush) emitia, na prática, `DELETE FROM
+    estoque` ANTES de `DELETE FROM lote` -- sem Relationship() do SQLModel
+    ligando Lote<->Estoque (só FK crua), o unit-of-work não tinha como
+    saber que precisava inverter a ordem. Contra MySQL real isso batia na
+    FK (lote.estoque_id -> estoque.id) com IntegrityError 1451, virando um
+    500 cru: NENHUM produto que já tivesse passado por qualquer entrada com
+    lote podia ser excluído. Reproduzido ao vivo contra um container MySQL
+    descartável (POST /estoque/inserir -> confirmar pendente com lote ->
+    DELETE /estoque/deletar: 200 OK depois do fix, produto e lotes
+    realmente removidos do banco).
+
+    SQLite não aplica a FK por padrão (não reproduz o 500), então este
+    teste não pega a regressão pelo resultado final -- trava o CONTRATO que
+    evita o bug: um DELETE explícito por query (`delete(Lote).where(...)`,
+    não `session.delete(lote)` um a um) precisa ser emitido e dar
+    flush ANTES do delete do Estoque, garantindo a ordem manualmente em vez
+    de depender do SQLAlchemy adivinhar.
+    """
+    import sqlmodel as sqlmodel_mod
+
+    setor = make_setor(session, tipo="delordem1")
+    produto = make_produto(session, codigo="DELORDEM001", qtd=5, preco=5.0)
+    make_lote(session, produto.id, codigo_lote="L1", qtd=5, validade=date.today() + timedelta(days=5))
+
+    eventos = []
+    orig_exec = sqlmodel_mod.Session.exec
+    orig_flush = sqlmodel_mod.Session.flush
+
+    def espiar_exec(self, statement, *args, **kwargs):
+        if "lote" in str(statement).lower() and str(statement).strip().upper().startswith("DELETE"):
+            eventos.append(("delete_lote_query", statement))
+        return orig_exec(self, statement, *args, **kwargs)
+
+    def espiar_flush(self, *args, **kwargs):
+        eventos.append(("flush",))
+        return orig_flush(self, *args, **kwargs)
+
+    monkeypatch.setattr(sqlmodel_mod.Session, "exec", espiar_exec)
+    monkeypatch.setattr(sqlmodel_mod.Session, "flush", espiar_flush)
+
+    deletar_estoque(produto.id)
+
+    tipos = [e[0] for e in eventos]
+    assert "delete_lote_query" in tipos, (
+        "esperava um DELETE explícito por query (delete(Lote).where(...)) "
+        "em deletar_estoque, não session.delete(lote) um a um"
+    )
+    idx_delete = tipos.index("delete_lote_query")
+    assert "flush" in tipos[idx_delete:], (
+        "esperava um session.flush() logo após o DELETE dos lotes, ANTES "
+        "do delete do Estoque -- sem isso a ordem do flush final fica por "
+        "conta do SQLAlchemy, que pode emitir DELETE FROM estoque antes de "
+        "DELETE FROM lote e bater na FK contra MySQL real"
+    )
