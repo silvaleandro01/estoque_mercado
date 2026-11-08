@@ -6,8 +6,18 @@ from pydantic import BaseModel, Field, field_validator
 from sqlmodel import SQLModel
 
 from utils.money import DecimalMoeda
+from utils.quantidade import DecimalQuantidade
+from utils.documentos import validar_cpf as _validar_cpf, validar_cpf_ou_cnpj
 
 Cargo = Literal["operacional", "gerente", "diretoria"]
+
+# Unidade de medida do produto: UN (unidade, vendido em peças inteiras),
+# KG (quilo, venda por peso) ou L (litro, venda por volume). Seguindo o
+# mesmo padrão já usado para `Cargo` neste projeto, a validação do valor
+# fixo fica na camada Pydantic (Literal), e a coluna no banco é um simples
+# VARCHAR -- não um ENUM do MySQL -- para não duplicar a regra em dois
+# lugares (ver também `Funcionario.cargo`, que segue a mesma convenção).
+UnidadeMedida = Literal["UN", "KG", "L"]
 
 # Todas as colunas monetárias do banco são DECIMAL(10, 2): no máximo 8
 # dígitos inteiros + 2 decimais (até 99999999.99). Sem essa validação aqui,
@@ -16,6 +26,11 @@ Cargo = Literal["operacional", "gerente", "diretoria"]
 # de um 422 claro. `max_digits`/`decimal_places` do Pydantic mapeiam 1:1
 # para essa mesma restrição do DECIMAL(10, 2).
 DECIMAL_10_2 = {"max_digits": 10, "decimal_places": 2}
+
+# Mesma ideia de DECIMAL_10_2, mas para as colunas de quantidade (DECIMAL(10,
+# 3)): produtos vendidos por peso/volume (KG/L) podem ter até 3 casas
+# decimais (precisão de grama/mililitro), diferente de dinheiro (2 casas).
+DECIMAL_10_3 = {"max_digits": 10, "decimal_places": 3}
 
 
 class LoginRequest(BaseModel):
@@ -44,14 +59,7 @@ class FuncionarioCreate(BaseModel):
     @field_validator("cpf")
     @classmethod
     def validar_cpf(cls, v: str) -> str:
-        cpf = re.sub(r"\D", "", v)
-        if len(cpf) != 11 or len(set(cpf)) == 1:
-            raise ValueError("CPF inválido")
-        for i in range(9, 11):
-            soma = sum(int(cpf[j]) * (i + 1 - j) for j in range(i))
-            if (soma * 10 % 11) % 10 != int(cpf[i]):
-                raise ValueError("CPF inválido")
-        return cpf
+        return _validar_cpf(v)
 
     @field_validator("cep")
     @classmethod
@@ -102,25 +110,38 @@ class SetorCreate(SQLModel):
 class EstoqueCreate(BaseModel):
     titulo: Optional[str] = None
     nomedoproduto: str
-    quantidade: int = Field(..., ge=0)
+    quantidade: Decimal = Field(..., ge=0, **DECIMAL_10_3)
+    unidade_medida: UnidadeMedida = "UN"
+    estoque_minimo: Decimal = Field(default=Decimal("0.000"), ge=0, **DECIMAL_10_3)
     preco: Decimal = Field(..., gt=0, **DECIMAL_10_2)
     preco_custo: Optional[Decimal] = Field(default=Decimal("0.00"), ge=0, **DECIMAL_10_2)
     codigodebarras: str
     categoria: str
+    fornecedor_id: Optional[int] = None
 
 
 class EstoqueUpdate(BaseModel):
     titulo: Optional[str] = None
     nomedoproduto: str
-    quantidade: int = Field(..., ge=0)
+    quantidade: Decimal = Field(..., ge=0, **DECIMAL_10_3)
+    # Diferente de EstoqueCreate (onde faz sentido ter default, já que é um
+    # cadastro novo), aqui os dois campos são obrigatórios -- sem default --
+    # igual aos outros campos deste schema (nomedoproduto, quantidade,
+    # preco, etc.). Um PUT que esqueça de enviar unidade_medida/
+    # estoque_minimo não pode resetar silenciosamente esses valores do
+    # produto para "UN"/0 -- precisa falhar com 422 e deixar claro que o
+    # payload está incompleto.
+    unidade_medida: UnidadeMedida
+    estoque_minimo: Decimal = Field(..., ge=0, **DECIMAL_10_3)
     preco: Decimal = Field(..., gt=0, **DECIMAL_10_2)
     codigodebarras: str
     categoria: str
+    fornecedor_id: Optional[int] = None
 
 
 class ItemVendaSchema(BaseModel):
     codigodebarras: str
-    quantidade: int = Field(..., gt=0)
+    quantidade: Decimal = Field(..., gt=0, **DECIMAL_10_3)
 
 
 class VendaInput(BaseModel):
@@ -143,7 +164,7 @@ class RecuperarSenhaRequest(BaseModel):
 
 class ItemCompraInput(BaseModel):
     codigodebarras: str
-    quantidade: int = Field(..., gt=0)
+    quantidade: Decimal = Field(..., gt=0, **DECIMAL_10_3)
     preco_custo: Decimal = Field(..., gt=0, **DECIMAL_10_2)
     nomedoproduto: str
     preco_venda: Decimal = Field(..., gt=0, **DECIMAL_10_2)
@@ -152,12 +173,13 @@ class ItemCompraInput(BaseModel):
 
 class CompraInput(BaseModel):
     itens: List[ItemCompraInput] = Field(..., min_length=1)
+    fornecedor_id: Optional[int] = None
 
 
 class ItemCompraOut(BaseModel):
     nomedoproduto: str
     codigodebarras: str
-    quantidade: int
+    quantidade: DecimalQuantidade
     preco_custo: DecimalMoeda
     total: DecimalMoeda
 
@@ -171,6 +193,7 @@ class CompraOut(BaseModel):
     aprovador: Optional[str] = None
     valor_total: DecimalMoeda
     status: str
+    fornecedor: Optional[str] = None
 
     model_config = {"from_attributes": True}
 
@@ -181,7 +204,7 @@ class EstoquePendenteOut(BaseModel):
     data_entrada: Optional[datetime] = None
     nomedoproduto: str
     codigodebarras: str
-    quantidade: int
+    quantidade: DecimalQuantidade
     preco_custo: DecimalMoeda
     preco_venda: Optional[DecimalMoeda] = None
 
@@ -193,6 +216,48 @@ class ConfirmarPendenteInput(BaseModel):
     codigodebarras: str
     preco_venda: Decimal = Field(..., gt=0, **DECIMAL_10_2)
     categoria: str
+    # Só usados quando o item pendente vira um PRODUTO NOVO no estoque (não
+    # existia produto com esse código de barras ainda) -- se o produto já
+    # existir, o lançamento só incrementa a quantidade dele, mantendo a
+    # unidade de medida e o estoque mínimo já cadastrados (mesma regra já
+    # aplicada em criar_estoque() para incremento de produto existente).
+    unidade_medida: UnidadeMedida = "UN"
+    estoque_minimo: Decimal = Field(default=Decimal("0.000"), ge=0, **DECIMAL_10_3)
+
+
+class FornecedorInput(BaseModel):
+    nome: str
+    documento: str  # CPF ou CNPJ
+    telefone: Optional[str] = None
+    email: Optional[str] = None
+    prazo_medio_entrega_dias: Optional[int] = Field(default=None, ge=0)
+
+    @field_validator("documento")
+    @classmethod
+    def validar_documento(cls, v: str) -> str:
+        return validar_cpf_ou_cnpj(v)
+
+    @field_validator("email")
+    @classmethod
+    def validar_email(cls, v):
+        if v is None:
+            return v
+        v = v.strip().lower()
+        partes = v.split("@")
+        if len(partes) != 2 or not partes[0] or "." not in partes[1]:
+            raise ValueError("Email inválido")
+        return v
+
+
+class FornecedorOut(BaseModel):
+    id: int
+    nome: str
+    documento: str
+    telefone: Optional[str] = None
+    email: Optional[str] = None
+    prazo_medio_entrega_dias: Optional[int] = None
+
+    model_config = {"from_attributes": True}
 
 
 class DespesaInput(BaseModel):

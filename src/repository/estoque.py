@@ -3,14 +3,29 @@ from datetime import datetime, timezone
 from fastapi import HTTPException
 from sqlmodel import Session, select
 
-from utils.database import Estoque, Compra, ItemCompra, engine
+from utils.database import Estoque, Compra, ItemCompra, Fornecedor, engine
 from utils.money import arredondar
+from utils.quantidade import arredondar_quantidade, validar_quantidade_inteira_se_unidade
 from logs.logs import criar_log
 from schemas.schemas import EstoqueCreate, EstoqueUpdate, ConfirmarPendenteInput
 
 
+def _validar_fornecedor(session: Session, fornecedor_id):
+    """Garante um erro 404 claro (em vez de um erro cru do banco/FK) quando
+    o `fornecedor_id` informado no cadastro de produto não existe."""
+    if fornecedor_id is not None and not session.get(Fornecedor, fornecedor_id):
+        raise HTTPException(status_code=404, detail="Fornecedor não encontrado")
+
+
 def criar_estoque(dados: EstoqueCreate, funcionario_id: int):
     with Session(engine) as session:
+        # _validar_fornecedor roda só mais abaixo, no caminho de produto
+        # novo -- não aqui incondicionalmente. No caminho de incremento
+        # (produto já existente, logo abaixo) dados.fornecedor_id do
+        # payload nem é usado (o fornecedor já cadastrado do produto não
+        # muda por incremento), então validar um fornecedor_id que será
+        # ignorado só bloquearia incrementos de estoque sem necessidade.
+
         # with_for_update(): mesma trava usada em repository/vendas.py.
         # Sem ela, duas entradas de estoque simultâneas para o mesmo produto
         # (ex.: dois lançamentos manuais, ou um lançamento concorrendo com a
@@ -23,7 +38,12 @@ def criar_estoque(dados: EstoqueCreate, funcionario_id: int):
         ).first()
 
         if produto_existente:
-            produto_existente.quantidade += dados.quantidade
+            # Validação "UN só aceita quantidade inteira" contra a
+            # unidade_medida já cadastrada do produto -- o incremento ignora
+            # qualquer dados.unidade_medida que tenha vindo no payload, a
+            # unidade de um produto já existente não muda por incremento.
+            validar_quantidade_inteira_se_unidade(dados.quantidade, produto_existente.unidade_medida, produto_existente.nomedoproduto)
+            produto_existente.quantidade = arredondar_quantidade(produto_existente.quantidade + dados.quantidade)
             produto_existente.funcionario_id = funcionario_id
             try:
                 session.commit()
@@ -34,15 +54,26 @@ def criar_estoque(dados: EstoqueCreate, funcionario_id: int):
                 session.rollback()
                 raise HTTPException(status_code=500, detail="Erro ao atualizar estoque")
 
+        # Produto novo (cadastro): aqui sim dados.fornecedor_id é usado de
+        # verdade (vira o fornecedor do produto), então validamos que ele
+        # existe. A unidade de medida também vem do próprio payload, já que
+        # ainda não existe nenhum produto cadastrado com esse código de
+        # barras para servir de fonte da verdade.
+        _validar_fornecedor(session, dados.fornecedor_id)
+        validar_quantidade_inteira_se_unidade(dados.quantidade, dados.unidade_medida, dados.nomedoproduto)
+
         estoque = Estoque(
             titulo=dados.titulo,
             nomedoproduto=dados.nomedoproduto,
-            quantidade=dados.quantidade,
+            quantidade=arredondar_quantidade(dados.quantidade),
+            unidade_medida=dados.unidade_medida,
+            estoque_minimo=arredondar_quantidade(dados.estoque_minimo),
             preco=arredondar(dados.preco),
             preco_custo=arredondar(dados.preco_custo) if dados.preco_custo is not None else Decimal("0.00"),
             codigodebarras=dados.codigodebarras,
             categoria=dados.categoria,
             funcionario_id=funcionario_id,
+            fornecedor_id=dados.fornecedor_id,
         )
         try:
             session.add(estoque)
@@ -74,19 +105,29 @@ def atualizar_estoque(estoque_id: int, dados: EstoqueUpdate, funcionario_id: int
         if not estoque:
             raise HTTPException(status_code=404, detail="Estoque não localizado")
 
+        _validar_fornecedor(session, dados.fornecedor_id)
+
         produto_existente = session.exec(
             select(Estoque).where(Estoque.codigodebarras == dados.codigodebarras)
         ).first()
         if produto_existente and produto_existente.id != estoque.id:
             raise HTTPException(status_code=400, detail="Código de barras já cadastrado em outro produto")
 
+        # Atualização: a unidade de medida em si também vem do payload (o
+        # formulário de edição permite trocar UN/KG/L do produto), então
+        # valida contra o valor que o próprio PUT está definindo.
+        validar_quantidade_inteira_se_unidade(dados.quantidade, dados.unidade_medida, dados.nomedoproduto)
+
         estoque.titulo = dados.titulo
         estoque.nomedoproduto = dados.nomedoproduto
-        estoque.quantidade = dados.quantidade
+        estoque.quantidade = arredondar_quantidade(dados.quantidade)
+        estoque.unidade_medida = dados.unidade_medida
+        estoque.estoque_minimo = arredondar_quantidade(dados.estoque_minimo)
         estoque.preco = arredondar(dados.preco)
         estoque.codigodebarras = dados.codigodebarras
         estoque.categoria = dados.categoria
         estoque.funcionario_id = funcionario_id
+        estoque.fornecedor_id = dados.fornecedor_id
 
         try:
             session.commit()
@@ -150,20 +191,30 @@ def confirmar_pendente(item_id: int, dados: ConfirmarPendenteInput, funcionario_
         ).first()
 
         if produto_existente:
-            produto_existente.quantidade += item.quantidade
+            produto_existente.quantidade = arredondar_quantidade(produto_existente.quantidade + item.quantidade)
             produto_existente.preco_custo = arredondar(item.preco_custo_unitario)
             produto_existente.funcionario_id = funcionario_id
             session.add(produto_existente)
             nome_produto = produto_existente.nomedoproduto
         else:
+            # Produto novo (não existia ainda com esse código de barras):
+            # herda o fornecedor do próprio pedido de compra que o originou
+            # (quando o pedido tem um fornecedor definido) -- afinal, foi
+            # dele que este produto veio. unidade_medida/estoque_minimo não
+            # dá pra deduzir da compra, então vêm do formulário de
+            # confirmação (ConfirmarPendenteInput).
+            compra = session.get(Compra, item.compra_id)
             novo = Estoque(
                 nomedoproduto=dados.nomedoproduto,
                 quantidade=item.quantidade,
+                unidade_medida=dados.unidade_medida,
+                estoque_minimo=arredondar_quantidade(dados.estoque_minimo),
                 preco=arredondar(dados.preco_venda),
                 preco_custo=arredondar(item.preco_custo_unitario),
                 codigodebarras=dados.codigodebarras,
                 categoria=dados.categoria,
                 funcionario_id=funcionario_id,
+                fornecedor_id=compra.fornecedor_id if compra else None,
             )
             session.add(novo)
             nome_produto = novo.nomedoproduto

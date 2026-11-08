@@ -278,12 +278,30 @@ def test_atualizar_estoque(client, session, engine):
     p = make_produto(session, codigo="UPD_EST_MAIN")
     payload = dict(
         titulo="Atualizado", nomedoproduto="Atualizado",
-        quantidade=200, preco=12.0,
+        quantidade=200, unidade_medida="UN", estoque_minimo=0, preco=12.0,
         codigodebarras="UPD_EST_MAIN", categoria="Geral",
     )
     r = client.put(f"/estoque/atualizar/{p.id}", json=payload)
     assert r.status_code == 200
     assert r.json()["quantidade"] == 200
+
+
+def test_atualizar_estoque_sem_unidade_medida_e_estoque_minimo_rejeitado(client, session, engine):
+    """
+    unidade_medida e estoque_minimo eram opcionais (com default) em
+    EstoqueUpdate -- diferente dos outros campos do mesmo schema, que são
+    obrigatórios. Um PUT que esquecesse de enviar esses dois campos
+    resetava silenciosamente o produto para unidade_medida="UN" e
+    estoque_minimo=0, em vez de falhar. Agora a API rejeita com 422.
+    """
+    p = make_produto(session, codigo="UPD_EST_SEM_CAMPOS", unidade="KG")
+    payload = dict(
+        titulo="Atualizado", nomedoproduto="Atualizado",
+        quantidade=200, preco=12.0,
+        codigodebarras="UPD_EST_SEM_CAMPOS", categoria="Geral",
+    )
+    r = client.put(f"/estoque/atualizar/{p.id}", json=payload)
+    assert r.status_code == 422
 
 
 def test_deletar_estoque(client, session, engine):

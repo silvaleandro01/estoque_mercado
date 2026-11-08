@@ -275,3 +275,112 @@ CREATE TABLE IF NOT EXISTS `historico_senha` (
     INDEX (funcionario_id),
     FOREIGN KEY (funcionario_id) REFERENCES funcionario(id)
 ) ENGINE=InnoDB;
+
+-- ============================================================================
+-- Migração aditiva (feat/produto-completo) -- cadastro de produto completo:
+-- unidade de medida, quantidade decimal (venda por peso), estoque mínimo e
+-- fornecedor. Mesma regra das migrações anteriores: tudo aditivo, nenhum
+-- DROP/TRUNCATE, idempotente (pode rodar mais de uma vez sem erro).
+-- ============================================================================
+
+-- Mesmo padrão da Fase 1 (ver comentário completo mais acima, perto da
+-- primeira definição desta mesma procedure): define uma vez no início desta
+-- seção, chama várias vezes ao longo dela, dropa uma vez no fim.
+DELIMITER $$
+DROP PROCEDURE IF EXISTS `_add_column_if_not_exists`$$
+CREATE PROCEDURE `_add_column_if_not_exists`(
+    IN p_table VARCHAR(64), IN p_column VARCHAR(64), IN p_definition TEXT
+)
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = DATABASE() AND table_name = p_table AND column_name = p_column
+    ) THEN
+        SET @ddl = CONCAT('ALTER TABLE `', p_table, '` ADD COLUMN `', p_column, '` ', p_definition);
+        PREPARE stmt FROM @ddl;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+    END IF;
+END$$
+DELIMITER ;
+
+-- `estoque` ganhou unidade de medida (Estoque.unidade_medida): UN (unidade),
+-- KG (quilo) ou L (litro). Guardado como VARCHAR (não ENUM do MySQL) para
+-- seguir o mesmo padrão já usado em `funcionario.cargo` neste projeto --
+-- valor fixo validado na camada Pydantic (schemas.UnidadeMedida), não via
+-- constraint do banco.
+CALL `_add_column_if_not_exists`('estoque', 'unidade_medida', "VARCHAR(2) NOT NULL DEFAULT 'UN'");
+
+-- `estoque.quantidade`, `itemvenda.quantidade` e `itemcompra.quantidade`
+-- eram INT; produtos vendidos por peso/volume (unidade_medida KG/L)
+-- precisam de fração de unidade (ex.: 0.350 kg). `MODIFY COLUMN` muda o
+-- tipo da coluna preservando os valores já gravados (um INT existente, ex.
+-- 10, vira DECIMAL 10.000, sem perda), diferente de um DROP+ADD que
+-- apagaria os dados. Não precisa de IF NOT EXISTS: alterar o tipo de uma
+-- coluna que já existe não falha se este script rodar de novo (o segundo
+-- MODIFY só reaplica a mesma definição, sem efeito colateral).
+--
+-- NOTA DE DEPLOY: diferente de um `ADD COLUMN` simples (que só mexe nos
+-- metadados da tabela e é praticamente instantâneo), `MODIFY COLUMN` que
+-- muda o tipo de uma coluna reescreve a tabela inteira (InnoDB recria o
+-- arquivo por baixo, linha por linha, mesmo com ALGORITHM=INPLACE) -- não é
+-- instantâneo em tabelas com volume real de dados. Durante a execução, o
+-- MySQL mantém um metadata lock que bloqueia ESCRITAS concorrentes nessa
+-- tabela (leituras continuam funcionando normalmente), então em produção
+-- este ALTER TABLE (e os dois seguintes) deve rodar numa janela de baixo
+-- tráfego, não a qualquer hora do dia.
+ALTER TABLE `estoque` MODIFY COLUMN `quantidade` DECIMAL(10, 3) NOT NULL DEFAULT 0.000;
+ALTER TABLE `itemvenda` MODIFY COLUMN `quantidade` DECIMAL(10, 3) NOT NULL;
+ALTER TABLE `itemcompra` MODIFY COLUMN `quantidade` DECIMAL(10, 3) NOT NULL;
+
+-- `estoque` ganhou estoque mínimo (Estoque.estoque_minimo): hoje só um
+-- valor informativo mostrado no cadastro/listagem de produtos; o endpoint
+-- de reposição automática que vai consumir esse valor é de uma fase futura
+-- do projeto (fora do escopo desta migração).
+CALL `_add_column_if_not_exists`('estoque', 'estoque_minimo', 'DECIMAL(10, 3) NOT NULL DEFAULT 0.000');
+
+-- Fornecedor: nova tabela (CREATE TABLE IF NOT EXISTS, mesmo padrão já
+-- usado nas tabelas `compra`/`itemcompra`/etc. acima), com vínculo opcional
+-- em `estoque` (fornecedor principal do produto) e em `compra` (fornecedor
+-- do pedido) -- opcional nos dois casos para não quebrar produtos/compras
+-- já existentes sem fornecedor definido.
+CREATE TABLE IF NOT EXISTS `fornecedor` (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    nome VARCHAR(255) NOT NULL,
+    documento VARCHAR(14) NOT NULL,
+    telefone VARCHAR(20),
+    email VARCHAR(255),
+    prazo_medio_entrega_dias INT,
+    UNIQUE KEY `unique_fornecedor_documento` (`documento`)
+) ENGINE=InnoDB;
+
+-- MySQL também não entende `ADD CONSTRAINT IF NOT EXISTS`, mesmo problema
+-- do ADD COLUMN acima -- outra stored procedure temporária, desta vez
+-- consultando information_schema.table_constraints, para simular "adicione
+-- esta FOREIGN KEY só se ela não existir".
+DELIMITER $$
+DROP PROCEDURE IF EXISTS `_add_foreign_key_if_not_exists`$$
+CREATE PROCEDURE `_add_foreign_key_if_not_exists`(
+    IN p_table VARCHAR(64), IN p_constraint VARCHAR(64), IN p_definition TEXT
+)
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.table_constraints
+        WHERE table_schema = DATABASE() AND table_name = p_table AND constraint_name = p_constraint
+    ) THEN
+        SET @ddl = CONCAT('ALTER TABLE `', p_table, '` ADD CONSTRAINT `', p_constraint, '` ', p_definition);
+        PREPARE stmt FROM @ddl;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+    END IF;
+END$$
+DELIMITER ;
+
+CALL `_add_column_if_not_exists`('estoque', 'fornecedor_id', 'INT NULL');
+CALL `_add_column_if_not_exists`('compra', 'fornecedor_id', 'INT NULL');
+
+CALL `_add_foreign_key_if_not_exists`('estoque', 'fk_estoque_fornecedor', 'FOREIGN KEY (fornecedor_id) REFERENCES fornecedor(id)');
+CALL `_add_foreign_key_if_not_exists`('compra', 'fk_compra_fornecedor', 'FOREIGN KEY (fornecedor_id) REFERENCES fornecedor(id)');
+
+DROP PROCEDURE IF EXISTS `_add_column_if_not_exists`;
+DROP PROCEDURE IF EXISTS `_add_foreign_key_if_not_exists`;

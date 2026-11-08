@@ -212,8 +212,30 @@ def test_estoque_preco_no_limite_maximo_do_decimal_10_2_valido():
 def test_estoque_update_preco_acima_do_limite_decimal_10_2_invalido():
     with pytest.raises(ValidationError):
         EstoqueUpdate(
-            nomedoproduto="X", quantidade=1, preco=Decimal("999999999999.99"),
-            codigodebarras="1", categoria="A",
+            nomedoproduto="X", quantidade=1, unidade_medida="UN", estoque_minimo=Decimal("0.000"),
+            preco=Decimal("999999999999.99"), codigodebarras="1", categoria="A",
+        )
+
+
+def test_estoque_update_sem_unidade_medida_rejeitado():
+    """
+    unidade_medida e estoque_minimo são obrigatórios em EstoqueUpdate (sem
+    default), igual aos outros campos do schema -- um PUT que esqueça de
+    enviar esses dois campos não pode resetar silenciosamente o produto
+    para "UN"/estoque mínimo zero.
+    """
+    with pytest.raises(ValidationError):
+        EstoqueUpdate(
+            nomedoproduto="X", quantidade=1, estoque_minimo=Decimal("0.000"),
+            preco=5.0, codigodebarras="1", categoria="A",
+        )
+
+
+def test_estoque_update_sem_estoque_minimo_rejeitado():
+    with pytest.raises(ValidationError):
+        EstoqueUpdate(
+            nomedoproduto="X", quantidade=1, unidade_medida="UN",
+            preco=5.0, codigodebarras="1", categoria="A",
         )
 
 

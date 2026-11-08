@@ -14,7 +14,7 @@ from datetime import date, datetime, timezone, timedelta
 from passlib.context import CryptContext
 
 from utils import database as db_mod
-from utils.database import Setor, Funcionario, HistoricoSenha, Estoque, Compra, ItemCompra
+from utils.database import Setor, Funcionario, HistoricoSenha, Estoque, Compra, ItemCompra, Fornecedor
 from utils.money import arredondar
 from logs import logs as logs_mod
 from repository import funcionarios as func_repo
@@ -24,6 +24,7 @@ from repository import setores as set_repo
 from repository import compras as compras_repo
 from repository import despesas as despesas_repo
 from repository import comunicados as com_repo
+from repository import fornecedores as forn_repo
 from services import auth as auth_mod
 from main import app
 
@@ -47,7 +48,7 @@ def engine(monkeypatch):
     eng = create_engine(TEST_DB, connect_args={"check_same_thread": False}, poolclass=StaticPool)
     SQLModel.metadata.create_all(eng)
 
-    for mod in (db_mod, logs_mod, func_repo, est_repo, vend_repo, set_repo, compras_repo, despesas_repo, com_repo, auth_mod):
+    for mod in (db_mod, logs_mod, func_repo, est_repo, vend_repo, set_repo, compras_repo, despesas_repo, com_repo, forn_repo, auth_mod):
         monkeypatch.setattr(mod, "engine", eng)
 
     yield eng
@@ -110,17 +111,20 @@ def make_funcionario(session, nome="Joao", sobrenome="Silva", setor_id=None,
     return f
 
 
-def make_produto(session, nome="Produto Teste", codigo=None, qtd=50, preco=10.0, custo=5.0, cat="Geral"):
+def make_produto(session, nome="Produto Teste", codigo=None, qtd=50, preco=10.0, custo=5.0, cat="Geral",
+                  unidade="UN", fornecedor_id=None):
     codigo = codigo or f"cod{next(_cpf_gen)}"
     p = Estoque(
         titulo=nome,
         nomedoproduto=nome,
         quantidade=qtd,
+        unidade_medida=unidade,
         preco=arredondar(preco),
         preco_custo=arredondar(custo),
         codigodebarras=codigo,
         categoria=cat,
         funcionario_id=None,
+        fornecedor_id=fornecedor_id,
     )
     session.add(p)
     session.commit()
@@ -128,14 +132,30 @@ def make_produto(session, nome="Produto Teste", codigo=None, qtd=50, preco=10.0,
     return p
 
 
+def make_fornecedor(session, nome="Fornecedor Teste", documento="11144477735",
+                     telefone="11999999999", email=None, prazo_medio_entrega_dias=5):
+    f = Fornecedor(
+        nome=nome,
+        documento=documento,
+        telefone=telefone,
+        email=email or f"fornecedor{next(_email_gen)}@test.com",
+        prazo_medio_entrega_dias=prazo_medio_entrega_dias,
+    )
+    session.add(f)
+    session.commit()
+    session.refresh(f)
+    return f
+
+
 def make_compra(session, solicitante_id, status="pendente", aprovador_id=None, itens=None,
-                 data_autorizacao=None):
+                 data_autorizacao=None, fornecedor_id=None):
     compra = Compra(
         solicitante_id=solicitante_id,
         aprovador_id=aprovador_id,
         status=status,
         valor_total=Decimal("0.00"),
         data_autorizacao=data_autorizacao,
+        fornecedor_id=fornecedor_id,
     )
     session.add(compra)
     session.flush()

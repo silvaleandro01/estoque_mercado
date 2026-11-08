@@ -1,4 +1,5 @@
 import pytest
+from decimal import Decimal
 from fastapi import HTTPException
 from sqlmodel import Session
 
@@ -101,6 +102,59 @@ def test_registrar_compra_cria_pendente(engine, session):
     resultado = registrar_compra(dados, func.id)
     assert resultado["status"] == "pendente"
     assert resultado["valor_total"] == 50.0
+
+
+def test_registrar_compra_quantidade_decimal(engine, session):
+    setor = make_setor(session, tipo="compras_peso1")
+    func = make_funcionario(session, setor_id=setor.id, cargo="operacional")
+    dados = CompraInput(itens=[_item(codigo="BARPESO001", qtd=Decimal("2.500"), custo=4.0)])
+    resultado = registrar_compra(dados, func.id)
+    assert resultado["status"] == "pendente"
+    assert resultado["valor_total"] == Decimal("10.00")  # 4.00 * 2.5
+
+    itens = buscar_itens_compra(resultado["id"])
+    assert itens[0]["quantidade"] == Decimal("2.500")
+
+
+def test_registrar_compra_un_existente_rejeita_quantidade_fracionaria(engine, session):
+    """
+    A validação "produto UN só aceita quantidade inteira" existia só no
+    frontend -- confirmado (painel de revisão da Fase 2) que POST
+    /compras/registrar aceitava fração direto contra a API quando o
+    código de barras já correspondia a um produto UN cadastrado no estoque.
+    """
+    setor = make_setor(session, tipo="compras_un_frac1")
+    func = make_funcionario(session, setor_id=setor.id, cargo="operacional")
+    make_produto(session, codigo="COMPRAUNFRAC001", unidade="UN")
+    dados = CompraInput(itens=[_item(codigo="COMPRAUNFRAC001", qtd=Decimal("1.500"), custo=5.0)])
+    with pytest.raises(HTTPException) as exc:
+        registrar_compra(dados, func.id)
+    assert exc.value.status_code == 400
+    assert "unidade inteira" in exc.value.detail
+
+
+def test_registrar_compra_kg_existente_continua_aceitando_quantidade_fracionaria(engine, session):
+    setor = make_setor(session, tipo="compras_un_frac2")
+    func = make_funcionario(session, setor_id=setor.id, cargo="operacional")
+    make_produto(session, codigo="COMPRAKGFRAC001", qtd=Decimal("10.000"), unidade="KG")
+    dados = CompraInput(itens=[_item(codigo="COMPRAKGFRAC001", qtd=Decimal("1.500"), custo=4.0)])
+    resultado = registrar_compra(dados, func.id)
+    assert resultado["status"] == "pendente"
+
+
+def test_registrar_compra_produto_inexistente_permite_quantidade_fracionaria(engine, session):
+    """
+    Quando o código de barras ainda não corresponde a nenhum produto no
+    estoque (vai virar um pendente), a unidade de medida só é decidida na
+    confirmação (estoque.py::confirmar_pendente) -- não há o que validar
+    aqui, então fração passa normalmente nesta etapa (mesmo comportamento
+    de antes desta correção para este caso específico).
+    """
+    setor = make_setor(session, tipo="compras_un_frac3")
+    func = make_funcionario(session, setor_id=setor.id, cargo="operacional")
+    dados = CompraInput(itens=[_item(codigo="COMPRANOVOFRAC001", qtd=Decimal("1.500"), custo=4.0)])
+    resultado = registrar_compra(dados, func.id)
+    assert resultado["status"] == "pendente"
 
 
 def test_registrar_compra_soma_varios_itens(engine, session):

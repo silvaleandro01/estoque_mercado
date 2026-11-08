@@ -3,7 +3,7 @@ from fastapi import HTTPException
 
 from repository.estoque import listar_pendentes, confirmar_pendente, mostrar_produtos
 from schemas.schemas import ConfirmarPendenteInput
-from conftest import make_setor, make_funcionario, make_produto, make_compra, set_token
+from conftest import make_setor, make_funcionario, make_produto, make_compra, make_fornecedor, set_token
 
 
 def _headers(token):
@@ -109,6 +109,51 @@ def test_confirmar_pendente_incrementa_produto_existente(engine, session):
     produto = next(p for p in produtos if p.codigodebarras == "EXIST-PEND")
     assert produto.quantidade == 17
     assert produto.preco_custo == 4.0
+
+
+def test_confirmar_pendente_herda_fornecedor_da_compra(engine, session):
+    setor = make_setor(session, tipo="compras_pend_forn")
+    solicitante = make_funcionario(session, setor_id=setor.id)
+    fornecedor = make_fornecedor(session)
+    compra = make_compra(session, solicitante.id, status="autorizada", fornecedor_id=fornecedor.id, itens=[
+        {"codigodebarras": "CONFFORN001", "nomedoproduto": "Produto Fornecido", "categoria": "Geral",
+         "preco_venda": 15.0, "quantidade": 10, "preco_custo": 6.0},
+    ])
+    item_id = listar_pendentes()[0]["id"]
+    setor_estoque = make_setor(session, tipo="estoque_forn")
+    func_estoque = make_funcionario(session, setor_id=setor_estoque.id)
+
+    dados = ConfirmarPendenteInput(
+        nomedoproduto="Produto Fornecido", codigodebarras="CONFFORN001",
+        preco_venda=15.0, categoria="Geral",
+    )
+    confirmar_pendente(item_id, dados, func_estoque.id)
+
+    produtos = mostrar_produtos()
+    produto = next(p for p in produtos if p.codigodebarras == "CONFFORN001")
+    assert produto.fornecedor_id == fornecedor.id
+
+
+def test_confirmar_pendente_sem_fornecedor_na_compra_fica_sem_fornecedor(engine, session):
+    setor = make_setor(session, tipo="compras_pend_sforn")
+    solicitante = make_funcionario(session, setor_id=setor.id)
+    make_compra(session, solicitante.id, status="autorizada", itens=[
+        {"codigodebarras": "CONFSFORN001", "nomedoproduto": "Produto Sem Fornecedor", "categoria": "Geral",
+         "preco_venda": 15.0, "quantidade": 10, "preco_custo": 6.0},
+    ])
+    item_id = listar_pendentes()[0]["id"]
+    setor_estoque = make_setor(session, tipo="estoque_sforn")
+    func_estoque = make_funcionario(session, setor_id=setor_estoque.id)
+
+    dados = ConfirmarPendenteInput(
+        nomedoproduto="Produto Sem Fornecedor", codigodebarras="CONFSFORN001",
+        preco_venda=15.0, categoria="Geral",
+    )
+    confirmar_pendente(item_id, dados, func_estoque.id)
+
+    produtos = mostrar_produtos()
+    produto = next(p for p in produtos if p.codigodebarras == "CONFSFORN001")
+    assert produto.fornecedor_id is None
 
 
 def test_confirmar_pendente_inexistente_404(engine, session):

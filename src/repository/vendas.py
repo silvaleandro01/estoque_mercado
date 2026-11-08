@@ -5,6 +5,7 @@ from sqlmodel import Session, select
 
 from utils.database import engine, Estoque, Venda, ItemVenda
 from utils.money import arredondar
+from utils.quantidade import arredondar_quantidade, validar_quantidade_inteira_se_unidade
 from utils.timezone import hoje_brasil, limites_do_dia_brasil
 from schemas.schemas import VendaInput
 
@@ -58,11 +59,22 @@ def criar_venda(dados: VendaInput, funcionario_id: int):
                     session.rollback()
                     raise HTTPException(status_code=404, detail=f"Produto {item.codigodebarras} não encontrado")
 
+                # A validação "produto UN só aceita quantidade inteira"
+                # existia só no frontend -- ver docstring de
+                # validar_quantidade_inteira_se_unidade(). Checa contra a
+                # unidade_medida do produto já cadastrado (fonte da verdade),
+                # não contra nada que viesse do payload da venda.
+                try:
+                    validar_quantidade_inteira_se_unidade(item.quantidade, produto.unidade_medida, produto.nomedoproduto)
+                except HTTPException:
+                    session.rollback()
+                    raise
+
                 if produto.quantidade < item.quantidade:
                     session.rollback()
                     raise HTTPException(status_code=400, detail=f"Estoque insuficiente para {produto.nomedoproduto}")
 
-                produto.quantidade -= item.quantidade
+                produto.quantidade = arredondar_quantidade(produto.quantidade - item.quantidade)
                 preco_total = arredondar(produto.preco * item.quantidade)
                 total += preco_total
 
