@@ -1,13 +1,14 @@
 from typing import List
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
-from schemas.schemas import EstoqueCreate, EstoqueUpdate, EstoquePendenteOut, ConfirmarPendenteInput
+from schemas.schemas import EstoqueCreate, EstoqueUpdate, EstoquePendenteOut, ConfirmarPendenteInput, AlertaVencimentoOut
 from services.auth import get_funcionario, verificar_permissao
 from repository.estoque import (
     criar_estoque, mostrar_produtos, buscar_estoque,
     atualizar_estoque, deletar_estoque,
     listar_pendentes, confirmar_pendente,
 )
+from repository.lotes import listar_alerta_vencimento
 
 router = APIRouter(prefix="/estoque", tags=["Estoque"])
 
@@ -52,3 +53,9 @@ def pendentes(funcionario=Depends(get_funcionario)):
 def confirmar(item_id: int, dados: ConfirmarPendenteInput, funcionario=Depends(get_funcionario)):
     verificar_permissao(funcionario, "estoque")
     return confirmar_pendente(item_id, dados, funcionario.id)
+
+
+@router.get("/alerta-vencimento", response_model=AlertaVencimentoOut)
+def alerta_vencimento(dias: int = Query(default=7, ge=0, le=365), funcionario=Depends(get_funcionario)):
+    verificar_permissao(funcionario, "estoque")
+    return listar_alerta_vencimento(dias)

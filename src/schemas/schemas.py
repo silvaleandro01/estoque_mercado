@@ -233,6 +233,26 @@ class ConfirmarPendenteInput(BaseModel):
     validade: Optional[date] = None
 
 
+class LoteAlertaOut(BaseModel):
+    lote_id: int
+    estoque_id: int
+    nomedoproduto: str
+    codigodebarras: str
+    codigo_lote: str
+    quantidade: DecimalQuantidade
+    validade: date
+    # Negativo = já vencido há N dias; positivo = vence em N dias.
+    dias_restantes: int
+
+    model_config = {"from_attributes": True}
+
+
+class AlertaVencimentoOut(BaseModel):
+    dias: int
+    vencendo: List[LoteAlertaOut]
+    vencidos: List[LoteAlertaOut]
+
+
 class FornecedorInput(BaseModel):
     nome: str
     documento: str  # CPF ou CNPJ

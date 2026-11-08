@@ -27,14 +27,15 @@ desperdício por vencimento).
 """
 
 from decimal import Decimal
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
 from typing import Optional
 
 from fastapi import HTTPException
 from sqlmodel import Session, select
 
-from utils.database import Lote, Estoque
+from utils.database import Lote, Estoque, engine
 from utils.quantidade import arredondar_quantidade
+from utils.timezone import hoje_brasil
 
 CODIGO_LOTE_LEGADO = "LEGADO"
 
@@ -164,3 +165,47 @@ def consumir_fefo(session: Session, estoque_id: int, quantidade: Decimal, nome_p
 
     if restante > 0:
         raise HTTPException(status_code=400, detail=f"Estoque insuficiente para {nome_produto}")
+
+
+def listar_alerta_vencimento(dias: int = 7):
+    """
+    Lista lotes vencendo nos próximos `dias` dias e, separadamente, os já
+    vencidos. Só considera lotes com validade CONHECIDA (`validade IS NOT
+    NULL`) e saldo positivo -- lote "sem validade" (legado) não entra em
+    nenhuma das duas listas, porque não há como saber se está vencido ou
+    não (ver docstring do módulo).
+
+    Usa `hoje_brasil()` (não `date.today()`) pelo mesmo motivo já
+    documentado em utils/timezone.py: o servidor pode rodar em UTC, e perto
+    da meia-noite em Brasília isso mudaria o "hoje" usado no corte.
+    """
+    with Session(engine) as session:
+        hoje = hoje_brasil()
+        limite = hoje + timedelta(days=dias)
+
+        linhas = session.exec(
+            select(Lote, Estoque)
+            .join(Estoque, Lote.estoque_id == Estoque.id)
+            .where(Lote.validade.is_not(None), Lote.quantidade > 0)
+            .order_by(Lote.validade)
+        ).all()
+
+        vencendo, vencidos = [], []
+        for lote, produto in linhas:
+            dias_restantes = (lote.validade - hoje).days
+            item = {
+                "lote_id": lote.id,
+                "estoque_id": produto.id,
+                "nomedoproduto": produto.nomedoproduto,
+                "codigodebarras": produto.codigodebarras,
+                "codigo_lote": lote.codigo_lote,
+                "quantidade": lote.quantidade,
+                "validade": lote.validade,
+                "dias_restantes": dias_restantes,
+            }
+            if lote.validade < hoje:
+                vencidos.append(item)
+            elif lote.validade <= limite:
+                vencendo.append(item)
+
+        return {"dias": dias, "vencendo": vencendo, "vencidos": vencidos}
