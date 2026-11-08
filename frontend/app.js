@@ -540,6 +540,12 @@ async function carregarEstoque() {
     atualizarPassoQuantidade();
 }
 
+// Fornecedor é um card dentro da própria tela de estoque (não uma aba
+// própria no menu lateral) nesta fase -- cadastro/gestão de fornecedor é
+// pequeno o suficiente e está sempre associado a produto, então não
+// justificou ainda uma view própria. Se o escopo de fornecedor crescer
+// (relatórios, histórico de compras por fornecedor, etc.) numa fase
+// futura, vale reavaliar promover para uma aba própria.
 function renderizarCardFornecedores(podeEditar) {
     return `
         <div class="card">

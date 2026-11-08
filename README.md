@@ -56,6 +56,8 @@ mais `pytest` e `httpx` (usado pelo `TestClient` do FastAPI nos testes).
 
 - Cadastro e gestão de funcionários com controle de acesso por cargo
 - Controle de estoque com entrada e saída de produtos
+- Cadastro de produto com unidade de medida (unidade, quilo ou litro), venda por peso com quantidade decimal e estoque mínimo configurável
+- Cadastro de fornecedores, com vínculo opcional a produtos e pedidos de compra
 - Registro e aprovação de pedidos de compra
 - Lançamento de vendas com diferentes métodos de pagamento
 - Registro de ponto e fechamento de folha mensal
