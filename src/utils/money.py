@@ -3,7 +3,7 @@
 O banco usa DECIMAL(10,2) em todas as colunas de dinheiro, mas o código em
 Python vinha usando `float` para representar os mesmos valores. Isso é uma
 fonte clássica de erro de arredondamento (ex.: 0.1 + 0.2 != 0.3 em binário).
-Este módulo centraliza a conversão seguraa para `Decimal` e o arredondamento
+Este módulo centraliza a conversão segura para `Decimal` e o arredondamento
 para 2 casas usando ROUND_HALF_UP (o mesmo comportamento esperado em
 dinheiro: 0.005 arredonda para 0.01, nunca para 0.00).
 """
