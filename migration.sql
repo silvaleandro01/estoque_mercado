@@ -319,6 +319,16 @@ CALL `_add_column_if_not_exists`('estoque', 'unidade_medida', "VARCHAR(2) NOT NU
 -- apagaria os dados. Não precisa de IF NOT EXISTS: alterar o tipo de uma
 -- coluna que já existe não falha se este script rodar de novo (o segundo
 -- MODIFY só reaplica a mesma definição, sem efeito colateral).
+--
+-- NOTA DE DEPLOY: diferente de um `ADD COLUMN` simples (que só mexe nos
+-- metadados da tabela e é praticamente instantâneo), `MODIFY COLUMN` que
+-- muda o tipo de uma coluna reescreve a tabela inteira (InnoDB recria o
+-- arquivo por baixo, linha por linha, mesmo com ALGORITHM=INPLACE) -- não é
+-- instantâneo em tabelas com volume real de dados. Durante a execução, o
+-- MySQL mantém um metadata lock que bloqueia ESCRITAS concorrentes nessa
+-- tabela (leituras continuam funcionando normalmente), então em produção
+-- este ALTER TABLE (e os dois seguintes) deve rodar numa janela de baixo
+-- tráfego, não a qualquer hora do dia.
 ALTER TABLE `estoque` MODIFY COLUMN `quantidade` DECIMAL(10, 3) NOT NULL DEFAULT 0.000;
 ALTER TABLE `itemvenda` MODIFY COLUMN `quantidade` DECIMAL(10, 3) NOT NULL;
 ALTER TABLE `itemcompra` MODIFY COLUMN `quantidade` DECIMAL(10, 3) NOT NULL;
