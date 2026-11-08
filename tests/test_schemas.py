@@ -263,6 +263,26 @@ def test_confirmar_pendente_preco_venda_acima_do_limite_decimal_10_2_invalido():
         )
 
 
+def test_confirmar_pendente_codigo_lote_so_com_espacos_invalido():
+    """NITPICK (revisão da Fase 3): `min_length=1` sozinho aceita uma
+    string composta só de espaços em branco (espaço conta como
+    caractere para o Pydantic) -- precisa rejeitar depois de um
+    `.strip()`."""
+    with pytest.raises(ValidationError):
+        ConfirmarPendenteInput(
+            nomedoproduto="X", codigodebarras="1", preco_venda=10.0,
+            categoria="A", codigo_lote="   ",
+        )
+
+
+def test_confirmar_pendente_codigo_lote_com_espacos_nas_pontas_e_normalizado():
+    m = ConfirmarPendenteInput(
+        nomedoproduto="X", codigodebarras="1", preco_venda=10.0,
+        categoria="A", codigo_lote="  LOTE-001  ",
+    )
+    assert m.codigo_lote == "LOTE-001"
+
+
 def test_despesa_valor_acima_do_limite_decimal_10_2_invalido():
     with pytest.raises(ValidationError):
         DespesaInput(descricao="X", valor=Decimal("999999999999.99"), categoria="Outros")

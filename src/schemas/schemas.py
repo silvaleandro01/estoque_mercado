@@ -232,6 +232,19 @@ class ConfirmarPendenteInput(BaseModel):
     codigo_lote: str = Field(..., min_length=1)
     validade: Optional[date] = None
 
+    @field_validator("codigo_lote")
+    @classmethod
+    def validar_codigo_lote(cls, v: str) -> str:
+        """`min_length=1` sozinho aceita uma string composta só de espaços
+        em branco (ex.: "   ") -- espaço conta como caractere para o
+        Pydantic. Normaliza removendo espaços nas pontas e rejeita se
+        sobrar vazio, consistente com o restante do lote/validade
+        exigindo um código de lote de verdade."""
+        v = v.strip()
+        if not v:
+            raise ValueError("codigo_lote não pode ser vazio")
+        return v
+
 
 class LoteAlertaOut(BaseModel):
     lote_id: int
