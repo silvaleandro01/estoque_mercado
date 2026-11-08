@@ -118,6 +118,7 @@ class EstoqueCreate(BaseModel):
     nomedoproduto: str
     quantidade: Decimal = Field(..., ge=0, **DECIMAL_10_3)
     unidade_medida: UnidadeMedida = "UN"
+    estoque_minimo: Decimal = Field(default=Decimal("0.000"), ge=0, **DECIMAL_10_3)
     preco: Decimal = Field(..., gt=0, **DECIMAL_10_2)
     preco_custo: Optional[Decimal] = Field(default=Decimal("0.00"), ge=0, **DECIMAL_10_2)
     codigodebarras: str
@@ -129,6 +130,7 @@ class EstoqueUpdate(BaseModel):
     nomedoproduto: str
     quantidade: Decimal = Field(..., ge=0, **DECIMAL_10_3)
     unidade_medida: UnidadeMedida = "UN"
+    estoque_minimo: Decimal = Field(default=Decimal("0.000"), ge=0, **DECIMAL_10_3)
     preco: Decimal = Field(..., gt=0, **DECIMAL_10_2)
     codigodebarras: str
     categoria: str

@@ -68,6 +68,11 @@ class Estoque(SQLModel, table=True):
     # (schemas.UnidadeMedida), guardado aqui como texto simples, mesmo
     # padrão já usado para `Funcionario.cargo`.
     unidade_medida: str = Field(default="UN")
+    # Quantidade mínima desejada em estoque (mesmo tipo/precisão de
+    # `quantidade`). Hoje só um campo informativo -- o endpoint de
+    # reposição automática que consome esse valor é de uma fase futura
+    # (fora do escopo desta mudança).
+    estoque_minimo: DecimalQuantidade = Field(default=Decimal("0.000"), max_digits=10, decimal_places=3)
     preco: DecimalMoeda = Field(max_digits=10, decimal_places=2)
     preco_custo: DecimalMoeda = Field(default=Decimal("0.00"), max_digits=10, decimal_places=2)
     codigodebarras: str = Field(unique=True, index=True)

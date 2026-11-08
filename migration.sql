@@ -321,3 +321,29 @@ DROP PROCEDURE IF EXISTS `_add_column_if_not_exists`;
 ALTER TABLE `estoque` MODIFY COLUMN `quantidade` DECIMAL(10, 3) NOT NULL DEFAULT 0.000;
 ALTER TABLE `itemvenda` MODIFY COLUMN `quantidade` DECIMAL(10, 3) NOT NULL;
 ALTER TABLE `itemcompra` MODIFY COLUMN `quantidade` DECIMAL(10, 3) NOT NULL;
+
+-- `estoque` ganhou estoque mínimo (Estoque.estoque_minimo): hoje só um
+-- valor informativo mostrado no cadastro/listagem de produtos; o endpoint
+-- de reposição automática que vai consumir esse valor é de uma fase futura
+-- do projeto (fora do escopo desta migração).
+DELIMITER $$
+DROP PROCEDURE IF EXISTS `_add_column_if_not_exists`$$
+CREATE PROCEDURE `_add_column_if_not_exists`(
+    IN p_table VARCHAR(64), IN p_column VARCHAR(64), IN p_definition TEXT
+)
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = DATABASE() AND table_name = p_table AND column_name = p_column
+    ) THEN
+        SET @ddl = CONCAT('ALTER TABLE `', p_table, '` ADD COLUMN `', p_column, '` ', p_definition);
+        PREPARE stmt FROM @ddl;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+    END IF;
+END$$
+DELIMITER ;
+
+CALL `_add_column_if_not_exists`('estoque', 'estoque_minimo', 'DECIMAL(10, 3) NOT NULL DEFAULT 0.000');
+
+DROP PROCEDURE IF EXISTS `_add_column_if_not_exists`;

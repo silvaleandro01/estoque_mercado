@@ -352,6 +352,64 @@ def test_criar_estoque_incremento_quantidade_decimal(engine, session):
     assert resultado.quantidade == Decimal("10.350")
 
 
+# ── estoque mínimo ───────────────────────────────────────────────────────────────
+
+def test_criar_estoque_minimo_padrao_zero(engine, session):
+    setor = make_setor(session, tipo="min_default")
+    func = make_funcionario(session, setor_id=setor.id)
+    dados = _dados_create(codigo="MIN_DEFAULT001")
+    resultado = criar_estoque(dados, func.id)
+    assert resultado.estoque_minimo == Decimal("0.000")
+
+
+def test_criar_estoque_minimo_definido(engine, session):
+    setor = make_setor(session, tipo="min_def")
+    func = make_funcionario(session, setor_id=setor.id)
+    dados = EstoqueCreate(
+        nomedoproduto="Produto", quantidade=100, estoque_minimo=Decimal("15.000"),
+        preco=5.0, codigodebarras="MINDEF001", categoria="Geral",
+    )
+    resultado = criar_estoque(dados, func.id)
+    assert resultado.estoque_minimo == Decimal("15.000")
+
+
+def test_atualizar_estoque_minimo(engine, session):
+    setor = make_setor(session, tipo="min_upd")
+    func = make_funcionario(session, setor_id=setor.id)
+    p = make_produto(session, codigo="MINUPD001")
+    dados = EstoqueUpdate(
+        nomedoproduto="Produto Atualizado", quantidade=10, estoque_minimo=Decimal("3.000"),
+        preco=12.0, codigodebarras="MINUPD001", categoria="Geral",
+    )
+    resultado = atualizar_estoque(p.id, dados, func.id)
+    assert resultado.estoque_minimo == Decimal("3.000")
+
+
+def test_criar_estoque_minimo_negativo_rejeitado(engine, session):
+    with pytest.raises(ValidationError):
+        EstoqueCreate(
+            nomedoproduto="Produto", quantidade=1, estoque_minimo=Decimal("-1.000"),
+            preco=1.0, codigodebarras="MINNEG001", categoria="Geral",
+        )
+
+
+def test_estoque_minimo_respeitado_em_relacao_a_quantidade(engine, session):
+    """
+    O endpoint de reposição automática (que agiria quando quantidade <=
+    estoque_minimo) é de uma fase futura -- aqui só garantimos que o campo
+    existe, é persistido corretamente e dá pra comparar os dois valores,
+    que é o que o cadastro de produto completo precisa entregar nesta fase.
+    """
+    setor = make_setor(session, tipo="min_resp")
+    func = make_funcionario(session, setor_id=setor.id)
+    dados = EstoqueCreate(
+        nomedoproduto="Produto Critico", quantidade=Decimal("2.000"), estoque_minimo=Decimal("5.000"),
+        preco=10.0, codigodebarras="MINRESP001", categoria="Geral",
+    )
+    resultado = criar_estoque(dados, func.id)
+    assert resultado.quantidade <= resultado.estoque_minimo
+
+
 # ── trava de concorrência (with_for_update) ────────────────────────────────────
 
 def test_criar_estoque_incremento_consulta_produto_com_lock_for_update(engine, session, monkeypatch):
