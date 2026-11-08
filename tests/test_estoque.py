@@ -1,4 +1,5 @@
 import pytest
+from decimal import Decimal
 from pydantic import ValidationError
 from fastapi import HTTPException
 from unittest.mock import patch
@@ -305,6 +306,50 @@ def test_criar_estoque_incremento_mantem_unidade_medida_original(engine, session
     )
     resultado = criar_estoque(dados, func.id)
     assert resultado.unidade_medida == "KG"
+
+
+# ── quantidade decimal (venda por peso) ─────────────────────────────────────────
+
+def test_criar_estoque_quantidade_decimal_kg(engine, session):
+    setor = make_setor(session, tipo="qtd_kg")
+    func = make_funcionario(session, setor_id=setor.id)
+    dados = EstoqueCreate(
+        nomedoproduto="Queijo Minas", quantidade=Decimal("12.750"), unidade_medida="KG",
+        preco=45.0, codigodebarras="QTDKG001", categoria="Laticinios",
+    )
+    resultado = criar_estoque(dados, func.id)
+    assert resultado.quantidade == Decimal("12.750")
+
+
+def test_criar_estoque_quantidade_decimal_litro(engine, session):
+    setor = make_setor(session, tipo="qtd_l")
+    func = make_funcionario(session, setor_id=setor.id)
+    dados = EstoqueCreate(
+        nomedoproduto="Leite a Granel", quantidade=Decimal("0.500"), unidade_medida="L",
+        preco=4.5, codigodebarras="QTDL001", categoria="Laticinios",
+    )
+    resultado = criar_estoque(dados, func.id)
+    assert resultado.quantidade == Decimal("0.500")
+
+
+def test_criar_estoque_quantidade_com_mais_de_tres_casas_rejeitada(engine, session):
+    with pytest.raises(ValidationError):
+        EstoqueCreate(
+            nomedoproduto="Produto Invalido", quantidade=Decimal("1.2345"), unidade_medida="KG",
+            preco=1.0, codigodebarras="QTDINV001", categoria="Geral",
+        )
+
+
+def test_criar_estoque_incremento_quantidade_decimal(engine, session):
+    setor = make_setor(session, tipo="qtd_incr")
+    func = make_funcionario(session, setor_id=setor.id)
+    make_produto(session, codigo="QTDINCR001", qtd=Decimal("10.000"), unidade="KG")
+    dados = EstoqueCreate(
+        nomedoproduto="Produto", quantidade=Decimal("0.350"), unidade_medida="KG",
+        preco=10.0, codigodebarras="QTDINCR001", categoria="Geral",
+    )
+    resultado = criar_estoque(dados, func.id)
+    assert resultado.quantidade == Decimal("10.350")
 
 
 # ── trava de concorrência (with_for_update) ────────────────────────────────────

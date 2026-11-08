@@ -5,6 +5,7 @@ from sqlmodel import Session, select
 
 from utils.database import Estoque, Compra, ItemCompra, engine
 from utils.money import arredondar
+from utils.quantidade import arredondar_quantidade
 from logs.logs import criar_log
 from schemas.schemas import EstoqueCreate, EstoqueUpdate, ConfirmarPendenteInput
 
@@ -23,7 +24,7 @@ def criar_estoque(dados: EstoqueCreate, funcionario_id: int):
         ).first()
 
         if produto_existente:
-            produto_existente.quantidade += dados.quantidade
+            produto_existente.quantidade = arredondar_quantidade(produto_existente.quantidade + dados.quantidade)
             produto_existente.funcionario_id = funcionario_id
             try:
                 session.commit()
@@ -37,7 +38,7 @@ def criar_estoque(dados: EstoqueCreate, funcionario_id: int):
         estoque = Estoque(
             titulo=dados.titulo,
             nomedoproduto=dados.nomedoproduto,
-            quantidade=dados.quantidade,
+            quantidade=arredondar_quantidade(dados.quantidade),
             unidade_medida=dados.unidade_medida,
             preco=arredondar(dados.preco),
             preco_custo=arredondar(dados.preco_custo) if dados.preco_custo is not None else Decimal("0.00"),
@@ -83,7 +84,7 @@ def atualizar_estoque(estoque_id: int, dados: EstoqueUpdate, funcionario_id: int
 
         estoque.titulo = dados.titulo
         estoque.nomedoproduto = dados.nomedoproduto
-        estoque.quantidade = dados.quantidade
+        estoque.quantidade = arredondar_quantidade(dados.quantidade)
         estoque.unidade_medida = dados.unidade_medida
         estoque.preco = arredondar(dados.preco)
         estoque.codigodebarras = dados.codigodebarras
@@ -152,7 +153,7 @@ def confirmar_pendente(item_id: int, dados: ConfirmarPendenteInput, funcionario_
         ).first()
 
         if produto_existente:
-            produto_existente.quantidade += item.quantidade
+            produto_existente.quantidade = arredondar_quantidade(produto_existente.quantidade + item.quantidade)
             produto_existente.preco_custo = arredondar(item.preco_custo_unitario)
             produto_existente.funcionario_id = funcionario_id
             session.add(produto_existente)

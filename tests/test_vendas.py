@@ -402,3 +402,33 @@ def test_criar_venda_cria_itens_venda(engine, session):
     assert itens[0].quantidade == 3
     assert itens[0].preco_unitario == 7.5
     assert itens[0].preco_total == 22.5
+
+
+# ── venda por peso (quantidade decimal) ─────────────────────────────────────────
+
+def test_criar_venda_por_peso_quantidade_decimal(engine, session):
+    setor = make_setor(session, tipo="peso1")
+    func = make_funcionario(session, setor_id=setor.id)
+    make_produto(session, codigo="PESO001", qtd=Decimal("10.000"), preco=20.0, unidade="KG")
+
+    venda = criar_venda(_input([("PESO001", Decimal("0.350"))]), func.id)
+
+    assert venda.valor_total == Decimal("7.00")  # 20.00 * 0.350
+
+    from utils.database import Estoque
+    with Session(engine) as s:
+        produto = s.exec(select(Estoque).where(Estoque.codigodebarras == "PESO001")).first()
+    assert produto.quantidade == Decimal("9.650")
+
+
+def test_criar_venda_por_peso_item_registra_quantidade_fracionada(engine, session):
+    setor = make_setor(session, tipo="peso2")
+    func = make_funcionario(session, setor_id=setor.id)
+    make_produto(session, codigo="PESO002", qtd=Decimal("5.000"), preco=10.0, unidade="KG")
+
+    venda = criar_venda(_input([("PESO002", Decimal("1.250"))]), func.id)
+
+    with Session(engine) as s:
+        itens = s.exec(select(ItemVenda).where(ItemVenda.venda_id == venda.id)).all()
+    assert itens[0].quantidade == Decimal("1.250")
+    assert itens[0].preco_total == Decimal("12.50")

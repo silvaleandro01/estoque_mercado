@@ -1,4 +1,5 @@
 import pytest
+from decimal import Decimal
 from fastapi import HTTPException
 from sqlmodel import Session
 
@@ -101,6 +102,18 @@ def test_registrar_compra_cria_pendente(engine, session):
     resultado = registrar_compra(dados, func.id)
     assert resultado["status"] == "pendente"
     assert resultado["valor_total"] == 50.0
+
+
+def test_registrar_compra_quantidade_decimal(engine, session):
+    setor = make_setor(session, tipo="compras_peso1")
+    func = make_funcionario(session, setor_id=setor.id, cargo="operacional")
+    dados = CompraInput(itens=[_item(codigo="BARPESO001", qtd=Decimal("2.500"), custo=4.0)])
+    resultado = registrar_compra(dados, func.id)
+    assert resultado["status"] == "pendente"
+    assert resultado["valor_total"] == Decimal("10.00")  # 4.00 * 2.5
+
+    itens = buscar_itens_compra(resultado["id"])
+    assert itens[0]["quantidade"] == Decimal("2.500")
 
 
 def test_registrar_compra_soma_varios_itens(engine, session):

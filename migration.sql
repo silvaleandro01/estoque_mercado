@@ -309,3 +309,15 @@ DELIMITER ;
 CALL `_add_column_if_not_exists`('estoque', 'unidade_medida', "VARCHAR(2) NOT NULL DEFAULT 'UN'");
 
 DROP PROCEDURE IF EXISTS `_add_column_if_not_exists`;
+
+-- `estoque.quantidade`, `itemvenda.quantidade` e `itemcompra.quantidade`
+-- eram INT; produtos vendidos por peso/volume (unidade_medida KG/L)
+-- precisam de fração de unidade (ex.: 0.350 kg). `MODIFY COLUMN` muda o
+-- tipo da coluna preservando os valores já gravados (um INT existente, ex.
+-- 10, vira DECIMAL 10.000, sem perda), diferente de um DROP+ADD que
+-- apagaria os dados. Não precisa de IF NOT EXISTS: alterar o tipo de uma
+-- coluna que já existe não falha se este script rodar de novo (o segundo
+-- MODIFY só reaplica a mesma definição, sem efeito colateral).
+ALTER TABLE `estoque` MODIFY COLUMN `quantidade` DECIMAL(10, 3) NOT NULL DEFAULT 0.000;
+ALTER TABLE `itemvenda` MODIFY COLUMN `quantidade` DECIMAL(10, 3) NOT NULL;
+ALTER TABLE `itemcompra` MODIFY COLUMN `quantidade` DECIMAL(10, 3) NOT NULL;

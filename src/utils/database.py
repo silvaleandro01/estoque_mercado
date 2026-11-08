@@ -8,6 +8,7 @@ from sqlmodel import Field, SQLModel, create_engine, Session, select
 from dotenv import load_dotenv
 
 from utils.money import DecimalMoeda
+from utils.quantidade import DecimalQuantidade
 
 load_dotenv()
 
@@ -58,7 +59,11 @@ class Estoque(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     titulo: Optional[str] = Field(default=None)
     nomedoproduto: str
-    quantidade: int
+    # Decimal(10,3): produtos vendidos por peso/volume (unidade_medida KG/L)
+    # podem ter quantidade fracionária (ex.: 0.350 kg). Produtos por unidade
+    # (UN) continuam usando quantidade inteira normalmente, só que
+    # representada como Decimal("5.000") em vez de `int`.
+    quantidade: DecimalQuantidade = Field(max_digits=10, decimal_places=3)
     # UN (unidade), KG (quilo) ou L (litro) -- validado na camada Pydantic
     # (schemas.UnidadeMedida), guardado aqui como texto simples, mesmo
     # padrão já usado para `Funcionario.cargo`.
@@ -81,7 +86,9 @@ class ItemVenda(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     venda_id: int = Field(foreign_key="venda.id", index=True)
     codigodebarras: str = Field(index=True)
-    quantidade: int
+    # Decimal(10,3): mesma razão de Estoque.quantidade -- venda por peso/
+    # volume precisa de fração de unidade.
+    quantidade: DecimalQuantidade = Field(max_digits=10, decimal_places=3)
     preco_unitario: DecimalMoeda = Field(max_digits=10, decimal_places=2)
     preco_total: DecimalMoeda = Field(max_digits=10, decimal_places=2)
 
@@ -136,7 +143,9 @@ class ItemCompra(SQLModel, table=True):
     nomedoproduto: str
     categoria: Optional[str] = Field(default=None)
     preco_venda: Optional[DecimalMoeda] = Field(default=None, max_digits=10, decimal_places=2)
-    quantidade: int
+    # Decimal(10,3): mesma razão de Estoque.quantidade -- compra de produto
+    # vendido por peso/volume pode vir em fração de unidade.
+    quantidade: DecimalQuantidade = Field(max_digits=10, decimal_places=3)
     preco_custo_unitario: DecimalMoeda = Field(max_digits=10, decimal_places=2)
     preco_custo_total: DecimalMoeda = Field(max_digits=10, decimal_places=2)
     lancado_em: Optional[datetime] = Field(default=None)

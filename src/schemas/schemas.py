@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, field_validator
 from sqlmodel import SQLModel
 
 from utils.money import DecimalMoeda
+from utils.quantidade import DecimalQuantidade
 
 Cargo = Literal["operacional", "gerente", "diretoria"]
 
@@ -24,6 +25,11 @@ UnidadeMedida = Literal["UN", "KG", "L"]
 # de um 422 claro. `max_digits`/`decimal_places` do Pydantic mapeiam 1:1
 # para essa mesma restrição do DECIMAL(10, 2).
 DECIMAL_10_2 = {"max_digits": 10, "decimal_places": 2}
+
+# Mesma ideia de DECIMAL_10_2, mas para as colunas de quantidade (DECIMAL(10,
+# 3)): produtos vendidos por peso/volume (KG/L) podem ter até 3 casas
+# decimais (precisão de grama/mililitro), diferente de dinheiro (2 casas).
+DECIMAL_10_3 = {"max_digits": 10, "decimal_places": 3}
 
 
 class LoginRequest(BaseModel):
@@ -110,7 +116,7 @@ class SetorCreate(SQLModel):
 class EstoqueCreate(BaseModel):
     titulo: Optional[str] = None
     nomedoproduto: str
-    quantidade: int = Field(..., ge=0)
+    quantidade: Decimal = Field(..., ge=0, **DECIMAL_10_3)
     unidade_medida: UnidadeMedida = "UN"
     preco: Decimal = Field(..., gt=0, **DECIMAL_10_2)
     preco_custo: Optional[Decimal] = Field(default=Decimal("0.00"), ge=0, **DECIMAL_10_2)
@@ -121,7 +127,7 @@ class EstoqueCreate(BaseModel):
 class EstoqueUpdate(BaseModel):
     titulo: Optional[str] = None
     nomedoproduto: str
-    quantidade: int = Field(..., ge=0)
+    quantidade: Decimal = Field(..., ge=0, **DECIMAL_10_3)
     unidade_medida: UnidadeMedida = "UN"
     preco: Decimal = Field(..., gt=0, **DECIMAL_10_2)
     codigodebarras: str
@@ -130,7 +136,7 @@ class EstoqueUpdate(BaseModel):
 
 class ItemVendaSchema(BaseModel):
     codigodebarras: str
-    quantidade: int = Field(..., gt=0)
+    quantidade: Decimal = Field(..., gt=0, **DECIMAL_10_3)
 
 
 class VendaInput(BaseModel):
@@ -153,7 +159,7 @@ class RecuperarSenhaRequest(BaseModel):
 
 class ItemCompraInput(BaseModel):
     codigodebarras: str
-    quantidade: int = Field(..., gt=0)
+    quantidade: Decimal = Field(..., gt=0, **DECIMAL_10_3)
     preco_custo: Decimal = Field(..., gt=0, **DECIMAL_10_2)
     nomedoproduto: str
     preco_venda: Decimal = Field(..., gt=0, **DECIMAL_10_2)
@@ -167,7 +173,7 @@ class CompraInput(BaseModel):
 class ItemCompraOut(BaseModel):
     nomedoproduto: str
     codigodebarras: str
-    quantidade: int
+    quantidade: DecimalQuantidade
     preco_custo: DecimalMoeda
     total: DecimalMoeda
 
@@ -191,7 +197,7 @@ class EstoquePendenteOut(BaseModel):
     data_entrada: Optional[datetime] = None
     nomedoproduto: str
     codigodebarras: str
-    quantidade: int
+    quantidade: DecimalQuantidade
     preco_custo: DecimalMoeda
     preco_venda: Optional[DecimalMoeda] = None
 
