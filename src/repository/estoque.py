@@ -8,7 +8,7 @@ from utils.money import arredondar
 from utils.quantidade import arredondar_quantidade, validar_quantidade_inteira_se_unidade
 from logs.logs import criar_log
 from schemas.schemas import EstoqueCreate, EstoqueUpdate, ConfirmarPendenteInput
-from repository.lotes import ajustar_lote_sem_validade
+from repository.lotes import ajustar_lote_sem_validade, criar_lote
 
 
 def _validar_fornecedor(session: Session, fornecedor_id):
@@ -223,12 +223,12 @@ def confirmar_pendente(item_id: int, dados: ConfirmarPendenteInput, funcionario_
             produto_existente.preco_custo = arredondar(item.preco_custo_unitario)
             produto_existente.funcionario_id = funcionario_id
             session.add(produto_existente)
-            # Lançamento de pendente ainda não informa lote/validade nesta
-            # etapa -- mesmo tratamento do incremento manual via
-            # /estoque/inserir: cai no lote "sem validade" do produto, para
-            # a invariante soma(Lote.quantidade) == Estoque.quantidade
-            # nunca divergir (ver repository/lotes.py).
-            ajustar_lote_sem_validade(session, produto_existente.id, item.quantidade)
+            # Lote e validade (Fase 3): a confirmação de pendente agora
+            # sempre informa lote/validade -- diferente do incremento
+            # manual via /estoque/inserir, aqui cria um lote RASTREADO de
+            # verdade (não cai no lote "sem validade"), já que o
+            # lote/validade reais vieram do formulário de confirmação.
+            criar_lote(session, produto_existente.id, dados.codigo_lote, item.quantidade, dados.validade)
             nome_produto = produto_existente.nomedoproduto
         else:
             # Produto novo (não existia ainda com esse código de barras):
@@ -251,9 +251,8 @@ def confirmar_pendente(item_id: int, dados: ConfirmarPendenteInput, funcionario_
                 fornecedor_id=compra.fornecedor_id if compra else None,
             )
             session.add(novo)
-            session.flush()  # para ter novo.id antes do ajuste de lote abaixo
-            if novo.quantidade > 0:
-                ajustar_lote_sem_validade(session, novo.id, novo.quantidade)
+            session.flush()  # para ter novo.id antes de criar o lote abaixo
+            criar_lote(session, novo.id, dados.codigo_lote, item.quantidade, dados.validade)
             nome_produto = novo.nomedoproduto
 
         item.lancado_em = datetime.now(timezone.utc)

@@ -387,7 +387,7 @@ def test_fluxo_completo_via_rotas(client, session, engine):
 
     r = client.post(f"/estoque/pendentes/{pendente['id']}/confirmar", json={
         "nomedoproduto": "Produto Rota", "codigodebarras": "ROTA001",
-        "preco_venda": 7.0, "categoria": "Geral",
+        "preco_venda": 7.0, "categoria": "Geral", "codigo_lote": "LOTE-ROTA001",
     }, headers=_headers(token_estoque))
     assert r.status_code == 200
 

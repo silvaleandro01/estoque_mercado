@@ -247,8 +247,8 @@ def test_invariante_soma_lotes_igual_estoque_apos_operacoes_mistas(engine, sessi
     with Session(engine) as s:
         assert _soma_lotes(s, criado.id) == s.get(Estoque, criado.id).quantidade
 
-    # 5) Confirmação de compra pendente (ainda sem lote nesta etapa -- cai
-    # no lote "sem validade", igual ao incremento manual).
+    # 5) Confirmação de compra pendente -- agora cria um lote RASTREADO de
+    # verdade (lote/validade informados no formulário de confirmação).
     make_compra(session, func.id, status="autorizada", itens=[
         {"codigodebarras": "INV001", "nomedoproduto": "Produto Invariante", "categoria": "Geral",
          "preco_venda": 10.0, "quantidade": 7, "preco_custo": 5.0},
@@ -258,7 +258,8 @@ def test_invariante_soma_lotes_igual_estoque_apos_operacoes_mistas(engine, sessi
     confirmar_pendente(
         item_id,
         ConfirmarPendenteInput(nomedoproduto="Produto Invariante", codigodebarras="INV001",
-                                preco_venda=10.0, categoria="Geral"),
+                                preco_venda=10.0, categoria="Geral",
+                                codigo_lote="LOTE-INV001", validade=date(2030, 1, 1)),
         func.id,
     )
     with Session(engine) as s:

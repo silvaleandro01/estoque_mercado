@@ -87,6 +87,23 @@ def ajustar_lote_sem_validade(session: Session, estoque_id: int, delta: Decimal)
     session.add(lote)
 
 
+def criar_lote(session: Session, estoque_id: int, codigo_lote: str, quantidade: Decimal,
+               validade: Optional[date], data_entrada: Optional[datetime] = None) -> Lote:
+    """Cria um lote novo rastreado (entrada de estoque com lote/validade
+    conhecidos -- ex.: confirmação de compra pendente). `quantidade` já deve
+    vir validada (> 0) pelo chamador; aqui só arredonda para 3 casas."""
+    lote = Lote(
+        estoque_id=estoque_id,
+        codigo_lote=codigo_lote,
+        quantidade=arredondar_quantidade(quantidade),
+        validade=validade,
+        data_entrada=data_entrada or datetime.now(timezone.utc),
+    )
+    session.add(lote)
+    session.flush()
+    return lote
+
+
 def consumir_fefo(session: Session, estoque_id: int, quantidade: Decimal, nome_produto: str) -> None:
     """
     Baixa `quantidade` dos lotes do produto, sempre do que vence mais cedo

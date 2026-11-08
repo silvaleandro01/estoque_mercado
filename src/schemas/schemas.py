@@ -223,6 +223,14 @@ class ConfirmarPendenteInput(BaseModel):
     # aplicada em criar_estoque() para incremento de produto existente).
     unidade_medida: UnidadeMedida = "UN"
     estoque_minimo: Decimal = Field(default=Decimal("0.000"), ge=0, **DECIMAL_10_3)
+    # Lote e validade (Fase 3): toda confirmação de pendente agora cria um
+    # registro em `Lote` correspondente a esta entrada -- codigo_lote é
+    # obrigatório (identifica fisicamente o lote recebido), validade é
+    # opcional (nem todo produto de mercado é perecível de verdade -- ex.:
+    # utensílio, produto de limpeza -- mas quando o produto vence, o
+    # formulário deve sempre informar a data real).
+    codigo_lote: str = Field(..., min_length=1)
+    validade: Optional[date] = None
 
 
 class FornecedorInput(BaseModel):
