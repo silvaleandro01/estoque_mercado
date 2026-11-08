@@ -55,6 +55,18 @@ class HistoricoSenha(SQLModel, table=True):
     criado_em: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class Fornecedor(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    nome: str
+    # CPF (11 dígitos) ou CNPJ (14 dígitos) -- validado por dígito
+    # verificador na camada Pydantic (schemas.FornecedorInput), guardado
+    # aqui só com os dígitos (sem máscara).
+    documento: str = Field(unique=True, index=True)
+    telefone: Optional[str] = Field(default=None)
+    email: Optional[str] = Field(default=None)
+    prazo_medio_entrega_dias: Optional[int] = Field(default=None)
+
+
 class Estoque(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     titulo: Optional[str] = Field(default=None)
@@ -78,6 +90,9 @@ class Estoque(SQLModel, table=True):
     codigodebarras: str = Field(unique=True, index=True)
     categoria: str
     funcionario_id: Optional[int] = Field(default=None, foreign_key="funcionario.id", index=True)
+    # Fornecedor principal do produto -- opcional (nem todo produto tem um
+    # fornecedor cadastrado ainda).
+    fornecedor_id: Optional[int] = Field(default=None, foreign_key="fornecedor.id", index=True)
 
 
 class Venda(SQLModel, table=True):
@@ -139,6 +154,9 @@ class Compra(SQLModel, table=True):
     valor_total: DecimalMoeda = Field(default=Decimal("0.00"), max_digits=10, decimal_places=2)
     status: str = Field(default="pendente", index=True)
     data_autorizacao: Optional[datetime] = Field(default=None)
+    # Fornecedor do pedido -- opcional, para não quebrar compras já
+    # existentes sem fornecedor definido.
+    fornecedor_id: Optional[int] = Field(default=None, foreign_key="fornecedor.id", index=True)
 
 
 class ItemCompra(SQLModel, table=True):

@@ -347,3 +347,67 @@ DELIMITER ;
 CALL `_add_column_if_not_exists`('estoque', 'estoque_minimo', 'DECIMAL(10, 3) NOT NULL DEFAULT 0.000');
 
 DROP PROCEDURE IF EXISTS `_add_column_if_not_exists`;
+
+-- Fornecedor: nova tabela (CREATE TABLE IF NOT EXISTS, mesmo padrão já
+-- usado nas tabelas `compra`/`itemcompra`/etc. acima), com vínculo opcional
+-- em `estoque` (fornecedor principal do produto) e em `compra` (fornecedor
+-- do pedido) -- opcional nos dois casos para não quebrar produtos/compras
+-- já existentes sem fornecedor definido.
+CREATE TABLE IF NOT EXISTS `fornecedor` (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    nome VARCHAR(255) NOT NULL,
+    documento VARCHAR(14) NOT NULL,
+    telefone VARCHAR(20),
+    email VARCHAR(255),
+    prazo_medio_entrega_dias INT,
+    UNIQUE KEY `unique_fornecedor_documento` (`documento`)
+) ENGINE=InnoDB;
+
+DELIMITER $$
+DROP PROCEDURE IF EXISTS `_add_column_if_not_exists`$$
+CREATE PROCEDURE `_add_column_if_not_exists`(
+    IN p_table VARCHAR(64), IN p_column VARCHAR(64), IN p_definition TEXT
+)
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = DATABASE() AND table_name = p_table AND column_name = p_column
+    ) THEN
+        SET @ddl = CONCAT('ALTER TABLE `', p_table, '` ADD COLUMN `', p_column, '` ', p_definition);
+        PREPARE stmt FROM @ddl;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+    END IF;
+END$$
+DELIMITER ;
+
+-- MySQL também não entende `ADD CONSTRAINT IF NOT EXISTS`, mesmo problema
+-- do ADD COLUMN acima -- outra stored procedure temporária, desta vez
+-- consultando information_schema.table_constraints, para simular "adicione
+-- esta FOREIGN KEY só se ela não existir".
+DELIMITER $$
+DROP PROCEDURE IF EXISTS `_add_foreign_key_if_not_exists`$$
+CREATE PROCEDURE `_add_foreign_key_if_not_exists`(
+    IN p_table VARCHAR(64), IN p_constraint VARCHAR(64), IN p_definition TEXT
+)
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.table_constraints
+        WHERE table_schema = DATABASE() AND table_name = p_table AND constraint_name = p_constraint
+    ) THEN
+        SET @ddl = CONCAT('ALTER TABLE `', p_table, '` ADD CONSTRAINT `', p_constraint, '` ', p_definition);
+        PREPARE stmt FROM @ddl;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+    END IF;
+END$$
+DELIMITER ;
+
+CALL `_add_column_if_not_exists`('estoque', 'fornecedor_id', 'INT NULL');
+CALL `_add_column_if_not_exists`('compra', 'fornecedor_id', 'INT NULL');
+
+CALL `_add_foreign_key_if_not_exists`('estoque', 'fk_estoque_fornecedor', 'FOREIGN KEY (fornecedor_id) REFERENCES fornecedor(id)');
+CALL `_add_foreign_key_if_not_exists`('compra', 'fk_compra_fornecedor', 'FOREIGN KEY (fornecedor_id) REFERENCES fornecedor(id)');
+
+DROP PROCEDURE IF EXISTS `_add_column_if_not_exists`;
+DROP PROCEDURE IF EXISTS `_add_foreign_key_if_not_exists`;

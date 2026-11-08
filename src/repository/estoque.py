@@ -3,15 +3,24 @@ from datetime import datetime, timezone
 from fastapi import HTTPException
 from sqlmodel import Session, select
 
-from utils.database import Estoque, Compra, ItemCompra, engine
+from utils.database import Estoque, Compra, ItemCompra, Fornecedor, engine
 from utils.money import arredondar
 from utils.quantidade import arredondar_quantidade
 from logs.logs import criar_log
 from schemas.schemas import EstoqueCreate, EstoqueUpdate, ConfirmarPendenteInput
 
 
+def _validar_fornecedor(session: Session, fornecedor_id):
+    """Garante um erro 404 claro (em vez de um erro cru do banco/FK) quando
+    o `fornecedor_id` informado no cadastro de produto não existe."""
+    if fornecedor_id is not None and not session.get(Fornecedor, fornecedor_id):
+        raise HTTPException(status_code=404, detail="Fornecedor não encontrado")
+
+
 def criar_estoque(dados: EstoqueCreate, funcionario_id: int):
     with Session(engine) as session:
+        _validar_fornecedor(session, dados.fornecedor_id)
+
         # with_for_update(): mesma trava usada em repository/vendas.py.
         # Sem ela, duas entradas de estoque simultâneas para o mesmo produto
         # (ex.: dois lançamentos manuais, ou um lançamento concorrendo com a
@@ -46,6 +55,7 @@ def criar_estoque(dados: EstoqueCreate, funcionario_id: int):
             codigodebarras=dados.codigodebarras,
             categoria=dados.categoria,
             funcionario_id=funcionario_id,
+            fornecedor_id=dados.fornecedor_id,
         )
         try:
             session.add(estoque)
@@ -77,6 +87,8 @@ def atualizar_estoque(estoque_id: int, dados: EstoqueUpdate, funcionario_id: int
         if not estoque:
             raise HTTPException(status_code=404, detail="Estoque não localizado")
 
+        _validar_fornecedor(session, dados.fornecedor_id)
+
         produto_existente = session.exec(
             select(Estoque).where(Estoque.codigodebarras == dados.codigodebarras)
         ).first()
@@ -92,6 +104,7 @@ def atualizar_estoque(estoque_id: int, dados: EstoqueUpdate, funcionario_id: int
         estoque.codigodebarras = dados.codigodebarras
         estoque.categoria = dados.categoria
         estoque.funcionario_id = funcionario_id
+        estoque.fornecedor_id = dados.fornecedor_id
 
         try:
             session.commit()
@@ -161,14 +174,24 @@ def confirmar_pendente(item_id: int, dados: ConfirmarPendenteInput, funcionario_
             session.add(produto_existente)
             nome_produto = produto_existente.nomedoproduto
         else:
+            # Produto novo (não existia ainda com esse código de barras):
+            # herda o fornecedor do próprio pedido de compra que o originou
+            # (quando o pedido tem um fornecedor definido) -- afinal, foi
+            # dele que este produto veio. unidade_medida/estoque_minimo não
+            # dá pra deduzir da compra, então vêm do formulário de
+            # confirmação (ConfirmarPendenteInput).
+            compra = session.get(Compra, item.compra_id)
             novo = Estoque(
                 nomedoproduto=dados.nomedoproduto,
                 quantidade=item.quantidade,
+                unidade_medida=dados.unidade_medida,
+                estoque_minimo=arredondar_quantidade(dados.estoque_minimo),
                 preco=arredondar(dados.preco_venda),
                 preco_custo=arredondar(item.preco_custo_unitario),
                 codigodebarras=dados.codigodebarras,
                 categoria=dados.categoria,
                 funcionario_id=funcionario_id,
+                fornecedor_id=compra.fornecedor_id if compra else None,
             )
             session.add(novo)
             nome_produto = novo.nomedoproduto

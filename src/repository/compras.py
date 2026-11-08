@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from fastapi import HTTPException
 from sqlmodel import Session, select
 
-from utils.database import Compra, ItemCompra, Funcionario, engine
+from utils.database import Compra, ItemCompra, Funcionario, Fornecedor, engine
 from utils.money import arredondar
 from utils.timezone import hoje_brasil, limites_do_dia_brasil
 from logs.logs import criar_log
@@ -17,6 +17,13 @@ def _nome_completo(session: Session, funcionario_id: int) -> str:
 
 def registrar_compra(dados: CompraInput, funcionario_id: int):
     with Session(engine) as session:
+        # Mesmo raciocínio de _validar_fornecedor em repository/estoque.py:
+        # erro 404 claro em vez de um erro cru do banco/FK se o
+        # fornecedor_id informado não existir. fornecedor_id é opcional
+        # (compras sem fornecedor definido continuam funcionando).
+        if dados.fornecedor_id is not None and not session.get(Fornecedor, dados.fornecedor_id):
+            raise HTTPException(status_code=404, detail="Fornecedor não encontrado")
+
         # Arredonda cada preço unitário (entrada do cliente pode vir com mais
         # de 2 casas) antes de multiplicar, para que o total do item e o
         # total do pedido usem sempre o mesmo valor unitário "de verdade"
@@ -28,7 +35,10 @@ def registrar_compra(dados: CompraInput, funcionario_id: int):
         valor_total = arredondar(
             sum((arredondar(preco_custo * item.quantidade) for item, preco_custo, _ in itens_calculados), Decimal("0.00"))
         )
-        compra = Compra(solicitante_id=funcionario_id, valor_total=valor_total, status="pendente")
+        compra = Compra(
+            solicitante_id=funcionario_id, valor_total=valor_total, status="pendente",
+            fornecedor_id=dados.fornecedor_id,
+        )
         try:
             session.add(compra)
             session.flush()
@@ -63,6 +73,7 @@ def listar_compras():
                 "aprovador": _nome_completo(session, c.aprovador_id) if c.aprovador_id else None,
                 "valor_total": c.valor_total,
                 "status": c.status,
+                "fornecedor": session.get(Fornecedor, c.fornecedor_id).nome if c.fornecedor_id else None,
             }
             for c in compras
         ]
