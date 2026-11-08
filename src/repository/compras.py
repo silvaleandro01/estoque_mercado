@@ -5,6 +5,7 @@ from sqlmodel import Session, select
 
 from utils.database import Compra, ItemCompra, Funcionario, engine
 from utils.money import arredondar
+from utils.timezone import hoje_brasil, limites_do_dia_brasil
 from logs.logs import criar_log
 from schemas.schemas import CompraInput
 
@@ -152,12 +153,14 @@ def autorizar_compra(compra_id: int, funcionario_id: int):
 
 def compras_do_dia():
     with Session(engine) as session:
-        hoje = datetime.now(timezone.utc).date()
+        dia = hoje_brasil()
+        inicio_utc, fim_utc = limites_do_dia_brasil(dia)
         compras = session.exec(
             select(Compra).where(
                 Compra.status == "autorizada",
-                Compra.data >= datetime(hoje.year, hoje.month, hoje.day, tzinfo=timezone.utc),
+                Compra.data >= inicio_utc,
+                Compra.data < fim_utc,
             )
         ).all()
         total = arredondar(sum((c.valor_total for c in compras), Decimal("0.00")))
-        return {"data": hoje, "total": total}
+        return {"data": dia, "total": total}

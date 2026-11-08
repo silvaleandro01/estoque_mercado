@@ -1,10 +1,10 @@
 from decimal import Decimal
-from datetime import date, datetime, timezone
 from fastapi import HTTPException
 from sqlmodel import Session, select
 
 from utils.database import engine, Estoque, Venda, ItemVenda
 from utils.money import arredondar
+from utils.timezone import hoje_brasil, limites_do_dia_brasil
 from schemas.schemas import VendaInput
 
 
@@ -49,12 +49,13 @@ def criar_venda(dados: VendaInput, funcionario_id: int):
 
 def vendas_do_dia():
     with Session(engine) as session:
-        hoje = datetime.now(timezone.utc).date()
+        dia = hoje_brasil()
+        inicio_utc, fim_utc = limites_do_dia_brasil(dia)
         vendas = session.exec(
-            select(Venda).where(Venda.data >= datetime(hoje.year, hoje.month, hoje.day, tzinfo=timezone.utc))
+            select(Venda).where(Venda.data >= inicio_utc, Venda.data < fim_utc)
         ).all()
         total = arredondar(sum((v.valor_total for v in vendas), Decimal("0.00")))
-        return {"data": hoje, "total_vendido": total}
+        return {"data": dia, "total_vendido": total}
 
 
 def listar_vendas():
