@@ -545,3 +545,47 @@ def test_criar_estoque_incremento_consulta_produto_com_lock_for_update(engine, s
     )
     compilada = str(statements[0].compile(dialect=mysql.dialect()))
     assert "FOR UPDATE" in compilada
+
+
+def test_atualizar_estoque_consulta_produto_com_lock_for_update(engine, session, monkeypatch):
+    """
+    CRÍTICO 2 (revisão da Fase 3): diferente de criar_estoque/
+    confirmar_pendente/criar_venda (todos já testados acima/em
+    test_vendas.py), atualizar_estoque() lia o produto com `session.get()`
+    puro, sem `with_for_update()` -- um lost update pré-existente que
+    passou a alimentar direto reconciliar_lote_sem_validade, amplificando
+    para uma divergência PERMANENTE também em Lote.quantidade sob
+    concorrência real (confirmado: 15/15 rodadas de PUT concorrente real
+    contra MySQL quebraram a invariante soma(Lote.quantidade) ==
+    Estoque.quantidade, sem nenhuma exceção reportada).
+
+    SQLite não implementa `SELECT ... FOR UPDATE` -- mesma limitação já
+    documentada no teste de criar_estoque acima. Verifica-se aqui que a
+    PRIMEIRA consulta que atualizar_estoque faz ao produto pede o lock
+    pessimista, compilando a instrução para o dialeto do MySQL.
+    """
+    import sqlmodel as sqlmodel_mod
+    from sqlalchemy.dialects import mysql
+
+    setor = make_setor(session, tipo="lockest2")
+    func = make_funcionario(session, setor_id=setor.id)
+    produto = make_produto(session, codigo="LOCKEST002", qtd=10)
+
+    statements = []
+    orig_exec = sqlmodel_mod.Session.exec
+
+    def espiar_exec(self, statement, *args, **kwargs):
+        statements.append(statement)
+        return orig_exec(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(sqlmodel_mod.Session, "exec", espiar_exec)
+    dados = _dados_update(codigo="LOCKEST002", qtd=15)
+    atualizar_estoque(produto.id, dados, func.id)
+
+    assert statements, "esperava que atualizar_estoque consultasse o produto via session.exec"
+    assert getattr(statements[0], "_for_update_arg", None) is not None, (
+        "a consulta ao produto em atualizar_estoque precisa usar "
+        "with_for_update() para evitar lost update em edições concorrentes"
+    )
+    compilada = str(statements[0].compile(dialect=mysql.dialect()))
+    assert "FOR UPDATE" in compilada

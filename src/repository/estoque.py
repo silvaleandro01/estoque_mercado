@@ -118,7 +118,20 @@ def buscar_estoque(estoque_id: int):
 
 def atualizar_estoque(estoque_id: int, dados: EstoqueUpdate, funcionario_id: int):
     with Session(engine) as session:
-        estoque = session.get(Estoque, estoque_id)
+        # with_for_update(): mesma trava usada em criar_estoque/
+        # confirmar_pendente/criar_venda. Sem ela, duas edições concorrentes
+        # (ou uma edição concorrendo com qualquer outra entrada de estoque
+        # do mesmo produto) podiam ler a mesma `quantidade` "antiga" e uma
+        # sobrescrever o resultado da outra ao salvar (lost update) --
+        # pré-existente antes desta fase, mas que agora alimenta direto
+        # reconciliar_lote_sem_validade, amplificando o lost update de
+        # Estoque.quantidade para uma divergência permanente também em
+        # Lote.quantidade (confirmado: 15/15 rodadas de PUT concorrente
+        # real contra MySQL quebraram a invariante, sem nenhuma exceção
+        # reportada).
+        estoque = session.exec(
+            select(Estoque).where(Estoque.id == estoque_id).with_for_update()
+        ).first()
         if not estoque:
             raise HTTPException(status_code=404, detail="Estoque não localizado")
 
