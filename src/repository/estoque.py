@@ -19,7 +19,12 @@ def _validar_fornecedor(session: Session, fornecedor_id):
 
 def criar_estoque(dados: EstoqueCreate, funcionario_id: int):
     with Session(engine) as session:
-        _validar_fornecedor(session, dados.fornecedor_id)
+        # _validar_fornecedor roda só mais abaixo, no caminho de produto
+        # novo -- não aqui incondicionalmente. No caminho de incremento
+        # (produto já existente, logo abaixo) dados.fornecedor_id do
+        # payload nem é usado (o fornecedor já cadastrado do produto não
+        # muda por incremento), então validar um fornecedor_id que será
+        # ignorado só bloquearia incrementos de estoque sem necessidade.
 
         # with_for_update(): mesma trava usada em repository/vendas.py.
         # Sem ela, duas entradas de estoque simultâneas para o mesmo produto
@@ -49,9 +54,12 @@ def criar_estoque(dados: EstoqueCreate, funcionario_id: int):
                 session.rollback()
                 raise HTTPException(status_code=500, detail="Erro ao atualizar estoque")
 
-        # Produto novo (cadastro): a unidade de medida vem do próprio
-        # payload, já que ainda não existe nenhum produto cadastrado com
-        # esse código de barras para servir de fonte da verdade.
+        # Produto novo (cadastro): aqui sim dados.fornecedor_id é usado de
+        # verdade (vira o fornecedor do produto), então validamos que ele
+        # existe. A unidade de medida também vem do próprio payload, já que
+        # ainda não existe nenhum produto cadastrado com esse código de
+        # barras para servir de fonte da verdade.
+        _validar_fornecedor(session, dados.fornecedor_id)
         validar_quantidade_inteira_se_unidade(dados.quantidade, dados.unidade_medida, dados.nomedoproduto)
 
         estoque = Estoque(

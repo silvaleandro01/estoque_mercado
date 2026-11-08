@@ -330,6 +330,26 @@ def test_criar_estoque_fornecedor_inexistente_404(engine, session):
     assert exc.value.status_code == 404
 
 
+def test_criar_estoque_incremento_ignora_fornecedor_inexistente_no_payload(engine, session):
+    """
+    _validar_fornecedor só faz sentido no cadastro de produto novo (onde
+    dados.fornecedor_id de fato vira o fornecedor do produto). No caminho
+    de incremento (produto já existente), dados.fornecedor_id do payload
+    nem é usado -- o fornecedor já cadastrado do produto não muda por
+    incremento -- então um fornecedor_id inválido nesse payload não deveria
+    bloquear o incremento com um 404 desnecessário.
+    """
+    setor = make_setor(session, tipo="forn_prod4")
+    func = make_funcionario(session, setor_id=setor.id)
+    make_produto(session, codigo="FORNPROD004", qtd=10)
+    dados = EstoqueCreate(
+        nomedoproduto="Produto", quantidade=5, preco=5.0,
+        codigodebarras="FORNPROD004", categoria="Geral", fornecedor_id=99999,
+    )
+    resultado = criar_estoque(dados, func.id)
+    assert resultado.quantidade == 15
+
+
 # ── vínculo opcional compra <-> fornecedor ──────────────────────────────────────
 
 def _item_compra(codigo="FORNCOMP001", qtd=10, custo=5.0):
