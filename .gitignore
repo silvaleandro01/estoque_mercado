@@ -11,3 +11,5 @@ tests/
 pytest.ini
 .coveragerc
 .coverage
+
+.claude/
