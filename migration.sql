@@ -384,3 +384,51 @@ CALL `_add_foreign_key_if_not_exists`('compra', 'fk_compra_fornecedor', 'FOREIGN
 
 DROP PROCEDURE IF EXISTS `_add_column_if_not_exists`;
 DROP PROCEDURE IF EXISTS `_add_foreign_key_if_not_exists`;
+
+-- ============================================================================
+-- Migração aditiva (feat/lotes-validade) -- lotes e validade: tabela nova de
+-- lote por produto (consumida por FEFO na venda) e alerta de vencimento.
+-- Mesma regra das migrações anteriores: tudo aditivo, nenhum DROP/TRUNCATE,
+-- idempotente (pode rodar mais de uma vez sem erro).
+--
+-- DECISÃO DE ARQUITETURA (ver também utils.database.Lote e
+-- repository/lotes.py, no código da aplicação): `estoque.quantidade`
+-- continua sendo a fonte da verdade do saldo total de cada produto, travada
+-- e decrementada exatamente como já era feito antes desta fase
+-- (with_for_update(), testado sob concorrência real nas Fases 1/2). A nova
+-- tabela `lote` é só um DETALHAMENTO de como esse saldo está repartido por
+-- validade -- nunca uma segunda fonte da verdade. Optamos por essa
+-- abordagem (em vez de mover a trava de concorrência para a própria tabela
+-- `lote`) para reaproveitar 100% da trava já validada, sem reconstruir do
+-- zero uma peça crítica que já funciona.
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS `lote` (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    estoque_id INT NOT NULL,
+    codigo_lote VARCHAR(100) NOT NULL,
+    quantidade DECIMAL(10, 3) NOT NULL DEFAULT 0.000,
+    -- NULL = validade desconhecida ("lote legado", ver nota abaixo).
+    validade DATE NULL,
+    data_entrada DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX (estoque_id),
+    INDEX (validade),
+    FOREIGN KEY (estoque_id) REFERENCES estoque(id)
+) ENGINE=InnoDB;
+
+-- Dado existente: produtos cadastrados ANTES desta fase (todo o histórico)
+-- têm `estoque.quantidade > 0` mas nenhum lote registrado -- sem isso, a
+-- primeira venda desses produtos ficaria sem nenhum lote de onde baixar a
+-- quantidade. A aplicação (repository/lotes.py, função consumir_fefo) já
+-- trata esse caso sozinha, criando sob demanda um "lote legado" (validade
+-- NULL, igual ao saldo do produto) na primeira venda de um produto sem
+-- nenhum lote -- mas pré-popular aqui também, via INSERT condicional
+-- (idempotente: só insere se o produto ainda não tiver NENHUM lote), deixa
+-- a listagem de lotes correta desde já, sem esperar a primeira venda de
+-- cada produto. Esse lote legado nunca aparece no alerta de vencimento
+-- (que só considera lotes com validade conhecida).
+INSERT INTO `lote` (estoque_id, codigo_lote, quantidade, validade, data_entrada)
+SELECT e.id, 'LEGADO', e.quantidade, NULL, NOW()
+FROM `estoque` e
+WHERE e.quantidade > 0
+  AND NOT EXISTS (SELECT 1 FROM `lote` l WHERE l.estoque_id = e.id);

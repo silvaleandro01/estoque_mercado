@@ -95,6 +95,48 @@ class Estoque(SQLModel, table=True):
     fornecedor_id: Optional[int] = Field(default=None, foreign_key="fornecedor.id", index=True)
 
 
+class Lote(SQLModel, table=True):
+    """Detalhamento de como o saldo de um produto (Estoque.quantidade) está
+    dividido por validade (Fase 3 -- "lotes e validade").
+
+    DECISÃO DE ARQUITETURA: `Estoque.quantidade` continua sendo a fonte da
+    verdade do saldo total, travada e decrementada exatamente como já era
+    feito antes desta fase (with_for_update(), testado sob concorrência nas
+    Fases 1/2). `Lote` nunca é uma segunda fonte da verdade -- é só um
+    detalhamento de COMO esse saldo está repartido por data de validade. A
+    invariante mantida em todo ponto de escrita (ver repository/lotes.py) é
+    soma(Lote.quantidade de um produto) == Estoque.quantidade desse produto.
+    Optamos por essa abordagem (em vez de mover a trava de concorrência para
+    a própria tabela Lote) porque reaproveita 100% da trava já validada sob
+    carga real, sem reconstruir do zero uma peça crítica que já funciona.
+    """
+    id: Optional[int] = Field(default=None, primary_key=True)
+    # FK para o PRODUTO (estoque.id), não para codigodebarras: diferente de
+    # ItemVenda/ItemCompra (que guardam codigodebarras como string solta --
+    # um snapshot histórico de uma venda/compra que não deve mudar mesmo que
+    # o produto seja editado depois), um Lote é um detalhamento VIVO do
+    # saldo atual de um produto específico, e precisa continuar apontando
+    # para a MESMA linha mesmo que o codigodebarras do produto seja editado
+    # (PUT /estoque/atualizar permite isso). Por isso a FK aqui é para o id
+    # -- primeira FK do projeto apontando para `estoque`, seguindo o mesmo
+    # padrão já usado para as demais (funcionario_id -> funcionario.id,
+    # fornecedor_id -> fornecedor.id).
+    estoque_id: int = Field(foreign_key="estoque.id", index=True)
+    # Identificador do lote dado pelo fornecedor -- texto livre, não há
+    # formato padrão entre fornecedores.
+    codigo_lote: str
+    # Decimal(10,3): mesma precisão de Estoque.quantidade.
+    quantidade: DecimalQuantidade = Field(max_digits=10, decimal_places=3)
+    # NULL = validade desconhecida ("lote legado" -- ver repository/lotes.py,
+    # criado sob demanda para produtos que existiam antes desta fase, ou
+    # para ajustes manuais de quantidade que não informam lote/validade).
+    # Produto realmente perecível sempre deve vir com validade preenchida;
+    # o campo é opcional só para não forçar data em produto que não vence
+    # (ex.: utensílio, produto de limpeza).
+    validade: Optional[date] = Field(default=None, index=True)
+    data_entrada: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class Venda(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     data: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)

@@ -3,11 +3,12 @@ from datetime import datetime, timezone
 from fastapi import HTTPException
 from sqlmodel import Session, select
 
-from utils.database import Estoque, Compra, ItemCompra, Fornecedor, engine
+from utils.database import Estoque, Compra, ItemCompra, Fornecedor, Lote, engine
 from utils.money import arredondar
 from utils.quantidade import arredondar_quantidade, validar_quantidade_inteira_se_unidade
 from logs.logs import criar_log
 from schemas.schemas import EstoqueCreate, EstoqueUpdate, ConfirmarPendenteInput
+from repository.lotes import ajustar_lote_sem_validade
 
 
 def _validar_fornecedor(session: Session, fornecedor_id):
@@ -45,6 +46,11 @@ def criar_estoque(dados: EstoqueCreate, funcionario_id: int):
             validar_quantidade_inteira_se_unidade(dados.quantidade, produto_existente.unidade_medida, produto_existente.nomedoproduto)
             produto_existente.quantidade = arredondar_quantidade(produto_existente.quantidade + dados.quantidade)
             produto_existente.funcionario_id = funcionario_id
+            # Incremento manual (sem lote/validade informados) -- cai no
+            # lote "sem validade" do produto, para a invariante soma(Lote.
+            # quantidade) == Estoque.quantidade nunca divergir (ver
+            # repository/lotes.py).
+            ajustar_lote_sem_validade(session, produto_existente.id, dados.quantidade)
             try:
                 session.commit()
                 session.refresh(produto_existente)
@@ -77,6 +83,12 @@ def criar_estoque(dados: EstoqueCreate, funcionario_id: int):
         )
         try:
             session.add(estoque)
+            session.flush()
+            # Cadastro novo com quantidade inicial (sem lote/validade
+            # informados nesta tela) -- mesma lógica do incremento acima,
+            # cai no lote "sem validade" para manter a invariante.
+            if estoque.quantidade > 0:
+                ajustar_lote_sem_validade(session, estoque.id, estoque.quantidade)
             session.commit()
             session.refresh(estoque)
             criar_log(funcionario_id, f"Inclusão de produto: {estoque.nomedoproduto}")
@@ -118,6 +130,12 @@ def atualizar_estoque(estoque_id: int, dados: EstoqueUpdate, funcionario_id: int
         # valida contra o valor que o próprio PUT está definindo.
         validar_quantidade_inteira_se_unidade(dados.quantidade, dados.unidade_medida, dados.nomedoproduto)
 
+        # PUT sobrescreve a quantidade total (não é um delta como o
+        # incremento de criar_estoque) -- para manter a invariante, o ajuste
+        # no lote "sem validade" precisa ser a DIFERENÇA entre o valor novo
+        # e o antigo, não o valor novo em si.
+        quantidade_antiga = estoque.quantidade
+
         estoque.titulo = dados.titulo
         estoque.nomedoproduto = dados.nomedoproduto
         estoque.quantidade = arredondar_quantidade(dados.quantidade)
@@ -128,6 +146,8 @@ def atualizar_estoque(estoque_id: int, dados: EstoqueUpdate, funcionario_id: int
         estoque.categoria = dados.categoria
         estoque.funcionario_id = funcionario_id
         estoque.fornecedor_id = dados.fornecedor_id
+
+        ajustar_lote_sem_validade(session, estoque.id, estoque.quantidade - quantidade_antiga)
 
         try:
             session.commit()
@@ -145,6 +165,14 @@ def deletar_estoque(estoque_id: int):
         if not estoque:
             raise HTTPException(status_code=404, detail="Estoque não localizado")
         try:
+            # Lote é um detalhamento do saldo deste produto (não um
+            # histórico independente, diferente de ItemVenda/ItemCompra) --
+            # ao excluir o produto, os lotes dele deixam de fazer sentido.
+            # Excluídos aqui, na mesma transação, para não violar a FK
+            # (lote.estoque_id -> estoque.id) nem deixar lote órfão.
+            lotes = session.exec(select(Lote).where(Lote.estoque_id == estoque_id)).all()
+            for lote in lotes:
+                session.delete(lote)
             session.delete(estoque)
             session.commit()
             return {"msg": "Estoque deletado com sucesso"}
@@ -195,6 +223,12 @@ def confirmar_pendente(item_id: int, dados: ConfirmarPendenteInput, funcionario_
             produto_existente.preco_custo = arredondar(item.preco_custo_unitario)
             produto_existente.funcionario_id = funcionario_id
             session.add(produto_existente)
+            # Lançamento de pendente ainda não informa lote/validade nesta
+            # etapa -- mesmo tratamento do incremento manual via
+            # /estoque/inserir: cai no lote "sem validade" do produto, para
+            # a invariante soma(Lote.quantidade) == Estoque.quantidade
+            # nunca divergir (ver repository/lotes.py).
+            ajustar_lote_sem_validade(session, produto_existente.id, item.quantidade)
             nome_produto = produto_existente.nomedoproduto
         else:
             # Produto novo (não existia ainda com esse código de barras):
@@ -217,6 +251,9 @@ def confirmar_pendente(item_id: int, dados: ConfirmarPendenteInput, funcionario_
                 fornecedor_id=compra.fornecedor_id if compra else None,
             )
             session.add(novo)
+            session.flush()  # para ter novo.id antes do ajuste de lote abaixo
+            if novo.quantidade > 0:
+                ajustar_lote_sem_validade(session, novo.id, novo.quantidade)
             nome_produto = novo.nomedoproduto
 
         item.lancado_em = datetime.now(timezone.utc)

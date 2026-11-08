@@ -7,6 +7,7 @@ from utils.database import engine, Estoque, Venda, ItemVenda
 from utils.money import arredondar
 from utils.quantidade import arredondar_quantidade, validar_quantidade_inteira_se_unidade
 from utils.timezone import hoje_brasil, limites_do_dia_brasil
+from repository.lotes import consumir_fefo
 from schemas.schemas import VendaInput
 
 # Código de erro do MySQL/InnoDB para "Deadlock found when trying to get
@@ -73,6 +74,18 @@ def criar_venda(dados: VendaInput, funcionario_id: int):
                 if produto.quantidade < item.quantidade:
                     session.rollback()
                     raise HTTPException(status_code=400, detail=f"Estoque insuficiente para {produto.nomedoproduto}")
+
+                # FEFO (First Expired, First Out): baixa primeiro do(s)
+                # lote(s) que vencem mais cedo. Precisa rodar ANTES de
+                # decrementar produto.quantidade -- consumir_fefo usa o
+                # saldo AINDA PRÉ-venda para materializar um "lote legado"
+                # quando o produto não tem nenhum lote cadastrado (ver
+                # docstring de repository.lotes.consumir_fefo).
+                try:
+                    consumir_fefo(session, produto.id, item.quantidade, produto.nomedoproduto)
+                except HTTPException:
+                    session.rollback()
+                    raise
 
                 produto.quantidade = arredondar_quantidade(produto.quantidade - item.quantidade)
                 preco_total = arredondar(produto.preco * item.quantidade)

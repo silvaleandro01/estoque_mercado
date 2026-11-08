@@ -14,7 +14,7 @@ from datetime import date, datetime, timezone, timedelta
 from passlib.context import CryptContext
 
 from utils import database as db_mod
-from utils.database import Setor, Funcionario, HistoricoSenha, Estoque, Compra, ItemCompra, Fornecedor
+from utils.database import Setor, Funcionario, HistoricoSenha, Estoque, Compra, ItemCompra, Fornecedor, Lote
 from utils.money import arredondar
 from logs import logs as logs_mod
 from repository import funcionarios as func_repo
@@ -130,6 +130,20 @@ def make_produto(session, nome="Produto Teste", codigo=None, qtd=50, preco=10.0,
     session.commit()
     session.refresh(p)
     return p
+
+
+def make_lote(session, estoque_id, codigo_lote="L1", qtd=10, validade=None, data_entrada=None):
+    lote = Lote(
+        estoque_id=estoque_id,
+        codigo_lote=codigo_lote,
+        quantidade=qtd,
+        validade=validade,
+        data_entrada=data_entrada or datetime.now(timezone.utc),
+    )
+    session.add(lote)
+    session.commit()
+    session.refresh(lote)
+    return lote
 
 
 def make_fornecedor(session, nome="Fornecedor Teste", documento="11144477735",
