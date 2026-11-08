@@ -139,7 +139,8 @@ CREATE TABLE IF NOT EXISTS `senhahistorico` (
 -- nada acima. Só adiciona o que os modelos do SQLModel (src/utils/database.py)
 -- já esperam e que faltava aqui, para o projeto subir do zero só com este
 -- arquivo (sem depender do SQLModel.metadata.create_all() criar tabela por
--- fora). Requer MySQL 8.0.29+ (suporte a `ADD COLUMN IF NOT EXISTS`).
+-- fora). Requer MySQL 8.0+ (usa information_schema e stored procedures,
+-- compatível desde o MySQL 5.x também, mas testado em 8.0.46).
 -- Regra seguida: toda alteração usa IF NOT EXISTS; nenhum DROP/TRUNCATE.
 -- ============================================================================
 
