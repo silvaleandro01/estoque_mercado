@@ -35,6 +35,8 @@ iniciar.bat                # Windows
 cd src && uvicorn main:app --reload  # Linux/Mac
 ```
 
+> **Produção:** defina `AMBIENTE=producao` no `.env` para desativar `/docs`, `/redoc` e `/openapi.json`. Essas rotas ficam abertas sem autenticação e expõem toda a estrutura da API; em desenvolvimento (padrão) elas continuam disponíveis.
+
 ## Funcionalidades
 
 - Cadastro e gestão de funcionários com controle de acesso por cargo
