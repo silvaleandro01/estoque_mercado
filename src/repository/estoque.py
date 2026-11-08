@@ -11,8 +11,15 @@ from schemas.schemas import EstoqueCreate, EstoqueUpdate, ConfirmarPendenteInput
 
 def criar_estoque(dados: EstoqueCreate, funcionario_id: int):
     with Session(engine) as session:
+        # with_for_update(): mesma trava usada em repository/vendas.py.
+        # Sem ela, duas entradas de estoque simultâneas para o mesmo produto
+        # (ex.: dois lançamentos manuais, ou um lançamento concorrendo com a
+        # confirmação de um pendente de compra) podem ambas ler a mesma
+        # `quantidade` "antiga", cada uma somar o próprio incremento em cima
+        # dela e uma das duas sobrescrever o resultado da outra ao salvar --
+        # um incremento inteiro perdido (lost update).
         produto_existente = session.exec(
-            select(Estoque).where(Estoque.codigodebarras == dados.codigodebarras)
+            select(Estoque).where(Estoque.codigodebarras == dados.codigodebarras).with_for_update()
         ).first()
 
         if produto_existente:
@@ -135,8 +142,11 @@ def confirmar_pendente(item_id: int, dados: ConfirmarPendenteInput, funcionario_
         if item.lancado_em is not None:
             raise HTTPException(status_code=400, detail="Item já foi lançado no estoque")
 
+        # Mesma trava de criar_estoque(): evita lost update quando a
+        # confirmação de um pendente de compra concorre com outra entrada de
+        # estoque para o mesmo produto.
         produto_existente = session.exec(
-            select(Estoque).where(Estoque.codigodebarras == dados.codigodebarras)
+            select(Estoque).where(Estoque.codigodebarras == dados.codigodebarras).with_for_update()
         ).first()
 
         if produto_existente:

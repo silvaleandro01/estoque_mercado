@@ -229,3 +229,50 @@ def test_incremento_nao_substitui_preco(engine, session):
     dados = _dados_create(codigo="PRECO001", qtd=5, preco=20.0)
     resultado = criar_estoque(dados, func.id)
     assert resultado.preco == 10.0
+
+
+# ── trava de concorrência (with_for_update) ────────────────────────────────────
+
+def test_criar_estoque_incremento_consulta_produto_com_lock_for_update(engine, session, monkeypatch):
+    """
+    Ao incrementar `Estoque.quantidade` de um produto já existente,
+    criar_estoque() precisa travar a linha (`with_for_update()`), do
+    mesmo jeito que repository/vendas.py já faz na venda. Sem a trava,
+    duas entradas de estoque simultâneas para o mesmo produto (ex.: dois
+    lançamentos manuais concorrentes) podem ler a mesma `quantidade`
+    "antiga" e uma sobrescrever o incremento da outra ao salvar (lost
+    update).
+
+    SQLite não implementa `SELECT ... FOR UPDATE` (a cláusula é ignorada
+    pelo driver), então -- mesma limitação já documentada em
+    test_criar_venda_consulta_produto_com_lock_for_update -- não dá para
+    reproduzir o bloqueio real do MySQL dentro da suíte. O teste verifica
+    o contrato que importa: a consulta ao produto existente pede o lock
+    pessimista, conferido compilando a instrução para o dialeto do MySQL.
+    """
+    import sqlmodel as sqlmodel_mod
+    from sqlalchemy.dialects import mysql
+
+    setor = make_setor(session, tipo="lockest1")
+    func = make_funcionario(session, setor_id=setor.id)
+    make_produto(session, codigo="LOCKEST001", qtd=10)
+
+    statements = []
+    orig_exec = sqlmodel_mod.Session.exec
+
+    def espiar_exec(self, statement, *args, **kwargs):
+        statements.append(statement)
+        return orig_exec(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(sqlmodel_mod.Session, "exec", espiar_exec)
+    dados = _dados_create(codigo="LOCKEST001", qtd=5)
+    criar_estoque(dados, func.id)
+
+    assert statements, "esperava que criar_estoque consultasse o produto existente via session.exec"
+    assert getattr(statements[0], "_for_update_arg", None) is not None, (
+        "a consulta ao produto existente em criar_estoque precisa usar "
+        "with_for_update() para evitar lost update em entradas de estoque "
+        "concorrentes"
+    )
+    compilada = str(statements[0].compile(dialect=mysql.dialect()))
+    assert "FOR UPDATE" in compilada

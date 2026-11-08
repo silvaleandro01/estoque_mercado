@@ -141,6 +141,63 @@ def test_confirmar_pendente_duas_vezes_falha(engine, session):
     assert exc.value.status_code == 400
 
 
+# ── trava de concorrência (with_for_update) ────────────────────────────────────
+
+def test_confirmar_pendente_incremento_consulta_produto_com_lock_for_update(engine, session, monkeypatch):
+    """
+    Ao confirmar um item pendente de compra para um produto que já existe
+    no estoque, confirmar_pendente() incrementa `Estoque.quantidade` --
+    e precisa travar a linha (`with_for_update()`) do mesmo jeito que
+    criar_estoque() e repository/vendas.py já fazem, senão duas
+    confirmações/lançamentos concorrentes para o mesmo produto podem
+    perder um incremento inteiro (lost update).
+
+    Mesma limitação de SQLite documentada nos outros testes de lock: a
+    cláusula FOR UPDATE é ignorada pelo driver, então o que dá para
+    verificar aqui é que a consulta ao produto existente pede o lock
+    pessimista (SQL compilado para o dialeto do MySQL).
+    """
+    import sqlmodel as sqlmodel_mod
+    from sqlalchemy.dialects import mysql
+
+    setor = make_setor(session, tipo="lockpend1")
+    solicitante = make_funcionario(session, setor_id=setor.id)
+    make_produto(session, codigo="LOCKPEND001", qtd=5, preco=9.0, custo=3.0)
+    make_compra(session, solicitante.id, status="autorizada", itens=[
+        {"codigodebarras": "LOCKPEND001", "nomedoproduto": "Produto Existente", "categoria": "Geral",
+         "preco_venda": 9.0, "quantidade": 7, "preco_custo": 4.0},
+    ])
+    item_id = listar_pendentes()[0]["id"]
+    setor_estoque = make_setor(session, tipo="lockpend_estoque")
+    func_estoque = make_funcionario(session, setor_id=setor_estoque.id)
+    dados = ConfirmarPendenteInput(
+        nomedoproduto="Produto Existente", codigodebarras="LOCKPEND001",
+        preco_venda=9.0, categoria="Geral",
+    )
+
+    statements = []
+    orig_exec = sqlmodel_mod.Session.exec
+
+    def espiar_exec(self, statement, *args, **kwargs):
+        statements.append(statement)
+        return orig_exec(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(sqlmodel_mod.Session, "exec", espiar_exec)
+    confirmar_pendente(item_id, dados, func_estoque.id)
+
+    consultas_produto = [
+        s for s in statements
+        if "estoque" in str(s).lower() and "codigodebarras" in str(s).lower()
+    ]
+    assert consultas_produto, "esperava que confirmar_pendente consultasse o produto existente via session.exec"
+    assert getattr(consultas_produto[0], "_for_update_arg", None) is not None, (
+        "a consulta ao produto existente em confirmar_pendente precisa usar "
+        "with_for_update() para evitar lost update em concorrência"
+    )
+    compilada = str(consultas_produto[0].compile(dialect=mysql.dialect()))
+    assert "FOR UPDATE" in compilada
+
+
 # ── permissão via rotas HTTP ─────────────────────────────────────────────────
 
 def test_rota_pendentes_nega_funcionario_fora_do_setor_estoque(client, session, engine):
