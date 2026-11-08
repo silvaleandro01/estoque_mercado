@@ -410,6 +410,95 @@ def test_estoque_minimo_respeitado_em_relacao_a_quantidade(engine, session):
     assert resultado.quantidade <= resultado.estoque_minimo
 
 
+# ── quantidade inteira obrigatória para produto UN ──────────────────────────────
+# A validação "produto UN só aceita quantidade inteira" existia só no
+# frontend (Number.isInteger em app.js) -- confirmado (painel de revisão da
+# Fase 2) que POST /estoque/inserir aceitava fração direto contra a API para
+# produto UN, tanto no cadastro de produto novo quanto no incremento de
+# produto já existente. Teste direto no repository, sem passar pelo frontend.
+
+def test_criar_estoque_novo_produto_un_rejeita_quantidade_fracionaria(engine, session):
+    setor = make_setor(session, tipo="un_frac_novo")
+    func = make_funcionario(session, setor_id=setor.id)
+    dados = EstoqueCreate(
+        nomedoproduto="Produto Fracionado", quantidade=Decimal("1.500"), unidade_medida="UN",
+        preco=5.0, codigodebarras="UNFRACNOVO001", categoria="Geral",
+    )
+    with pytest.raises(HTTPException) as exc:
+        criar_estoque(dados, func.id)
+    assert exc.value.status_code == 400
+    assert "unidade inteira" in exc.value.detail
+
+
+def test_criar_estoque_incremento_un_rejeita_quantidade_fracionaria(engine, session):
+    setor = make_setor(session, tipo="un_frac_incr")
+    func = make_funcionario(session, setor_id=setor.id)
+    make_produto(session, codigo="UNFRACINCR001", qtd=10, unidade="UN")
+    dados = _dados_create(codigo="UNFRACINCR001", qtd=Decimal("1.500"))
+    with pytest.raises(HTTPException) as exc:
+        criar_estoque(dados, func.id)
+    assert exc.value.status_code == 400
+    assert "unidade inteira" in exc.value.detail
+
+
+def test_atualizar_estoque_un_rejeita_quantidade_fracionaria(engine, session):
+    setor = make_setor(session, tipo="un_frac_upd")
+    func = make_funcionario(session, setor_id=setor.id)
+    p = make_produto(session, codigo="UNFRACUPD001", unidade="UN")
+    dados = EstoqueUpdate(
+        nomedoproduto="Produto", quantidade=Decimal("1.500"), unidade_medida="UN",
+        preco=10.0, codigodebarras="UNFRACUPD001", categoria="Geral",
+    )
+    with pytest.raises(HTTPException) as exc:
+        atualizar_estoque(p.id, dados, func.id)
+    assert exc.value.status_code == 400
+    assert "unidade inteira" in exc.value.detail
+
+
+def test_criar_estoque_kg_continua_aceitando_quantidade_fracionaria(engine, session):
+    setor = make_setor(session, tipo="un_frac_kg")
+    func = make_funcionario(session, setor_id=setor.id)
+    dados = EstoqueCreate(
+        nomedoproduto="Produto KG", quantidade=Decimal("1.500"), unidade_medida="KG",
+        preco=5.0, codigodebarras="UNFRACKG001", categoria="Geral",
+    )
+    resultado = criar_estoque(dados, func.id)
+    assert resultado.quantidade == Decimal("1.500")
+
+
+def test_rota_inserir_un_rejeita_quantidade_fracionaria(client, session, engine):
+    """
+    Confirmação direta na API (não só no repository): POST /estoque/inserir
+    para um produto UN com quantidade fracionária precisa devolver 400 --
+    era exatamente este o caminho batido contra a API real (sem passar pelo
+    frontend) que o painel de revisão usou para confirmar o bug.
+    """
+    from conftest import set_token
+
+    setor = make_setor(session, tipo="estoque")
+    func = make_funcionario(session, setor_id=setor.id)
+    token = set_token(session, func)
+
+    r = client.post("/estoque/inserir", json={
+        "nomedoproduto": "Produto Rota", "unidade_medida": "UN",
+        "quantidade": 1.5, "preco": 5.0, "codigodebarras": "ROTAUNFRAC001", "categoria": "Geral",
+    }, headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 400
+    assert "unidade inteira" in r.json()["detail"]
+
+
+def test_criar_estoque_incremento_kg_continua_aceitando_quantidade_fracionaria(engine, session):
+    setor = make_setor(session, tipo="un_frac_kg_incr")
+    func = make_funcionario(session, setor_id=setor.id)
+    make_produto(session, codigo="UNFRACKGINCR001", qtd=Decimal("10.000"), unidade="KG")
+    dados = EstoqueCreate(
+        nomedoproduto="Produto KG", quantidade=Decimal("1.500"), unidade_medida="KG",
+        preco=5.0, codigodebarras="UNFRACKGINCR001", categoria="Geral",
+    )
+    resultado = criar_estoque(dados, func.id)
+    assert resultado.quantidade == Decimal("11.500")
+
+
 # ── trava de concorrência (with_for_update) ────────────────────────────────────
 
 def test_criar_estoque_incremento_consulta_produto_com_lock_for_update(engine, session, monkeypatch):

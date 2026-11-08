@@ -432,3 +432,27 @@ def test_criar_venda_por_peso_item_registra_quantidade_fracionada(engine, sessio
         itens = s.exec(select(ItemVenda).where(ItemVenda.venda_id == venda.id)).all()
     assert itens[0].quantidade == Decimal("1.250")
     assert itens[0].preco_total == Decimal("12.50")
+
+
+# ── quantidade inteira obrigatória para produto UN ──────────────────────────────
+# A validação "produto UN só aceita quantidade inteira" existia só no
+# frontend (Number.isInteger em app.js) -- confirmado (painel de revisão da
+# Fase 2) que POST /vendas/inserir aceitava fração direto contra a API para
+# produto UN. Teste direto no repository, sem passar pelo frontend.
+
+def test_criar_venda_produto_un_rejeita_quantidade_fracionaria(engine, session):
+    setor = make_setor(session, tipo="un_frac1")
+    func = make_funcionario(session, setor_id=setor.id)
+    make_produto(session, codigo="UNFRAC001", qtd=10, preco=5.0, unidade="UN")
+    with pytest.raises(HTTPException) as exc:
+        criar_venda(_input([("UNFRAC001", Decimal("1.5"))]), func.id)
+    assert exc.value.status_code == 400
+    assert "unidade inteira" in exc.value.detail
+
+
+def test_criar_venda_produto_kg_continua_aceitando_quantidade_fracionaria(engine, session):
+    setor = make_setor(session, tipo="un_frac2")
+    func = make_funcionario(session, setor_id=setor.id)
+    make_produto(session, codigo="UNFRAC002", qtd=Decimal("10.000"), preco=5.0, unidade="KG")
+    venda = criar_venda(_input([("UNFRAC002", Decimal("1.5"))]), func.id)
+    assert venda.valor_total == Decimal("7.50")

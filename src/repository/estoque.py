@@ -5,7 +5,7 @@ from sqlmodel import Session, select
 
 from utils.database import Estoque, Compra, ItemCompra, Fornecedor, engine
 from utils.money import arredondar
-from utils.quantidade import arredondar_quantidade
+from utils.quantidade import arredondar_quantidade, validar_quantidade_inteira_se_unidade
 from logs.logs import criar_log
 from schemas.schemas import EstoqueCreate, EstoqueUpdate, ConfirmarPendenteInput
 
@@ -33,6 +33,11 @@ def criar_estoque(dados: EstoqueCreate, funcionario_id: int):
         ).first()
 
         if produto_existente:
+            # Validação "UN só aceita quantidade inteira" contra a
+            # unidade_medida já cadastrada do produto -- o incremento ignora
+            # qualquer dados.unidade_medida que tenha vindo no payload, a
+            # unidade de um produto já existente não muda por incremento.
+            validar_quantidade_inteira_se_unidade(dados.quantidade, produto_existente.unidade_medida, produto_existente.nomedoproduto)
             produto_existente.quantidade = arredondar_quantidade(produto_existente.quantidade + dados.quantidade)
             produto_existente.funcionario_id = funcionario_id
             try:
@@ -43,6 +48,11 @@ def criar_estoque(dados: EstoqueCreate, funcionario_id: int):
             except Exception:
                 session.rollback()
                 raise HTTPException(status_code=500, detail="Erro ao atualizar estoque")
+
+        # Produto novo (cadastro): a unidade de medida vem do próprio
+        # payload, já que ainda não existe nenhum produto cadastrado com
+        # esse código de barras para servir de fonte da verdade.
+        validar_quantidade_inteira_se_unidade(dados.quantidade, dados.unidade_medida, dados.nomedoproduto)
 
         estoque = Estoque(
             titulo=dados.titulo,
@@ -94,6 +104,11 @@ def atualizar_estoque(estoque_id: int, dados: EstoqueUpdate, funcionario_id: int
         ).first()
         if produto_existente and produto_existente.id != estoque.id:
             raise HTTPException(status_code=400, detail="Código de barras já cadastrado em outro produto")
+
+        # Atualização: a unidade de medida em si também vem do payload (o
+        # formulário de edição permite trocar UN/KG/L do produto), então
+        # valida contra o valor que o próprio PUT está definindo.
+        validar_quantidade_inteira_se_unidade(dados.quantidade, dados.unidade_medida, dados.nomedoproduto)
 
         estoque.titulo = dados.titulo
         estoque.nomedoproduto = dados.nomedoproduto

@@ -3,8 +3,9 @@ from datetime import datetime, timezone
 from fastapi import HTTPException
 from sqlmodel import Session, select
 
-from utils.database import Compra, ItemCompra, Funcionario, Fornecedor, engine
+from utils.database import Compra, ItemCompra, Estoque, Funcionario, Fornecedor, engine
 from utils.money import arredondar
+from utils.quantidade import validar_quantidade_inteira_se_unidade
 from utils.timezone import hoje_brasil, limites_do_dia_brasil
 from logs.logs import criar_log
 from schemas.schemas import CompraInput
@@ -23,6 +24,20 @@ def registrar_compra(dados: CompraInput, funcionario_id: int):
         # (compras sem fornecedor definido continuam funcionando).
         if dados.fornecedor_id is not None and not session.get(Fornecedor, dados.fornecedor_id):
             raise HTTPException(status_code=404, detail="Fornecedor não encontrado")
+
+        # Validação "UN só aceita quantidade inteira" (ver docstring de
+        # validar_quantidade_inteira_se_unidade): só dá pra aplicar aqui
+        # quando o código de barras já corresponde a um produto cadastrado
+        # no estoque -- a unidade de medida é a fonte da verdade. Se o
+        # produto ainda não existir (vai virar pendente, unidade decidida só
+        # na confirmação em estoque.py::confirmar_pendente), não há o que
+        # validar nesta etapa.
+        for item in dados.itens:
+            produto_existente = session.exec(
+                select(Estoque).where(Estoque.codigodebarras == item.codigodebarras)
+            ).first()
+            if produto_existente:
+                validar_quantidade_inteira_se_unidade(item.quantidade, produto_existente.unidade_medida, item.nomedoproduto)
 
         # Arredonda cada preço unitário (entrada do cliente pode vir com mais
         # de 2 casas) antes de multiplicar, para que o total do item e o

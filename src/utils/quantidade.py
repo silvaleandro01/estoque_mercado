@@ -18,6 +18,7 @@ a quantidade de casas no arredondamento final.
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Annotated
 
+from fastapi import HTTPException
 from pydantic import PlainSerializer
 
 from utils.money import Numero, para_decimal
@@ -29,9 +30,38 @@ TRES_CASAS = Decimal("0.001")
 # flutuante), mas ao serializar para JSON (respostas da API) converte para
 # float, preservando o contrato que o frontend já consome (número, não
 # string) -- mesmo raciocínio de `DecimalMoeda`, só que com 3 casas.
+#
+# ATENÇÃO: `DecimalQuantidade` e `DecimalMoeda` (utils/money.py) são
+# estruturalmente idênticos (mesmo Decimal + mesmo PlainSerializer) -- nada
+# no Pydantic impede declarar um campo de dinheiro como `DecimalQuantidade`
+# ou um campo de quantidade como `DecimalMoeda` por engano, os dois aceitam
+# e serializam o mesmo jeito. A diferença que importa (2 casas vs. 3 casas)
+# só existe no arredondamento manual (`arredondar()` vs.
+# `arredondar_quantidade()`), nunca é imposta pelo tipo em si. Sempre
+# confira que a função de arredondamento certa foi chamada antes de
+# persistir -- usar a errada não dá erro nenhum, só corrompe silenciosamente
+# a precisão do valor gravado.
 DecimalQuantidade = Annotated[Decimal, PlainSerializer(lambda v: float(v), return_type=float, when_used="json")]
 
 
 def arredondar_quantidade(valor: Numero) -> Decimal:
     """Arredonda uma quantidade para 3 casas decimais (ROUND_HALF_UP)."""
     return para_decimal(valor).quantize(TRES_CASAS, rounding=ROUND_HALF_UP)
+
+
+def validar_quantidade_inteira_se_unidade(quantidade: Numero, unidade_medida: str, nome_produto: str) -> None:
+    """Rejeita quantidade fracionária para produto vendido por unidade (UN).
+
+    A regra "produto UN só aceita quantidade inteira" vivia só no frontend
+    (`Number.isInteger` em frontend/app.js), então batia direto na API --
+    POST /vendas/inserir, POST /estoque/inserir e POST /compras/registrar
+    aceitavam `1.5` como quantidade de um produto UN sem nenhum erro (achado
+    confirmado de forma independente por 4 agentes do painel de revisão da
+    Fase 2, com request real contra a API). Produto KG/L continua aceitando
+    fração normalmente -- só UN é restrito.
+    """
+    if unidade_medida == "UN" and para_decimal(quantidade) % 1 != 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Produto {nome_produto} é vendido por unidade inteira, quantidade fracionária não é permitida",
+        )
