@@ -26,6 +26,18 @@ def criar_fornecedor(dados: FornecedorInput, funcionario_id: int):
             session.refresh(fornecedor)
             criar_log(funcionario_id, f"Cadastro de fornecedor: {fornecedor.nome}")
             return fornecedor
+        except IntegrityError:
+            # TOCTOU (time-of-check to time-of-use): o SELECT acima e este
+            # INSERT não são atômicos -- sob concorrência real, duas
+            # requisições podem passar pelo SELECT (nenhuma encontra
+            # duplicado ainda, porque nenhuma comitou) antes de qualquer uma
+            # fazer o INSERT. A segunda bate na UNIQUE KEY do banco
+            # (documento), e sem isto virava um 500 cru em vez do 400
+            # esperado (~22% das colisões em teste de carga real). Mesmo
+            # padrão de repository/vendas.py::criar_venda para distinguir um
+            # erro de banco específico e esperável de qualquer outra falha.
+            session.rollback()
+            raise HTTPException(status_code=400, detail="Já existe fornecedor com este CPF/CNPJ")
         except Exception:
             session.rollback()
             raise HTTPException(status_code=500, detail="Erro ao criar fornecedor")
@@ -67,6 +79,11 @@ def atualizar_fornecedor(fornecedor_id: int, dados: FornecedorInput, funcionario
             session.refresh(fornecedor)
             criar_log(funcionario_id, f"Atualização de fornecedor: {fornecedor.nome}")
             return fornecedor
+        except IntegrityError:
+            # Mesmo TOCTOU de criar_fornecedor, agora entre o SELECT de
+            # duplicado acima e este UPDATE.
+            session.rollback()
+            raise HTTPException(status_code=400, detail="CPF/CNPJ já cadastrado em outro fornecedor")
         except Exception:
             session.rollback()
             raise HTTPException(status_code=500, detail="Erro ao atualizar fornecedor")

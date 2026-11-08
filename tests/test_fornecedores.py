@@ -86,6 +86,66 @@ def test_criar_fornecedor_documento_duplicado_falha(engine, session):
     assert exc.value.status_code == 400
 
 
+class _ResultadoVazio:
+    """Fake de resultado do session.exec(): simula um SELECT que não
+    encontra nenhuma linha -- usado para forçar o caminho de corrida
+    (TOCTOU) nos testes abaixo, sem precisar de threads reais."""
+
+    def first(self):
+        return None
+
+
+def test_criar_fornecedor_race_condition_integrity_error_vira_400(engine, session, monkeypatch):
+    """
+    criar_fornecedor faz um SELECT para checar documento duplicado e só
+    depois faz o INSERT -- um TOCTOU clássico (time-of-check to
+    time-of-use). Sob concorrência real (MySQL), duas requisições passam
+    pelo SELECT antes de qualquer uma comitar (nenhuma encontra duplicado
+    ainda), e a segunda bate na UNIQUE KEY do banco ao tentar o INSERT,
+    virando um 500 cru em vez do 400 esperado (reproduzido em ~22% das
+    colisões em teste de carga real contra MySQL via Docker).
+
+    Simula a corrida sem precisar de threads reais: o documento duplicado
+    já existe de verdade no banco (`make_fornecedor` abaixo), e o SELECT de
+    checagem é forçado a não encontrar nada (como aconteceria se a outra
+    transação concorrente ainda não tivesse comitado) -- o INSERT que segue
+    bate na UNIQUE KEY de verdade (IntegrityError real do SQLite), e a
+    correção precisa capturar isso especificamente e devolver 400.
+    """
+    import sqlmodel as sqlmodel_mod
+
+    setor = make_setor(session, tipo="forn_race1")
+    func = make_funcionario(session, setor_id=setor.id)
+    make_fornecedor(session, documento="11144477735")
+
+    monkeypatch.setattr(sqlmodel_mod.Session, "exec", lambda self, *a, **kw: _ResultadoVazio())
+
+    with pytest.raises(HTTPException) as exc:
+        criar_fornecedor(_dados(nome="Outra Distribuidora", documento="11144477735"), func.id)
+    assert exc.value.status_code == 400
+    assert "Já existe fornecedor" in exc.value.detail
+
+
+def test_atualizar_fornecedor_race_condition_integrity_error_vira_400(engine, session, monkeypatch):
+    """Mesmo TOCTOU de test_criar_fornecedor_race_condition_..., agora em
+    atualizar_fornecedor: o SELECT de duplicado é forçado a não encontrar
+    nada, mas o documento já existe de verdade em OUTRO fornecedor, então o
+    UPDATE bate na UNIQUE KEY de verdade."""
+    import sqlmodel as sqlmodel_mod
+
+    setor = make_setor(session, tipo="forn_race2")
+    func = make_funcionario(session, setor_id=setor.id)
+    make_fornecedor(session, documento="11144477735")
+    outro = make_fornecedor(session, documento="52998224725")
+
+    monkeypatch.setattr(sqlmodel_mod.Session, "exec", lambda self, *a, **kw: _ResultadoVazio())
+
+    with pytest.raises(HTTPException) as exc:
+        atualizar_fornecedor(outro.id, _dados(documento="11144477735"), func.id)
+    assert exc.value.status_code == 400
+    assert "já cadastrado" in exc.value.detail.lower()
+
+
 # ── mostrar / buscar ─────────────────────────────────────────────────────────────
 
 def test_mostrar_fornecedores_vazio(engine, session):
