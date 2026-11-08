@@ -35,6 +35,8 @@ iniciar.bat                # Windows
 cd src && uvicorn main:app --reload  # Linux/Mac
 ```
 
+> **Produção:** defina `AMBIENTE=producao` no `.env` para desativar `/docs`, `/redoc` e `/openapi.json`. Essas rotas ficam abertas sem autenticação e expõem toda a estrutura da API; em desenvolvimento (padrão) elas continuam disponíveis.
+
 ## Testes
 
 A suíte usa `pytest` com SQLite em memória (não precisa de MySQL rodando

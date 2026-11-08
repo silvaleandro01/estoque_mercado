@@ -20,6 +20,12 @@ ALLOWED_ORIGINS = [
     if origem.strip()
 ]
 
+# Em desenvolvimento (padrão) /docs, /redoc e /openapi.json ficam disponíveis.
+# Em produção (AMBIENTE=producao) essas rotas são desativadas, pois expõem sem
+# autenticação toda a estrutura da API, incluindo schemas de rotas sensíveis.
+AMBIENTE = os.getenv("AMBIENTE", "desenvolvimento").strip().lower()
+_PRODUCAO = AMBIENTE == "producao"
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -27,7 +33,12 @@ async def lifespan(app: FastAPI):
     yield  # pragma: no cover
 
 
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(
+    lifespan=lifespan,
+    docs_url=None if _PRODUCAO else "/docs",
+    redoc_url=None if _PRODUCAO else "/redoc",
+    openapi_url=None if _PRODUCAO else "/openapi.json",
+)
 
 app.add_middleware(
     CORSMiddleware,
