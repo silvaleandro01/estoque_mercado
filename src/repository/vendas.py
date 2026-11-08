@@ -1,8 +1,10 @@
+from decimal import Decimal
 from datetime import date, datetime, timezone
 from fastapi import HTTPException
 from sqlmodel import Session, select
 
 from utils.database import engine, Estoque, Venda, ItemVenda
+from utils.money import arredondar
 from schemas.schemas import VendaInput
 
 
@@ -12,7 +14,7 @@ def criar_venda(dados: VendaInput, funcionario_id: int):
         session.add(venda)
         session.flush()
 
-        total = 0.0
+        total = Decimal("0.00")
         for item in dados.itens:
             produto = session.exec(
                 select(Estoque).where(Estoque.codigodebarras == item.codigodebarras)
@@ -27,7 +29,7 @@ def criar_venda(dados: VendaInput, funcionario_id: int):
                 raise HTTPException(status_code=400, detail=f"Estoque insuficiente para {produto.nomedoproduto}")
 
             produto.quantidade -= item.quantidade
-            preco_total = produto.preco * item.quantidade
+            preco_total = arredondar(produto.preco * item.quantidade)
             total += preco_total
 
             session.add(ItemVenda(
@@ -38,7 +40,7 @@ def criar_venda(dados: VendaInput, funcionario_id: int):
                 preco_total=preco_total,
             ))
 
-        venda.valor_total = round(total, 2)
+        venda.valor_total = arredondar(total)
         session.add(venda)
         session.commit()
         session.refresh(venda)
@@ -51,7 +53,7 @@ def vendas_do_dia():
         vendas = session.exec(
             select(Venda).where(Venda.data >= datetime(hoje.year, hoje.month, hoje.day, tzinfo=timezone.utc))
         ).all()
-        total = round(sum(v.valor_total for v in vendas), 2)
+        total = arredondar(sum((v.valor_total for v in vendas), Decimal("0.00")))
         return {"data": hoje, "total_vendido": total}
 
 

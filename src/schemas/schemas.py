@@ -1,8 +1,11 @@
 import re
+from decimal import Decimal
 from typing import List, Literal, Optional
 from datetime import date, datetime
 from pydantic import BaseModel, Field, field_validator
 from sqlmodel import SQLModel
+
+from utils.money import DecimalMoeda
 
 Cargo = Literal["operacional", "gerente", "diretoria"]
 
@@ -92,8 +95,8 @@ class EstoqueCreate(BaseModel):
     titulo: Optional[str] = None
     nomedoproduto: str
     quantidade: int = Field(..., ge=0)
-    preco: float = Field(..., gt=0)
-    preco_custo: Optional[float] = Field(default=0.0, ge=0)
+    preco: Decimal = Field(..., gt=0)
+    preco_custo: Optional[Decimal] = Field(default=Decimal("0.00"), ge=0)
     codigodebarras: str
     categoria: str
 
@@ -102,7 +105,7 @@ class EstoqueUpdate(BaseModel):
     titulo: Optional[str] = None
     nomedoproduto: str
     quantidade: int = Field(..., ge=0)
-    preco: float = Field(..., gt=0)
+    preco: Decimal = Field(..., gt=0)
     codigodebarras: str
     categoria: str
 
@@ -133,9 +136,9 @@ class RecuperarSenhaRequest(BaseModel):
 class ItemCompraInput(BaseModel):
     codigodebarras: str
     quantidade: int = Field(..., gt=0)
-    preco_custo: float = Field(..., gt=0)
+    preco_custo: Decimal = Field(..., gt=0)
     nomedoproduto: str
-    preco_venda: float = Field(..., gt=0)
+    preco_venda: Decimal = Field(..., gt=0)
     categoria: str
 
 
@@ -147,8 +150,8 @@ class ItemCompraOut(BaseModel):
     nomedoproduto: str
     codigodebarras: str
     quantidade: int
-    preco_custo: float
-    total: float
+    preco_custo: DecimalMoeda
+    total: DecimalMoeda
 
     model_config = {"from_attributes": True}
 
@@ -158,7 +161,7 @@ class CompraOut(BaseModel):
     data: datetime
     solicitante: str
     aprovador: Optional[str] = None
-    valor_total: float
+    valor_total: DecimalMoeda
     status: str
 
     model_config = {"from_attributes": True}
@@ -171,8 +174,8 @@ class EstoquePendenteOut(BaseModel):
     nomedoproduto: str
     codigodebarras: str
     quantidade: int
-    preco_custo: float
-    preco_venda: Optional[float] = None
+    preco_custo: DecimalMoeda
+    preco_venda: Optional[DecimalMoeda] = None
 
     model_config = {"from_attributes": True}
 
@@ -180,13 +183,13 @@ class EstoquePendenteOut(BaseModel):
 class ConfirmarPendenteInput(BaseModel):
     nomedoproduto: str
     codigodebarras: str
-    preco_venda: float = Field(..., gt=0)
+    preco_venda: Decimal = Field(..., gt=0)
     categoria: str
 
 
 class DespesaInput(BaseModel):
     descricao: str
-    valor: float = Field(..., gt=0)
+    valor: Decimal = Field(..., gt=0)
     categoria: Literal["Fixo", "Variavel", "Manutencao", "Outros"]
 
 

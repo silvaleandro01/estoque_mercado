@@ -1,8 +1,10 @@
+from decimal import Decimal
 from datetime import datetime, timezone
 from fastapi import HTTPException
 from sqlmodel import Session, select
 
 from utils.database import Compra, ItemCompra, Funcionario, engine
+from utils.money import arredondar
 from logs.logs import criar_log
 from schemas.schemas import CompraInput
 
@@ -14,21 +16,31 @@ def _nome_completo(session: Session, funcionario_id: int) -> str:
 
 def registrar_compra(dados: CompraInput, funcionario_id: int):
     with Session(engine) as session:
-        valor_total = sum(item.preco_custo * item.quantidade for item in dados.itens)
-        compra = Compra(solicitante_id=funcionario_id, valor_total=round(valor_total, 2), status="pendente")
+        # Arredonda cada preço unitário (entrada do cliente pode vir com mais
+        # de 2 casas) antes de multiplicar, para que o total do item e o
+        # total do pedido usem sempre o mesmo valor unitário "de verdade"
+        # que será gravado no banco.
+        itens_calculados = [
+            (item, arredondar(item.preco_custo), arredondar(item.preco_venda) if item.preco_venda is not None else None)
+            for item in dados.itens
+        ]
+        valor_total = arredondar(
+            sum((arredondar(preco_custo * item.quantidade) for item, preco_custo, _ in itens_calculados), Decimal("0.00"))
+        )
+        compra = Compra(solicitante_id=funcionario_id, valor_total=valor_total, status="pendente")
         try:
             session.add(compra)
             session.flush()
-            for item in dados.itens:
+            for item, preco_custo, preco_venda in itens_calculados:
                 session.add(ItemCompra(
                     compra_id=compra.id,
                     codigodebarras=item.codigodebarras,
                     nomedoproduto=item.nomedoproduto,
                     categoria=item.categoria,
-                    preco_venda=item.preco_venda,
+                    preco_venda=preco_venda,
                     quantidade=item.quantidade,
-                    preco_custo_unitario=item.preco_custo,
-                    preco_custo_total=round(item.preco_custo * item.quantidade, 2),
+                    preco_custo_unitario=preco_custo,
+                    preco_custo_total=arredondar(preco_custo * item.quantidade),
                 ))
             session.commit()
             session.refresh(compra)
@@ -147,5 +159,5 @@ def compras_do_dia():
                 Compra.data >= datetime(hoje.year, hoje.month, hoje.day, tzinfo=timezone.utc),
             )
         ).all()
-        total = round(sum(c.valor_total for c in compras), 2)
+        total = arredondar(sum((c.valor_total for c in compras), Decimal("0.00")))
         return {"data": hoje, "total": total}
