@@ -208,8 +208,18 @@ class MovimentacaoEstoque(SQLModel, table=True):
     # referência (compra/venda) já explica a origem.
     motivo: Optional[str] = Field(default=None)
     # Quem realizou/disparou a ação (funcionário autenticado na rota que
-    # originou a movimentação).
-    funcionario_id: int = Field(foreign_key="funcionario.id", index=True)
+    # originou a movimentação). OPCIONAL (ondelete="SET NULL") -- CORREÇÃO
+    # do painel de revisão da Fase 4 (CRÍTICO 1): a FK original era NOT NULL
+    # sem ON DELETE nenhum, então excluir um funcionário que já tivesse
+    # QUALQUER movimentação registrada (o caso normal de uso real) quebrava
+    # com IntegrityError/500 -- reproduzido ao vivo contra MySQL real. DECISÃO:
+    # ON DELETE SET NULL (não apagar as movimentações do funcionário
+    # excluído) -- um histórico de auditoria de estoque não deveria sumir só
+    # porque o funcionário saiu da empresa; a movimentação em si (o quê, de
+    # qual produto/lote, quando) continua intacta, só perde a referência de
+    # "quem fez" quando essa pessoa não existe mais. Mesmo padrão já usado
+    # neste projeto para `Estoque.funcionario_id` (também opcional).
+    funcionario_id: Optional[int] = Field(default=None, foreign_key="funcionario.id", ondelete="SET NULL", index=True)
     data: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
 
 

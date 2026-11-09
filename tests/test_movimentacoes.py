@@ -18,13 +18,16 @@ from decimal import Decimal
 
 import pytest
 from fastapi import HTTPException
-from sqlmodel import Session, select
+from sqlalchemy import event, create_engine
+from sqlalchemy.pool import StaticPool
+from sqlmodel import Session, select, SQLModel
 
-from repository.estoque import criar_estoque, confirmar_pendente, listar_pendentes
+from repository.estoque import criar_estoque, confirmar_pendente, listar_pendentes, deletar_estoque
+from repository.funcionarios import deletar_funcionario
 from repository.vendas import criar_venda
 from repository.movimentacoes import registrar_movimentacao, listar_movimentacoes
 from schemas.schemas import EstoqueCreate, VendaInput, ItemVendaSchema, ConfirmarPendenteInput
-from utils.database import Estoque, Lote, MovimentacaoEstoque
+from utils.database import Estoque, Funcionario, Lote, MovimentacaoEstoque
 from conftest import make_setor, make_funcionario, make_produto, make_lote, make_compra, set_token
 
 
@@ -704,3 +707,154 @@ def test_invariante_soma_movimentacoes_operacoes_mistas_com_ajuste_de_inventario
     criar_venda(_venda_input("MOVMISTO001", 15), func.id)
     with Session(engine) as s:
         assert _soma_movimentacoes(s, produto.id) == s.get(Estoque, produto.id).quantidade
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CRÍTICO 1 (revisão do painel -- Fase 4) -- deletar_estoque/deletar_funcionario
+# com movimentação vinculada
+#
+# `migration.sql` criou a FK de `movimentacao_estoque` para `estoque`/`lote`/
+# `funcionario` sem ON DELETE CASCADE -- nem deletar_estoque nem
+# deletar_funcionario foram atualizados nesta fase pra apagar/desvincular as
+# movimentações antes. Mesmo tipo de bug que a Fase 3 já tinha corrigido pra
+# Lote, reintroduzido aqui.
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _engine_com_fk_habilitada(monkeypatch):
+    """Mesmo padrão de tests/test_fornecedores.py::_engine_com_fk_habilitada
+    -- engine SQLite dedicado com PRAGMA foreign_keys=ON via event listener.
+
+    SQLite não aplica FOREIGN KEY por padrão -- o engine global da suíte
+    (fixture `engine` de conftest.py) não habilita essa checagem, então sem
+    isso o bug de deletar_estoque/deletar_funcionario devolvendo
+    IntegrityError/500 cru contra MySQL real nunca seria pego por nenhum
+    teste automatizado, exatamente como o painel de revisão apontou."""
+    from utils import database as db_mod
+    from logs import logs as logs_mod
+    from repository import estoque as est_repo
+    from repository import funcionarios as func_repo
+
+    eng = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+
+    @event.listens_for(eng, "connect")
+    def _habilitar_fk(dbapi_connection, connection_record):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    SQLModel.metadata.create_all(eng)
+    for mod in (db_mod, logs_mod, est_repo, func_repo):
+        monkeypatch.setattr(mod, "engine", eng)
+    return eng
+
+
+def test_deletar_estoque_com_movimentacao_vinculada_nao_quebra(monkeypatch):
+    """CRÍTICO 1a: deletar um produto que já tenha QUALQUER movimentação
+    registrada (com lote_id ou sem) precisa continuar funcionando (200/sem
+    erro), não quebrar com IntegrityError -- o caso normal de uso real, já
+    que toda entrada/venda/ajuste gera uma movimentação."""
+    eng = _engine_com_fk_habilitada(monkeypatch)
+    with Session(eng) as s:
+        setor = make_setor(s, tipo="crit1_del_estoque")
+        func = make_funcionario(s, setor_id=setor.id)
+        produto = make_produto(s, codigo="CRIT1DEL001", qtd=10)
+        lote = make_lote(s, produto.id, codigo_lote="L1", qtd=10, validade=date.today() + timedelta(days=10))
+        # Uma movimentação ligada a um lote e outra sem lote (lote_id=None)
+        # -- cobre as duas FKs que o delete precisa respeitar.
+        s.add(MovimentacaoEstoque(
+            estoque_id=produto.id, lote_id=lote.id, tipo="ENTRADA_COMPRA",
+            quantidade=Decimal("10.000"), funcionario_id=func.id,
+        ))
+        s.add(MovimentacaoEstoque(
+            estoque_id=produto.id, lote_id=None, tipo="AJUSTE_INVENTARIO",
+            quantidade=Decimal("0.000"), motivo="Teste", funcionario_id=func.id,
+        ))
+        s.commit()
+        produto_id = produto.id
+
+    resultado = deletar_estoque(produto_id)
+    assert resultado["msg"] == "Estoque deletado com sucesso"
+
+    with Session(eng) as s:
+        assert s.get(Estoque, produto_id) is None
+        assert s.exec(select(MovimentacaoEstoque).where(MovimentacaoEstoque.estoque_id == produto_id)).all() == []
+
+
+def test_deletar_estoque_emite_delete_de_movimentacoes_antes_de_lotes_e_produto(engine, session, monkeypatch):
+    """Mesmo padrão de tests/test_lotes.py::
+    test_deletar_estoque_emite_delete_de_lotes_antes_do_delete_do_produto --
+    agora cobrindo a cascata manual completa: movimentação -> lote ->
+    produto (não só lote -> produto)."""
+    import sqlmodel as sqlmodel_mod
+
+    setor = make_setor(session, tipo="crit1_ordem")
+    func = make_funcionario(session, setor_id=setor.id)
+    produto = make_produto(session, codigo="CRIT1ORDEM001", qtd=5)
+    make_lote(session, produto.id, codigo_lote="L1", qtd=5, validade=date.today() + timedelta(days=5))
+    with Session(engine) as s:
+        registrar_movimentacao(s, produto.id, "ENTRADA_COMPRA", Decimal("5"), func.id)
+        s.commit()
+
+    eventos = []
+    orig_exec = sqlmodel_mod.Session.exec
+    orig_flush = sqlmodel_mod.Session.flush
+
+    def espiar_exec(self, statement, *args, **kwargs):
+        texto = str(statement).strip().lower()
+        if texto.startswith("delete"):
+            if "movimentacao_estoque" in texto:
+                eventos.append(("delete_mov_query",))
+            elif texto.startswith("delete from lote"):
+                eventos.append(("delete_lote_query",))
+        return orig_exec(self, statement, *args, **kwargs)
+
+    def espiar_flush(self, *args, **kwargs):
+        eventos.append(("flush",))
+        return orig_flush(self, *args, **kwargs)
+
+    monkeypatch.setattr(sqlmodel_mod.Session, "exec", espiar_exec)
+    monkeypatch.setattr(sqlmodel_mod.Session, "flush", espiar_flush)
+
+    deletar_estoque(produto.id)
+
+    tipos = [e[0] for e in eventos]
+    assert "delete_mov_query" in tipos, "esperava um DELETE explícito das movimentações do produto"
+    assert "delete_lote_query" in tipos, "esperava um DELETE explícito dos lotes do produto"
+    idx_mov = tipos.index("delete_mov_query")
+    idx_lote = tipos.index("delete_lote_query")
+    assert idx_mov < idx_lote, "movimentações precisam ser apagadas ANTES dos lotes (lote_id -> lote.id)"
+    assert "flush" in tipos[idx_mov:idx_lote], (
+        "esperava um flush entre o delete das movimentações e o delete dos lotes, "
+        "senão a ordem final fica por conta do SQLAlchemy"
+    )
+
+
+def test_deletar_funcionario_com_movimentacao_vinculada_seta_funcionario_id_null(monkeypatch):
+    """CRÍTICO 1b: deletar um funcionário que já registrou movimentação de
+    estoque precisa continuar funcionando -- DECISÃO: ON DELETE SET NULL
+    (preserva o histórico de auditoria, só anonimiza a autoria) em vez de
+    apagar as movimentações ou bloquear o delete do funcionário."""
+    eng = _engine_com_fk_habilitada(monkeypatch)
+    with Session(eng) as s:
+        setor = make_setor(s, tipo="crit1_del_func")
+        # with_password=False: evita acionar de propósito uma FK PRÉ-EXISTENTE
+        # e totalmente separada (historico_senha.funcionario_id -> funcionario.id,
+        # sem ON DELETE, de uma fase anterior) -- fora do escopo desta
+        # correção (que é só sobre movimentacao_estoque.funcionario_id).
+        func = make_funcionario(s, setor_id=setor.id, with_password=False)
+        produto = make_produto(s, codigo="CRIT1DELFUNC001", qtd=10)
+        mov = MovimentacaoEstoque(
+            estoque_id=produto.id, lote_id=None, tipo="ENTRADA_COMPRA",
+            quantidade=Decimal("10.000"), funcionario_id=func.id,
+        )
+        s.add(mov)
+        s.commit()
+        s.refresh(mov)
+        func_id, mov_id = func.id, mov.id
+
+    resultado = deletar_funcionario(func_id)
+    assert "deletado" in resultado["msg"]
+
+    with Session(eng) as s:
+        assert s.get(Funcionario, func_id) is None
+        mov_db = s.get(MovimentacaoEstoque, mov_id)
+        assert mov_db is not None, "a movimentação não deveria ser apagada -- histórico de auditoria preservado"
+        assert mov_db.funcionario_id is None, "ON DELETE SET NULL deveria anonimizar a autoria, não bloquear o delete"

@@ -471,7 +471,11 @@ CREATE TABLE IF NOT EXISTS `movimentacao_estoque` (
     -- Só obrigatório na camada Pydantic para o ajuste de inventário -- as
     -- demais movimentações não exigem motivo.
     motivo VARCHAR(255) NULL,
-    funcionario_id INT NOT NULL,
+    -- NULL = funcionário autor foi excluído depois (ON DELETE SET NULL
+    -- abaixo) -- ver CRÍTICO 1 da revisão da Fase 4, correção aditiva mais
+    -- abaixo neste arquivo para quem já tinha rodado esta CREATE TABLE
+    -- antes dessa correção existir.
+    funcionario_id INT NULL,
     data DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     INDEX (estoque_id),
     INDEX (lote_id),
@@ -479,5 +483,83 @@ CREATE TABLE IF NOT EXISTS `movimentacao_estoque` (
     INDEX (data),
     FOREIGN KEY (estoque_id) REFERENCES estoque(id),
     FOREIGN KEY (lote_id) REFERENCES lote(id),
-    FOREIGN KEY (funcionario_id) REFERENCES funcionario(id)
+    CONSTRAINT `fk_movimentacao_estoque_funcionario` FOREIGN KEY (funcionario_id) REFERENCES funcionario(id) ON DELETE SET NULL
 ) ENGINE=InnoDB;
+
+-- ============================================================================
+-- Migração aditiva (fix/historico-movimentacoes -- correções do painel de
+-- revisão da Fase 4) -- ver repository/estoque.py::deletar_estoque e
+-- repository/funcionarios.py::deletar_funcionario para o contexto completo
+-- dos dois achados CRÍTICOS corrigidos aqui.
+--
+-- CRÍTICO 1a (deletar_estoque): a FK de `movimentacao_estoque` para
+-- `estoque`/`lote` nunca teve ON DELETE CASCADE nem precisa ter -- a
+-- correção é só na aplicação (deletar_estoque passa a apagar as
+-- movimentações do produto ANTES de apagar lotes e o produto, mesmo padrão
+-- já usado para `Lote` desde a Fase 3). Nenhuma mudança de schema necessária
+-- para essa parte.
+--
+-- CRÍTICO 1b (deletar_funcionario): diferente do caso acima, aqui a correção
+-- É de schema -- `movimentacao_estoque.funcionario_id` passa a aceitar NULL
+-- e sua FK passa a ter ON DELETE SET NULL (em vez de bloquear/quebrar o
+-- DELETE do funcionário com IntegrityError). DECISÃO: preserva o histórico
+-- de movimentação (auditoria de estoque) mesmo depois que o funcionário sai
+-- da empresa, só "anonimizando" a autoria -- em vez de apagar o histórico
+-- junto (destruiria rastreabilidade de auditoria sem necessidade real) ou
+-- bloquear o delete do funcionário (não seria razoável impedir desligar um
+-- funcionário só porque ele mexeu no estoque alguma vez). Mesmo padrão já
+-- usado em `Estoque.funcionario_id`, que já é opcional/nullable nesta mesma
+-- base de código.
+--
+-- Bloco idempotente: para quem já criou a tabela `movimentacao_estoque` com
+-- a definição ANTERIOR (funcionario_id NOT NULL, FK sem ON DELETE), aplica a
+-- mesma correção via ALTER TABLE. Para quem ainda não tem a tabela, a
+-- CREATE TABLE IF NOT EXISTS logo acima já nasce corrigida e este bloco é um
+-- no-op (a stored procedure só age se a FK ainda não estiver como
+-- "SET NULL").
+-- ============================================================================
+
+ALTER TABLE `movimentacao_estoque` MODIFY COLUMN `funcionario_id` INT NULL;
+
+DELIMITER $$
+DROP PROCEDURE IF EXISTS `_set_fk_ondelete_set_null`$$
+CREATE PROCEDURE `_set_fk_ondelete_set_null`(
+    IN p_table VARCHAR(64), IN p_column VARCHAR(64), IN p_ref_table VARCHAR(64),
+    IN p_new_constraint VARCHAR(64)
+)
+BEGIN
+    DECLARE v_constraint_name VARCHAR(64);
+    DECLARE v_delete_rule VARCHAR(20);
+    DECLARE v_done INT DEFAULT 0;
+    DECLARE cur CURSOR FOR
+        SELECT kcu.CONSTRAINT_NAME, rc.DELETE_RULE
+          FROM information_schema.KEY_COLUMN_USAGE kcu
+          JOIN information_schema.REFERENTIAL_CONSTRAINTS rc
+            ON rc.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA AND rc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+         WHERE kcu.TABLE_SCHEMA = DATABASE() AND kcu.TABLE_NAME = p_table
+           AND kcu.COLUMN_NAME = p_column AND kcu.REFERENCED_TABLE_NAME = p_ref_table;
+    DECLARE CONTINUE HANDLER FOR NOT FOUND SET v_done = 1;
+
+    OPEN cur;
+    read_loop: LOOP
+        FETCH cur INTO v_constraint_name, v_delete_rule;
+        IF v_done THEN
+            LEAVE read_loop;
+        END IF;
+
+        IF v_delete_rule IS NULL OR v_delete_rule <> 'SET NULL' THEN
+            SET @ddl_drop = CONCAT('ALTER TABLE `', p_table, '` DROP FOREIGN KEY `', v_constraint_name, '`');
+            PREPARE stmt FROM @ddl_drop; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+            SET @ddl_add = CONCAT('ALTER TABLE `', p_table, '` ADD CONSTRAINT `', p_new_constraint,
+                                   '` FOREIGN KEY (`', p_column, '`) REFERENCES `', p_ref_table, '`(id) ON DELETE SET NULL');
+            PREPARE stmt FROM @ddl_add; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+        END IF;
+    END LOOP;
+    CLOSE cur;
+END$$
+DELIMITER ;
+
+CALL `_set_fk_ondelete_set_null`('movimentacao_estoque', 'funcionario_id', 'funcionario', 'fk_movimentacao_estoque_funcionario');
+
+DROP PROCEDURE IF EXISTS `_set_fk_ondelete_set_null`;

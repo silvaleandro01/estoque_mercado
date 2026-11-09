@@ -197,7 +197,12 @@ class MovimentacaoEstoqueOut(BaseModel):
     tipo: TipoMovimentacao
     quantidade: DecimalQuantidade
     motivo: Optional[str] = None
-    funcionario_id: int
+    # Optional (não mais int obrigatório): CRÍTICO 1 da revisão da Fase 4 --
+    # ON DELETE SET NULL na FK (ver utils.database.MovimentacaoEstoque) faz
+    # este campo virar NULL quando o funcionário autor é excluído depois,
+    # preservando o histórico de movimentação (auditoria) em vez de apagá-lo
+    # ou bloquear a exclusão do funcionário.
+    funcionario_id: Optional[int] = None
     data: datetime
 
     model_config = {"from_attributes": True}

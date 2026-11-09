@@ -4,7 +4,7 @@ from fastapi import HTTPException
 from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, select, delete
 
-from utils.database import Estoque, Compra, ItemCompra, Fornecedor, Lote, engine
+from utils.database import Estoque, Compra, ItemCompra, Fornecedor, Lote, MovimentacaoEstoque, engine
 from utils.money import arredondar
 from utils.quantidade import arredondar_quantidade, validar_quantidade_inteira_se_unidade
 from utils.erros_banco import tratar_operational_error
@@ -279,25 +279,43 @@ def deletar_estoque(estoque_id: int):
         if not estoque:
             raise HTTPException(status_code=404, detail="Estoque não localizado")
         try:
+            # CRÍTICO 1 (revisão da Fase 4): mesmo bug de ordem de delete que
+            # a Fase 3 já tinha corrigido para `Lote`, reintroduzido aqui para
+            # `MovimentacaoEstoque` -- a FK dela para `estoque`/`lote` (ver
+            # migration.sql) também não tem ON DELETE CASCADE, então excluir
+            # um produto que já tivesse QUALQUER movimentação registrada (o
+            # caso normal de uso real, já que toda entrada/venda/ajuste gera
+            # uma) quebrava com IntegrityError/500 -- reproduzido ao vivo
+            # contra MySQL real.
+            #
+            # Ordem correta (cascata manual, mesmo raciocínio do comentário
+            # original abaixo sobre Lote): movimentações PRIMEIRO (elas
+            # referenciam tanto `estoque_id` quanto, opcionalmente,
+            # `lote_id` -- apagar por `estoque_id` cobre as DUAS, já que
+            # `registrar_movimentacao` sempre grava o MESMO estoque_id do
+            # produto, tenha lote_id ou não), DEPOIS lotes, DEPOIS o produto.
+            #
             # Lote é um detalhamento do saldo deste produto (não um
             # histórico independente, diferente de ItemVenda/ItemCompra) --
             # ao excluir o produto, os lotes dele deixam de fazer sentido.
             # Excluídos aqui, na mesma transação, para não violar a FK
             # (lote.estoque_id -> estoque.id) nem deixar lote órfão.
             #
-            # DELETE explícito por query (em vez de carregar cada Lote com
-            # session.exec(select(...)) e marcar para exclusão um a um com
-            # session.delete()), seguido de um flush ANTES de deletar
-            # Estoque: sem isso, o SQLAlchemy decide por conta própria a
-            # ordem do flush (não há Relationship() do SQLModel ligando
-            # Lote<->Estoque neste projeto, só a FK crua) e podia emitir
-            # DELETE FROM estoque ANTES de DELETE FROM lote, batendo na FK
-            # e virando um IntegrityError (1451) cru -- reproduzido ao vivo
-            # contra MySQL real para TODO produto que já tivesse qualquer
-            # lote. O DELETE direto garante a ordem manualmente, sem
-            # depender do unit-of-work adivinhar, e sem introduzir
-            # Relationship()/cascade -- padrão que o resto do schema deste
-            # projeto não usa (só FK crua em todo lugar).
+            # DELETE explícito por query (em vez de carregar cada linha com
+            # session.exec(select(...)) e marcar para exclusão uma a uma com
+            # session.delete()), seguido de um flush ANTES do próximo passo:
+            # sem isso, o SQLAlchemy decide por conta própria a ordem do
+            # flush (não há Relationship() do SQLModel ligando estas tabelas
+            # neste projeto, só a FK crua) e podia emitir o DELETE de uma
+            # tabela "de baixo" antes da "de cima", batendo na FK e virando
+            # um IntegrityError (1451) cru -- reproduzido ao vivo contra
+            # MySQL real para TODO produto que já tivesse qualquer lote (e,
+            # agora, qualquer movimentação). O DELETE direto garante a ordem
+            # manualmente, sem depender do unit-of-work adivinhar, e sem
+            # introduzir Relationship()/cascade -- padrão que o resto do
+            # schema deste projeto não usa (só FK crua em todo lugar).
+            session.exec(delete(MovimentacaoEstoque).where(MovimentacaoEstoque.estoque_id == estoque_id))
+            session.flush()
             session.exec(delete(Lote).where(Lote.estoque_id == estoque_id))
             session.flush()
             session.delete(estoque)
