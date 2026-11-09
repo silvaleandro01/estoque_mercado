@@ -10,6 +10,22 @@ function escapeHtml(valor) {
         .replace(/'/g, '&#39;');
 }
 
+// Modal genérico (Fase 4 -- ajuste de inventário / histórico de
+// movimentações): injeta o HTML recebido dentro do container fixo
+// #modal-box (ver index.html) e mostra o overlay. Reaproveitado por
+// qualquer tela que precise de um formulário/visualização sobreposta --
+// sem introduzir nenhum framework novo, só toggle da classe .hidden, mesmo
+// padrão já usado em todo o resto do app.
+function abrirModal(html) {
+    document.getElementById('modal-box').innerHTML = html;
+    document.getElementById('modal-overlay').classList.remove('hidden');
+}
+
+function fecharModal() {
+    document.getElementById('modal-overlay').classList.add('hidden');
+    document.getElementById('modal-box').innerHTML = '';
+}
+
 // Produtos por unidade (UN) continuam exibidos como número inteiro; produtos
 // vendidos por peso/volume (KG/L) mostram até 3 casas decimais, sem zeros
 // supérfluos à direita (0.350 -> "0.35", mas 1 -> "1").
@@ -536,7 +552,7 @@ async function carregarEstoque() {
         <h3>Produtos Cadastrados</h3>
         <table>
             <thead>
-                <tr><th>ID</th><th>Produto</th><th>Cód. Barras</th><th>Qtd</th><th>Estoque Mín.</th><th>Fornecedor</th><th>Preço</th>${podeEditar ? '<th>Ações</th>' : ''}</tr>
+                <tr><th>ID</th><th>Produto</th><th>Cód. Barras</th><th>Qtd</th><th>Estoque Mín.</th><th>Fornecedor</th><th>Preço</th><th>Histórico</th>${podeEditar ? '<th>Ações</th>' : ''}</tr>
             </thead>
             <tbody>
     `;
@@ -561,7 +577,11 @@ async function carregarEstoque() {
                 <td>${formatarQuantidade(p.estoque_minimo || 0, p.unidade_medida)} ${labelUnidade(p.unidade_medida)}</td>
                 <td>${fornecedorNome ? escapeHtml(fornecedorNome) : '-'}</td>
                 <td>R$ ${p.preco}</td>
+                <td>
+                    <button class="btn" style="padding: 5px; font-size: 0.7rem; background: #7f8c8d;" onclick="abrirHistoricoMovimentacoes(${p.id})">Ver histórico</button>
+                </td>
                 ${podeEditar ? `<td>
+                    <button class="btn" style="padding: 5px; font-size: 0.7rem; background: #9b59b6; color: white;" onclick="abrirAjustarInventario(${p.id})">Ajustar Inventário</button>
                     <button class="btn" style="padding: 5px; font-size: 0.7rem; background: #ff9800; color: white;" onclick="prepararEdicaoEstoque(${p.id})">Editar</button>
                     <button class="btn-danger" style="padding: 5px; font-size: 0.7rem;" onclick="removerProduto(${p.id})">Excluir</button>
                 </td>` : ''}
@@ -705,6 +725,116 @@ async function removerProduto(id) {
     }
 }
 
+// Ajuste de inventário (Fase 4): único jeito de corrigir manualmente a
+// quantidade de um produto a partir desta fase -- PUT /estoque/atualizar
+// não mexe mais em quantidade (só metadado: nome, preço, categoria,
+// unidade de medida). Todo ajuste aqui exige motivo e vira uma
+// movimentação AJUSTE_INVENTARIO no histórico do produto.
+function abrirAjustarInventario(id) {
+    const p = cacheProdutos.find(prod => prod.id === id);
+    if (!p) return;
+    const step = p.unidade_medida === 'UN' ? '1' : '0.001';
+    abrirModal(`
+        <div class="card" style="width:420px;">
+            <h3>Ajustar Inventário</h3>
+            <p style="color:#666; margin-top:-8px;">${escapeHtml(p.nomedoproduto)} -- quantidade atual: <strong>${formatarQuantidade(p.quantidade, p.unidade_medida)} ${labelUnidade(p.unidade_medida)}</strong></p>
+            <div class="form-group" style="grid-template-columns: 1fr;">
+                <div>
+                    <label style="font-size:0.8rem; color:#666; display:block; margin-bottom:4px;">Nova quantidade (${labelUnidade(p.unidade_medida)})</label>
+                    <input class="form-control" type="number" step="${step}" min="0" id="ajuste-nova-qtd" value="${formatarQuantidade(p.quantidade, p.unidade_medida)}">
+                </div>
+                <div>
+                    <label style="font-size:0.8rem; color:#666; display:block; margin-bottom:4px;">Motivo do ajuste (obrigatório)</label>
+                    <textarea class="form-control" id="ajuste-motivo" rows="3" placeholder="Ex: contagem física, perda não contabilizada, correção de erro de lançamento..."></textarea>
+                </div>
+            </div>
+            <div style="display:flex; gap:10px; justify-content:flex-end;">
+                <button class="btn" onclick="fecharModal()">Cancelar</button>
+                <button class="btn-success" onclick="salvarAjusteInventario(${id})">Confirmar Ajuste</button>
+            </div>
+        </div>
+    `);
+}
+
+async function salvarAjusteInventario(id) {
+    const novaQtdEl = document.getElementById('ajuste-nova-qtd');
+    const motivoEl = document.getElementById('ajuste-motivo');
+    const novaQtd = parseFloat(novaQtdEl.value);
+    const motivo = motivoEl.value.trim();
+
+    if (isNaN(novaQtd) || novaQtd < 0) {
+        alert('Informe uma quantidade válida (maior ou igual a zero).');
+        return;
+    }
+    if (!motivo) {
+        alert('O motivo do ajuste é obrigatório.');
+        return;
+    }
+
+    const res = await apiFetch(`/estoque/${id}/ajustar-inventario`, {
+        method: 'POST',
+        body: JSON.stringify({ nova_quantidade: novaQtd, motivo: motivo }),
+    });
+    if (res) {
+        alert('Inventário ajustado com sucesso!');
+        fecharModal();
+        carregarEstoque();
+    }
+}
+
+// Histórico de movimentações (Fase 4): lista as movimentações registradas
+// para este produto (ENTRADA_COMPRA, VENDA, AJUSTE_INVENTARIO e demais
+// tipos já previstos para fases futuras), mais recente primeiro -- mesma
+// ordenação já devolvida pelo endpoint (GET /estoque/{id}/movimentacoes).
+const LABEL_TIPO_MOVIMENTACAO = {
+    ENTRADA_COMPRA: 'Entrada (compra)',
+    VENDA: 'Venda',
+    CANCELAMENTO_VENDA: 'Cancelamento de venda',
+    PERDA: 'Perda',
+    QUEBRA: 'Quebra',
+    VENCIMENTO: 'Vencimento',
+    AJUSTE_INVENTARIO: 'Ajuste de inventário',
+};
+
+async function abrirHistoricoMovimentacoes(id) {
+    const p = cacheProdutos.find(prod => prod.id === id);
+    const movimentacoes = await apiFetch(`/estoque/${id}/movimentacoes`, {}, true);
+    if (!movimentacoes) {
+        alert('Não foi possível carregar o histórico de movimentações (verifique suas permissões).');
+        return;
+    }
+
+    const unidade = p ? p.unidade_medida : 'UN';
+    abrirModal(`
+        <div class="card" style="width:720px; max-width:85vw;">
+            <h3>Histórico de Movimentações${p ? `: ${escapeHtml(p.nomedoproduto)}` : ''}</h3>
+            ${movimentacoes.length === 0 ? '<p style="color:#666;">Nenhuma movimentação registrada para este produto ainda.</p>' : `
+            <table>
+                <thead>
+                    <tr><th>Data</th><th>Tipo</th><th>Quantidade</th><th>Lote</th><th>Motivo</th></tr>
+                </thead>
+                <tbody>
+                    ${movimentacoes.map(m => {
+                        const positiva = Number(m.quantidade) >= 0;
+                        const sinal = positiva ? '+' : '';
+                        return `
+                        <tr>
+                            <td>${new Date(m.data).toLocaleString()}</td>
+                            <td>${escapeHtml(LABEL_TIPO_MOVIMENTACAO[m.tipo] || m.tipo)}</td>
+                            <td style="color:${positiva ? '#27ae60' : '#e74c3c'}; font-weight:bold;">${sinal}${formatarQuantidade(m.quantidade, unidade)} ${labelUnidade(unidade)}</td>
+                            <td>${m.lote_id != null ? '#' + m.lote_id : '-'}</td>
+                            <td>${m.motivo ? escapeHtml(m.motivo) : '-'}</td>
+                        </tr>
+                    `; }).join('')}
+                </tbody>
+            </table>`}
+            <div style="text-align:right; margin-top:16px;">
+                <button class="btn" onclick="fecharModal()">Fechar</button>
+            </div>
+        </div>
+    `);
+}
+
 async function carregarMovimentacao() {
     const container = document.getElementById('view-movimentacao');
     container.innerHTML = '<h3>Carregando histórico...</h3>';
@@ -743,7 +873,14 @@ function prepararEdicaoEstoque(id) {
     document.getElementById('novo-prod-nome').value = p.nomedoproduto;
     document.getElementById('novo-prod-codigo').value = p.codigodebarras;
     document.getElementById('novo-prod-unidade').value = p.unidade_medida || 'UN';
-    document.getElementById('novo-prod-qtd').value = p.quantidade;
+    // Fase 4: PUT /estoque/atualizar não muda mais quantidade (ver
+    // docstring de schemas.EstoqueUpdate) -- o campo fica desabilitado em
+    // modo edição só pra mostrar o saldo atual (não editável por aqui);
+    // use "Ajustar Inventário" pra corrigir o saldo manualmente.
+    const campoQtdEdicao = document.getElementById('novo-prod-qtd');
+    campoQtdEdicao.value = p.quantidade;
+    campoQtdEdicao.disabled = true;
+    campoQtdEdicao.title = 'Quantidade não é editável aqui -- use "Ajustar Inventário" na linha do produto.';
     document.getElementById('novo-prod-estoque-minimo').value = p.estoque_minimo || 0;
     document.getElementById('novo-prod-preco').value = p.preco;
     document.getElementById('novo-prod-cat').value = p.categoria;
@@ -761,6 +898,13 @@ function prepararEdicaoEstoque(id) {
 function cancelarEdicaoEstoque() {
     editandoProdutoId = null;
     document.getElementById('form-estoque-title').innerText = "Cadastrar Novo Produto";
+    // Reabilita o campo de quantidade (desabilitado em modo edição, ver
+    // prepararEdicaoEstoque) pro próximo cadastro de produto novo.
+    const campoQtdEdicao = document.getElementById('novo-prod-qtd');
+    if (campoQtdEdicao) {
+        campoQtdEdicao.disabled = false;
+        campoQtdEdicao.title = '';
+    }
     const btnContainer = document.getElementById('estoque-btn-container');
     btnContainer.innerHTML = `<button class="btn-success" onclick="adicionarProduto()">Salvar Produto</button>`;
     carregarEstoque();
@@ -772,7 +916,6 @@ async function adicionarProduto() {
         nomedoproduto: document.getElementById('novo-prod-nome').value,
         codigodebarras: document.getElementById('novo-prod-codigo').value,
         unidade_medida: document.getElementById('novo-prod-unidade').value,
-        quantidade: parseFloat(document.getElementById('novo-prod-qtd').value),
         estoque_minimo: parseFloat(document.getElementById('novo-prod-estoque-minimo').value) || 0,
         preco: parseFloat(document.getElementById('novo-prod-preco').value),
         categoria: document.getElementById('novo-prod-cat').value,
@@ -782,11 +925,15 @@ async function adicionarProduto() {
 
     let res;
     if (editandoProdutoId) {
+        // Fase 4: PUT /estoque/atualizar não aceita mais `quantidade` (ver
+        // schemas.EstoqueUpdate) -- não envia o campo neste caminho, só no
+        // cadastro/incremento (POST /estoque/inserir) logo abaixo.
         res = await apiFetch(`/estoque/atualizar/${editandoProdutoId}`, {
             method: 'PUT',
             body: JSON.stringify(dados)
         });
     } else {
+        dados.quantidade = parseFloat(document.getElementById('novo-prod-qtd').value);
         res = await apiFetch('/estoque/inserir', {
             method: 'POST',
             body: JSON.stringify(dados)
