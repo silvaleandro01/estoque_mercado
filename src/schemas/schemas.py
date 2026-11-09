@@ -185,9 +185,16 @@ class AjusteInventarioInput(BaseModel):
     próprio tipo + referência à compra/venda já explica a origem) -- um
     ajuste de inventário só existe porque algo precisa ser explicado (perda
     não contabilizada, erro de contagem anterior, etc.).
+
+    IMPORTANTE 2 (revisão da Fase 4): `max_length=255` -- a coluna real
+    (MovimentacaoEstoque.motivo / migration.sql) é VARCHAR(255). Sem este
+    limite aqui, um motivo maior que 255 caracteres passava pelo Pydantic
+    sem erro e só quebrava lá na frente, contra o banco, com um erro de
+    banco não tratado em vez de um 422 limpo (mesmo raciocínio já aplicado
+    em DECIMAL_10_2/DECIMAL_10_3 para os campos numéricos deste arquivo).
     """
     nova_quantidade: Decimal = Field(..., ge=0, **DECIMAL_10_3)
-    motivo: str = Field(..., min_length=1)
+    motivo: str = Field(..., min_length=1, max_length=255)
 
     @field_validator("motivo")
     @classmethod

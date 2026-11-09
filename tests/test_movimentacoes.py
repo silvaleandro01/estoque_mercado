@@ -532,6 +532,80 @@ def test_rota_movimentacoes_produto_inexistente_404(client):
     assert r.status_code == 404
 
 
+# ── IMPORTANTE 4 (revisão do painel -- Fase 4) -- paginação ─────────────────
+# Sem limite, o endpoint devolvia o histórico INTEIRO de uma vez -- num
+# produto com uso pesado de longo prazo isso cresce sem parar (~600ms com 20
+# mil linhas, medido pelo painel). limit/offset com default razoável (50) e
+# teto máximo (200).
+
+def _criar_movimentacoes(session, engine, produto_id, func_id, quantidade):
+    with Session(engine) as s:
+        for _ in range(quantidade):
+            registrar_movimentacao(s, produto_id, "AJUSTE_INVENTARIO", Decimal("1"), func_id)
+        s.commit()
+
+
+def test_listar_movimentacoes_aplica_limit_padrao(engine, session):
+    setor = make_setor(session, tipo="pag1")
+    func = make_funcionario(session, setor_id=setor.id)
+    produto = make_produto(session, codigo="PAG001", qtd=10)
+    _criar_movimentacoes(session, engine, produto.id, func.id, 60)
+
+    movs = listar_movimentacoes(produto.id)
+    assert len(movs) == 50  # LIMIT_PADRAO
+
+
+def test_listar_movimentacoes_respeita_limit_e_offset_informados(engine, session):
+    setor = make_setor(session, tipo="pag2")
+    func = make_funcionario(session, setor_id=setor.id)
+    produto = make_produto(session, codigo="PAG002", qtd=10)
+    _criar_movimentacoes(session, engine, produto.id, func.id, 10)
+
+    primeira_pagina = listar_movimentacoes(produto.id, limit=4, offset=0)
+    segunda_pagina = listar_movimentacoes(produto.id, limit=4, offset=4)
+    assert len(primeira_pagina) == 4
+    assert len(segunda_pagina) == 4
+    # Mais recente primeiro, sem sobreposição entre páginas.
+    ids_primeira = {m.id for m in primeira_pagina}
+    ids_segunda = {m.id for m in segunda_pagina}
+    assert ids_primeira.isdisjoint(ids_segunda)
+
+
+def test_listar_movimentacoes_limit_acima_do_teto_e_limitado(engine, session):
+    """Mesmo que alguém peça um limit absurdamente alto diretamente na
+    função (chamada fora da rota, que já valida le= na camada Pydantic/
+    FastAPI), o repository aplica o teto máximo por conta própria."""
+    setor = make_setor(session, tipo="pag3")
+    func = make_funcionario(session, setor_id=setor.id)
+    produto = make_produto(session, codigo="PAG003", qtd=10)
+    _criar_movimentacoes(session, engine, produto.id, func.id, 250)
+
+    movs = listar_movimentacoes(produto.id, limit=10_000)
+    assert len(movs) == 200  # LIMIT_MAXIMO
+
+
+def test_rota_movimentacoes_limit_acima_do_teto_rejeitado_com_422(client, session, engine):
+    produto = make_produto(session, codigo="PAG004", qtd=10)
+    setor = make_setor(session, tipo="estoque")
+    func = make_funcionario(session, setor_id=setor.id)
+    token = set_token(session, func)
+
+    r = client.get(f"/estoque/{produto.id}/movimentacoes?limit=201", headers=_headers(token))
+    assert r.status_code == 422
+
+
+def test_rota_movimentacoes_aceita_limit_e_offset_customizados(client, session, engine):
+    produto = make_produto(session, codigo="PAG005", qtd=10)
+    setor = make_setor(session, tipo="estoque")
+    func = make_funcionario(session, setor_id=setor.id)
+    token = set_token(session, func)
+    _criar_movimentacoes(session, engine, produto.id, func.id, 10)
+
+    r = client.get(f"/estoque/{produto.id}/movimentacoes?limit=3&offset=2", headers=_headers(token))
+    assert r.status_code == 200
+    assert len(r.json()) == 3
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # AJUSTE_INVENTARIO -- POST /estoque/{id}/ajustar-inventario (Fase 4)
 #
@@ -628,6 +702,39 @@ def test_ajustar_inventario_motivo_vazio_rejeitado_na_api(client, session, engin
         headers=_headers(token),
     )
     assert r.status_code == 422
+
+
+def test_ajustar_inventario_motivo_maior_que_255_rejeitado_na_api(client, session, engine):
+    """IMPORTANTE 2 (revisão da Fase 4): a coluna real
+    (MovimentacaoEstoque.motivo) é VARCHAR(255) -- um motivo maior que isso
+    precisa virar um 422 limpo na borda da API, não quebrar lá na frente
+    contra o banco com um erro de banco não tratado."""
+    produto = make_produto(session, codigo="AJUSTE005", qtd=10)
+    setor = make_setor(session, tipo="estoque")
+    func = make_funcionario(session, setor_id=setor.id)
+    token = set_token(session, func)
+
+    r = client.post(
+        f"/estoque/{produto.id}/ajustar-inventario",
+        json={"nova_quantidade": 5, "motivo": "x" * 256},
+        headers=_headers(token),
+    )
+    assert r.status_code == 422
+
+
+def test_ajustar_inventario_motivo_com_255_caracteres_e_aceito(client, session, engine):
+    """Limite exato (255) continua válido -- só acima disso é rejeitado."""
+    produto = make_produto(session, codigo="AJUSTE006", qtd=10)
+    setor = make_setor(session, tipo="estoque")
+    func = make_funcionario(session, setor_id=setor.id)
+    token = set_token(session, func)
+
+    r = client.post(
+        f"/estoque/{produto.id}/ajustar-inventario",
+        json={"nova_quantidade": 5, "motivo": "x" * 255},
+        headers=_headers(token),
+    )
+    assert r.status_code == 200
 
 
 def test_ajustar_inventario_produto_inexistente_404(engine, session):

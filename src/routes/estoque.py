@@ -13,7 +13,7 @@ from repository.estoque import (
     ajustar_inventario,
 )
 from repository.lotes import listar_alerta_vencimento
-from repository.movimentacoes import listar_movimentacoes
+from repository.movimentacoes import listar_movimentacoes, LIMIT_PADRAO, LIMIT_MAXIMO
 
 router = APIRouter(prefix="/estoque", tags=["Estoque"])
 
@@ -73,6 +73,11 @@ def ajustar_inventario_rota(estoque_id: int, dados: AjusteInventarioInput, funci
 
 
 @router.get("/{estoque_id}/movimentacoes", response_model=List[MovimentacaoEstoqueOut])
-def movimentacoes(estoque_id: int, funcionario=Depends(get_funcionario)):
+def movimentacoes(
+    estoque_id: int,
+    limit: int = Query(default=LIMIT_PADRAO, ge=1, le=LIMIT_MAXIMO),
+    offset: int = Query(default=0, ge=0),
+    funcionario=Depends(get_funcionario),
+):
     verificar_permissao(funcionario, "estoque")
-    return listar_movimentacoes(estoque_id)
+    return listar_movimentacoes(estoque_id, limit=limit, offset=offset)

@@ -49,11 +49,25 @@ def registrar_movimentacao(
     return movimentacao
 
 
-def listar_movimentacoes(estoque_id: int):
+# IMPORTANTE 4 (revisão da Fase 4): sem paginação, o endpoint devolvia o
+# histórico INTEIRO de uma vez -- num produto com uso pesado de longo prazo
+# isso cresce sem parar (medido pelo painel de revisão: ~600ms com 20 mil
+# linhas, payload JSON enorme). LIMIT_PADRAO é usado quando o chamador não
+# informa `limit`; LIMIT_MAXIMO é um teto absoluto (mesmo que alguém peça
+# mais) -- protege o endpoint mesmo que o parâmetro venha de uma origem que
+# não respeite o `le=` já validado na camada Pydantic/FastAPI (rota
+# chamada diretamente como função, por exemplo).
+LIMIT_PADRAO = 50
+LIMIT_MAXIMO = 200
+
+
+def listar_movimentacoes(estoque_id: int, limit: int = LIMIT_PADRAO, offset: int = 0):
     """Lista o histórico de movimentações de um produto, mais recente
-    primeiro. Abre sua própria sessão -- diferente de `registrar_movimentacao`,
-    é só leitura, sempre chamada isoladamente (rota GET), nunca dentro da
-    transação de outra escrita."""
+    primeiro, paginado. Abre sua própria sessão -- diferente de
+    `registrar_movimentacao`, é só leitura, sempre chamada isoladamente
+    (rota GET), nunca dentro da transação de outra escrita."""
+    limit = max(1, min(limit, LIMIT_MAXIMO))
+    offset = max(0, offset)
     with Session(engine) as session:
         if not session.get(Estoque, estoque_id):
             raise HTTPException(status_code=404, detail="Estoque não localizado")
@@ -61,4 +75,6 @@ def listar_movimentacoes(estoque_id: int):
             select(MovimentacaoEstoque)
             .where(MovimentacaoEstoque.estoque_id == estoque_id)
             .order_by(MovimentacaoEstoque.data.desc(), MovimentacaoEstoque.id.desc())
+            .offset(offset)
+            .limit(limit)
         ).all()
