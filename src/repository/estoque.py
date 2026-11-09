@@ -9,7 +9,7 @@ from utils.money import arredondar
 from utils.quantidade import arredondar_quantidade, validar_quantidade_inteira_se_unidade
 from utils.erros_banco import tratar_operational_error
 from logs.logs import criar_log
-from schemas.schemas import EstoqueCreate, EstoqueUpdate, ConfirmarPendenteInput
+from schemas.schemas import EstoqueCreate, EstoqueUpdate, ConfirmarPendenteInput, AjusteInventarioInput
 from repository.lotes import reconciliar_lote_sem_validade, criar_lote
 from repository.movimentacoes import registrar_movimentacao
 
@@ -154,18 +154,21 @@ def buscar_estoque(estoque_id: int):
 
 
 def atualizar_estoque(estoque_id: int, dados: EstoqueUpdate, funcionario_id: int):
+    """PUT /estoque/atualizar: a partir da Fase 4, só edita METADADO do
+    produto (nome, preço, categoria, unidade de medida, etc.) -- nunca mais
+    `quantidade` (ver docstring de schemas.EstoqueUpdate sobre a decisão de
+    arquitetura; alteração de saldo manual agora é sempre via
+    `ajustar_inventario`, que exige motivo e gera uma movimentação
+    AJUSTE_INVENTARIO).
+
+    with_for_update(): mesma trava usada em criar_estoque/confirmar_pendente/
+    criar_venda/ajustar_inventario. Mesmo este endpoint não escrevendo mais
+    em `quantidade`, a trava continua valendo a pena: serializa esta edição
+    contra um ajuste de inventário concorrente no MESMO produto (ex.: evita
+    que a validação de unidade_medida abaixo, feita contra `estoque.
+    quantidade` lido aqui, fique baseada num valor que um ajuste concorrente
+    está prestes a mudar)."""
     with Session(engine) as session:
-        # with_for_update(): mesma trava usada em criar_estoque/
-        # confirmar_pendente/criar_venda. Sem ela, duas edições concorrentes
-        # (ou uma edição concorrendo com qualquer outra entrada de estoque
-        # do mesmo produto) podiam ler a mesma `quantidade` "antiga" e uma
-        # sobrescrever o resultado da outra ao salvar (lost update) --
-        # pré-existente antes desta fase, mas que agora alimenta direto
-        # reconciliar_lote_sem_validade, amplificando o lost update de
-        # Estoque.quantidade para uma divergência permanente também em
-        # Lote.quantidade (confirmado: 15/15 rodadas de PUT concorrente
-        # real contra MySQL quebraram a invariante, sem nenhuma exceção
-        # reportada).
         estoque = session.exec(
             select(Estoque).where(Estoque.id == estoque_id).with_for_update()
         ).first()
@@ -180,14 +183,17 @@ def atualizar_estoque(estoque_id: int, dados: EstoqueUpdate, funcionario_id: int
         if produto_existente and produto_existente.id != estoque.id:
             raise HTTPException(status_code=400, detail="Código de barras já cadastrado em outro produto")
 
-        # Atualização: a unidade de medida em si também vem do payload (o
-        # formulário de edição permite trocar UN/KG/L do produto), então
-        # valida contra o valor que o próprio PUT está definindo.
-        validar_quantidade_inteira_se_unidade(dados.quantidade, dados.unidade_medida, dados.nomedoproduto)
+        # A unidade de medida em si vem do payload (o formulário de edição
+        # permite trocar UN/KG/L do produto) -- mas a quantidade usada na
+        # validação é a JÁ EXISTENTE do produto (não vem mais do payload):
+        # sem isso, um PUT poderia trocar um produto KG com saldo
+        # fracionário (ex.: 1.5) para UN sem nenhum erro, deixando o
+        # produto com uma quantidade fracionária "escondida" sob uma
+        # unidade que não permite fração.
+        validar_quantidade_inteira_se_unidade(estoque.quantidade, dados.unidade_medida, dados.nomedoproduto)
 
         estoque.titulo = dados.titulo
         estoque.nomedoproduto = dados.nomedoproduto
-        estoque.quantidade = arredondar_quantidade(dados.quantidade)
         estoque.unidade_medida = dados.unidade_medida
         estoque.estoque_minimo = arredondar_quantidade(dados.estoque_minimo)
         estoque.preco = arredondar(dados.preco)
@@ -195,13 +201,6 @@ def atualizar_estoque(estoque_id: int, dados: EstoqueUpdate, funcionario_id: int
         estoque.categoria = dados.categoria
         estoque.funcionario_id = funcionario_id
         estoque.fornecedor_id = dados.fornecedor_id
-
-        # PUT sobrescreve a quantidade total (não é um delta como o
-        # incremento de criar_estoque) -- reconciliar_lote_sem_validade
-        # recalcula o residual do zero a partir do saldo final já
-        # atribuído acima, então funciona igual nos dois casos (não
-        # precisa calcular a diferença entre o valor novo e o antigo).
-        reconciliar_lote_sem_validade(session, estoque.id)
 
         try:
             session.commit()
@@ -214,6 +213,64 @@ def atualizar_estoque(estoque_id: int, dados: EstoqueUpdate, funcionario_id: int
         except Exception:
             session.rollback()
             raise HTTPException(status_code=500, detail="Erro ao atualizar estoque")
+
+
+def ajustar_inventario(estoque_id: int, dados: AjusteInventarioInput, funcionario_id: int):
+    """POST /estoque/{id}/ajustar-inventario (Fase 4): único ponto de
+    alteração manual de saldo a partir desta fase (ver docstring de
+    schemas.EstoqueUpdate). Sempre exige `motivo` (validado na camada
+    Pydantic, schemas.AjusteInventarioInput) e gera uma movimentação
+    AJUSTE_INVENTARIO com o delta assinado (positivo se aumenta o saldo,
+    negativo se reduz).
+
+    Mesmo padrão de lock/deadlock dos outros pontos de escrita de estoque
+    (with_for_update() + tratar_operational_error) -- este é um ponto de
+    escrita NOVO desta fase, e a Fase 3 já teve a lição de deixar um ponto
+    de escrita novo sem essas proteções (ver histórico de
+    repository/estoque.py)."""
+    with Session(engine) as session:
+        estoque = session.exec(
+            select(Estoque).where(Estoque.id == estoque_id).with_for_update()
+        ).first()
+        if not estoque:
+            raise HTTPException(status_code=404, detail="Estoque não localizado")
+
+        validar_quantidade_inteira_se_unidade(dados.nova_quantidade, estoque.unidade_medida, estoque.nomedoproduto)
+
+        nova_quantidade = arredondar_quantidade(dados.nova_quantidade)
+        delta = arredondar_quantidade(nova_quantidade - estoque.quantidade)
+
+        estoque.quantidade = nova_quantidade
+        estoque.funcionario_id = funcionario_id
+        session.add(estoque)
+
+        # Só mexe em Lote/gera movimentação se o saldo realmente mudou --
+        # uma contagem que confirma o saldo já registrado (delta == 0) não
+        # deixa rastro nenhum, não há nada pra reconciliar nem pra
+        # registrar (mesmo raciocínio de no-op já usado em
+        # reconciliar_lote_sem_validade quando o residual é 0).
+        if delta != 0:
+            # PUT sobrescrevia a quantidade total e reconciliava o lote
+            # "sem validade" a partir do saldo final -- esse comportamento
+            # migrou pra cá junto com a responsabilidade de alterar saldo
+            # manualmente (ver docstring de schemas.EstoqueUpdate).
+            reconciliar_lote_sem_validade(session, estoque.id)
+            registrar_movimentacao(
+                session, estoque.id, "AJUSTE_INVENTARIO", delta, funcionario_id,
+                motivo=dados.motivo,
+            )
+
+        try:
+            session.commit()
+            session.refresh(estoque)
+            criar_log(funcionario_id, f"Ajuste de inventário: {estoque.nomedoproduto} ({dados.motivo})")
+            return estoque
+        except OperationalError as exc:
+            session.rollback()
+            tratar_operational_error(exc, "Não foi possível ajustar o inventário, tente novamente")
+        except Exception:
+            session.rollback()
+            raise HTTPException(status_code=500, detail="Erro ao ajustar inventário")
 
 
 def deletar_estoque(estoque_id: int):

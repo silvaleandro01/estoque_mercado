@@ -21,11 +21,13 @@ def _dados_create(codigo="111", nome="Pao", qtd=10, preco=5.0, custo=2.0, cat="P
     )
 
 
-def _dados_update(codigo="111", nome="Pao Atualizado", qtd=20, preco=6.0, cat="Padaria",
+def _dados_update(codigo="111", nome="Pao Atualizado", preco=6.0, cat="Padaria",
                    unidade="UN", estoque_minimo=Decimal("0.000")):
+    # Fase 4: EstoqueUpdate não tem mais `quantidade` (ver docstring do
+    # schema) -- este helper nunca mudou quantidade de verdade desde então.
     return EstoqueUpdate(
         titulo=nome, nomedoproduto=nome,
-        quantidade=qtd, unidade_medida=unidade, estoque_minimo=estoque_minimo, preco=preco,
+        unidade_medida=unidade, estoque_minimo=estoque_minimo, preco=preco,
         codigodebarras=codigo, categoria=cat,
     )
 
@@ -136,19 +138,33 @@ def test_buscar_estoque_inexistente(engine, session):
 def test_atualizar_estoque_sucesso(engine, session):
     setor = make_setor(session, tipo="upd_est")
     func = make_funcionario(session, setor_id=setor.id)
-    p = make_produto(session, codigo="UPD001")
-    dados = _dados_update(codigo="UPD001", nome="Produto Atualizado", qtd=99, preco=15.0)
+    p = make_produto(session, codigo="UPD001", qtd=50)
+    dados = _dados_update(codigo="UPD001", nome="Produto Atualizado", preco=15.0)
     resultado = atualizar_estoque(p.id, dados, func.id)
     assert resultado.nomedoproduto == "Produto Atualizado"
-    assert resultado.quantidade == 99
     assert resultado.preco == 15.0
+
+
+def test_atualizar_estoque_nao_muda_quantidade(engine, session):
+    """
+    Fase 4: PUT /estoque/atualizar não mexe mais em quantidade (ver
+    docstring de schemas.EstoqueUpdate) -- `EstoqueUpdate` nem tem mais
+    esse campo. Alteração de saldo manual agora é sempre via
+    `ajustar_inventario` (POST /estoque/{id}/ajustar-inventario).
+    """
+    setor = make_setor(session, tipo="upd_est_qtd")
+    func = make_funcionario(session, setor_id=setor.id)
+    p = make_produto(session, codigo="UPDQTD001", qtd=50)
+    dados = _dados_update(codigo="UPDQTD001", nome="Produto Atualizado", preco=15.0)
+    resultado = atualizar_estoque(p.id, dados, func.id)
+    assert resultado.quantidade == Decimal("50.000")
 
 
 def test_atualizar_estoque_mesmo_codigo(engine, session):
     setor = make_setor(session, tipo="upd_est2")
     func = make_funcionario(session, setor_id=setor.id)
     p = make_produto(session, codigo="SAME001")
-    dados = _dados_update(codigo="SAME001", nome="Mesmo Codigo", qtd=50, preco=8.0)
+    dados = _dados_update(codigo="SAME001", nome="Mesmo Codigo", preco=8.0)
     resultado = atualizar_estoque(p.id, dados, func.id)
     assert resultado.codigodebarras == "SAME001"
 
@@ -290,7 +306,7 @@ def test_atualizar_estoque_unidade_medida(engine, session):
     func = make_funcionario(session, setor_id=setor.id)
     p = make_produto(session, codigo="UNIDUPD001", unidade="UN")
     dados = EstoqueUpdate(
-        nomedoproduto="Produto Atualizado", quantidade=10, unidade_medida="KG",
+        nomedoproduto="Produto Atualizado", unidade_medida="KG",
         estoque_minimo=Decimal("0.000"), preco=12.0, codigodebarras="UNIDUPD001", categoria="Geral",
     )
     resultado = atualizar_estoque(p.id, dados, func.id)
@@ -379,7 +395,7 @@ def test_atualizar_estoque_minimo(engine, session):
     func = make_funcionario(session, setor_id=setor.id)
     p = make_produto(session, codigo="MINUPD001")
     dados = EstoqueUpdate(
-        nomedoproduto="Produto Atualizado", quantidade=10, unidade_medida="UN",
+        nomedoproduto="Produto Atualizado", unidade_medida="UN",
         estoque_minimo=Decimal("3.000"), preco=12.0, codigodebarras="MINUPD001", categoria="Geral",
     )
     resultado = atualizar_estoque(p.id, dados, func.id)
@@ -442,12 +458,20 @@ def test_criar_estoque_incremento_un_rejeita_quantidade_fracionaria(engine, sess
     assert "unidade inteira" in exc.value.detail
 
 
-def test_atualizar_estoque_un_rejeita_quantidade_fracionaria(engine, session):
+def test_atualizar_estoque_un_rejeita_quando_quantidade_atual_e_fracionaria(engine, session):
+    """
+    Fase 4: `quantidade` saiu de EstoqueUpdate -- PUT não recebe mais
+    quantidade no payload (ver docstring do schema). A validação "produto
+    UN só aceita quantidade inteira" passa a ser feita contra a quantidade
+    JÁ EXISTENTE do produto: um PUT que tente trocar a unidade de medida
+    para UN de um produto que hoje tem saldo fracionário (ex.: 1.5 kg)
+    precisa continuar sendo rejeitado.
+    """
     setor = make_setor(session, tipo="un_frac_upd")
     func = make_funcionario(session, setor_id=setor.id)
-    p = make_produto(session, codigo="UNFRACUPD001", unidade="UN")
+    p = make_produto(session, codigo="UNFRACUPD001", unidade="KG", qtd=Decimal("1.500"))
     dados = EstoqueUpdate(
-        nomedoproduto="Produto", quantidade=Decimal("1.500"), unidade_medida="UN",
+        nomedoproduto="Produto", unidade_medida="UN",
         estoque_minimo=Decimal("0.000"), preco=10.0, codigodebarras="UNFRACUPD001", categoria="Geral",
     )
     with pytest.raises(HTTPException) as exc:
@@ -619,7 +643,7 @@ def test_atualizar_estoque_deadlock_mysql_vira_409_nao_500(engine, session, monk
     monkeypatch.setattr(sqlmodel_mod.Session, "commit", commit_que_falha)
 
     with pytest.raises(HTTPException) as exc:
-        atualizar_estoque(produto.id, _dados_update(codigo="DLEST003", qtd=9), func.id)
+        atualizar_estoque(produto.id, _dados_update(codigo="DLEST003"), func.id)
 
     assert exc.value.status_code == 409
     assert "tente novamente" in exc.value.detail.lower()
@@ -649,7 +673,7 @@ def test_atualizar_estoque_outro_operational_error_nao_vira_409(engine, session,
     monkeypatch.setattr(sqlmodel_mod.Session, "commit", commit_que_falha_outro_erro)
 
     with pytest.raises(OperationalError):
-        atualizar_estoque(produto.id, _dados_update(codigo="DLEST004", qtd=9), func.id)
+        atualizar_estoque(produto.id, _dados_update(codigo="DLEST004"), func.id)
 
 
 def test_atualizar_estoque_consulta_produto_com_lock_for_update(engine, session, monkeypatch):
@@ -684,7 +708,7 @@ def test_atualizar_estoque_consulta_produto_com_lock_for_update(engine, session,
         return orig_exec(self, statement, *args, **kwargs)
 
     monkeypatch.setattr(sqlmodel_mod.Session, "exec", espiar_exec)
-    dados = _dados_update(codigo="LOCKEST002", qtd=15)
+    dados = _dados_update(codigo="LOCKEST002")
     atualizar_estoque(produto.id, dados, func.id)
 
     assert statements, "esperava que atualizar_estoque consultasse o produto via session.exec"

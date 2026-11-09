@@ -134,22 +134,60 @@ class EstoqueCreate(BaseModel):
 
 
 class EstoqueUpdate(BaseModel):
+    """
+    DECISÃO DE ARQUITETURA (Fase 4 -- "histórico de movimentações"): até a
+    Fase 3, este schema também incluía `quantidade`, e PUT /estoque/atualizar
+    era o único ponto de alteração de saldo que não vinha de um evento de
+    negócio claro (venda, compra) -- permitia mudar a quantidade livremente,
+    sem pedir motivo nenhum. A partir desta fase, alteração manual de saldo
+    (correção de inventário) tem um endpoint PRÓPRIO e dedicado
+    (POST /estoque/{id}/ajustar-inventario, ver schemas.AjusteInventarioInput
+    e repository.estoque.ajustar_inventario), que exige `motivo` e gera uma
+    movimentação AJUSTE_INVENTARIO -- um fluxo de inventário é conceitualmente
+    diferente de "editar o cadastro do produto". Por isso `quantidade` saiu
+    deste schema: PUT /estoque/atualizar agora só edita METADADO do produto
+    (nome, preço, categoria, etc.), nunca mais o saldo.
+    """
     titulo: Optional[str] = None
     nomedoproduto: str
-    quantidade: Decimal = Field(..., ge=0, **DECIMAL_10_3)
     # Diferente de EstoqueCreate (onde faz sentido ter default, já que é um
     # cadastro novo), aqui os dois campos são obrigatórios -- sem default --
-    # igual aos outros campos deste schema (nomedoproduto, quantidade,
-    # preco, etc.). Um PUT que esqueça de enviar unidade_medida/
-    # estoque_minimo não pode resetar silenciosamente esses valores do
-    # produto para "UN"/0 -- precisa falhar com 422 e deixar claro que o
-    # payload está incompleto.
+    # igual aos outros campos deste schema (nomedoproduto, preco, etc.). Um
+    # PUT que esqueça de enviar unidade_medida/estoque_minimo não pode
+    # resetar silenciosamente esses valores do produto para "UN"/0 --
+    # precisa falhar com 422 e deixar claro que o payload está incompleto.
     unidade_medida: UnidadeMedida
     estoque_minimo: Decimal = Field(..., ge=0, **DECIMAL_10_3)
     preco: Decimal = Field(..., gt=0, **DECIMAL_10_2)
     codigodebarras: str
     categoria: str
     fornecedor_id: Optional[int] = None
+
+
+class AjusteInventarioInput(BaseModel):
+    """Entrada do novo endpoint POST /estoque/{id}/ajustar-inventario (Fase
+    4), a única forma de corrigir manualmente o saldo de um produto a partir
+    desta fase (ver docstring de EstoqueUpdate). `nova_quantidade` é o saldo
+    ABSOLUTO final do produto após a contagem/correção (não um delta) --
+    mesmo contrato que PUT /estoque/atualizar já usava para `quantidade`
+    antes desta fase, só que agora isolado num endpoint que exige motivo.
+    `motivo` é SEMPRE obrigatório, diferente de ENTRADA_COMPRA/VENDA (onde o
+    próprio tipo + referência à compra/venda já explica a origem) -- um
+    ajuste de inventário só existe porque algo precisa ser explicado (perda
+    não contabilizada, erro de contagem anterior, etc.).
+    """
+    nova_quantidade: Decimal = Field(..., ge=0, **DECIMAL_10_3)
+    motivo: str = Field(..., min_length=1)
+
+    @field_validator("motivo")
+    @classmethod
+    def validar_motivo(cls, v: str) -> str:
+        """Mesma razão de ConfirmarPendenteInput.validar_codigo_lote:
+        `min_length=1` sozinho aceita uma string só de espaços em branco."""
+        v = v.strip()
+        if not v:
+            raise ValueError("motivo não pode ser vazio")
+        return v
 
 
 class MovimentacaoEstoqueOut(BaseModel):
