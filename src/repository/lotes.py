@@ -28,7 +28,7 @@ desperdício por vencimento).
 
 from decimal import Decimal
 from datetime import datetime, timezone, date, timedelta
-from typing import Optional
+from typing import List, Optional, Tuple
 
 from fastapi import HTTPException
 from sqlmodel import Session, select
@@ -154,11 +154,17 @@ def criar_lote(session: Session, estoque_id: int, codigo_lote: str, quantidade: 
     return lote
 
 
-def consumir_fefo(session: Session, estoque_id: int, quantidade: Decimal, nome_produto: str) -> None:
+def consumir_fefo(session: Session, estoque_id: int, quantidade: Decimal, nome_produto: str) -> List[Tuple[int, Decimal]]:
     """
     Baixa `quantidade` dos lotes do produto, sempre do que vence mais cedo
     primeiro (First Expired, First Out) -- se um lote não bastar sozinho,
     continua baixando do(s) próximo(s) por ordem de validade até completar.
+
+    Retorna a lista de consumos (lote_id, quantidade baixada DESSE lote),
+    um item por lote tocado -- usado por repository/vendas.py (Fase 4) para
+    registrar uma movimentação VENDA POR LOTE consumido (cada consumo de
+    lote é um evento distinto, não uma linha só agregando tudo), em vez de
+    uma única movimentação para a venda inteira.
 
     IMPORTANTE (ordem de chamada): deve ser chamada DEPOIS de travar
     (`with_for_update()`) e confirmar que `Estoque.quantidade >= quantidade`,
@@ -204,6 +210,7 @@ def consumir_fefo(session: Session, estoque_id: int, quantidade: Decimal, nome_p
     )
 
     restante = arredondar_quantidade(quantidade)
+    consumos: List[Tuple[int, Decimal]] = []
     for lote in lotes_ordenados:
         if restante <= 0:
             break
@@ -211,9 +218,13 @@ def consumir_fefo(session: Session, estoque_id: int, quantidade: Decimal, nome_p
         lote.quantidade = arredondar_quantidade(lote.quantidade - baixa)
         restante = arredondar_quantidade(restante - baixa)
         session.add(lote)
+        if baixa > 0:
+            consumos.append((lote.id, baixa))
 
     if restante > 0:
         raise HTTPException(status_code=400, detail=f"Estoque insuficiente para {nome_produto}")
+
+    return consumos
 
 
 def listar_alerta_vencimento(dias: int = 7):

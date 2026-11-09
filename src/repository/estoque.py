@@ -11,6 +11,7 @@ from utils.erros_banco import tratar_operational_error
 from logs.logs import criar_log
 from schemas.schemas import EstoqueCreate, EstoqueUpdate, ConfirmarPendenteInput
 from repository.lotes import reconciliar_lote_sem_validade, criar_lote
+from repository.movimentacoes import registrar_movimentacao
 
 
 def _validar_fornecedor(session: Session, fornecedor_id):
@@ -56,6 +57,22 @@ def criar_estoque(dados: EstoqueCreate, funcionario_id: int):
             # registrado em nenhum lote). Mantém a invariante soma(Lote.
             # quantidade) == Estoque.quantidade (ver repository/lotes.py).
             reconciliar_lote_sem_validade(session, produto_existente.id)
+            # Histórico de movimentações (Fase 4): incremento manual via
+            # /estoque/inserir é tratado como ENTRADA_COMPRA (entrada de
+            # saldo fora do fluxo formal de compra/confirmação de
+            # pendente, mas ainda assim uma entrada por aquisição, não uma
+            # correção de inventário -- essa tem endpoint e motivo próprios,
+            # ver ajustar_inventario). Sem lote_id: este incremento não cria
+            # nenhum lote rastreado específico, só mexe no residual "sem
+            # validade" acima -- ver docstring de MovimentacaoEstoque sobre
+            # quando lote_id fica de fora. Pula quando dados.quantidade é 0
+            # (nada de fato entrou), mesmo raciocínio de no-op já usado em
+            # reconciliar_lote_sem_validade.
+            if dados.quantidade != 0:
+                registrar_movimentacao(
+                    session, produto_existente.id, "ENTRADA_COMPRA",
+                    dados.quantidade, funcionario_id,
+                )
             try:
                 session.commit()
                 session.refresh(produto_existente)
@@ -102,6 +119,15 @@ def criar_estoque(dados: EstoqueCreate, funcionario_id: int):
             # quantidade inicial é 0 (residual fica 0), então chama
             # incondicionalmente.
             reconciliar_lote_sem_validade(session, estoque.id)
+            # Histórico de movimentações (Fase 4): cadastro novo com
+            # quantidade inicial > 0 também é uma ENTRADA_COMPRA (mesmo
+            # raciocínio do incremento acima). Pula quando a quantidade
+            # inicial é 0 (cadastro de produto sem estoque ainda).
+            if estoque.quantidade != 0:
+                registrar_movimentacao(
+                    session, estoque.id, "ENTRADA_COMPRA",
+                    estoque.quantidade, funcionario_id,
+                )
             session.commit()
             session.refresh(estoque)
             criar_log(funcionario_id, f"Inclusão de produto: {estoque.nomedoproduto}")
@@ -272,7 +298,7 @@ def confirmar_pendente(item_id: int, dados: ConfirmarPendenteInput, funcionario_
             # manual via /estoque/inserir, aqui cria um lote RASTREADO de
             # verdade (não cai no lote "sem validade"), já que o
             # lote/validade reais vieram do formulário de confirmação.
-            criar_lote(session, produto_existente.id, dados.codigo_lote, item.quantidade, dados.validade)
+            lote = criar_lote(session, produto_existente.id, dados.codigo_lote, item.quantidade, dados.validade)
             # Reconcilia o lote "sem validade" do produto: se o produto já
             # tinha saldo pré-existente que não estava em NENHUM lote
             # (produto legado, cadastrado antes desta fase, ou nunca
@@ -282,6 +308,13 @@ def confirmar_pendente(item_id: int, dados: ConfirmarPendenteInput, funcionario_
             # vazia a partir daqui (ver docstring de
             # reconciliar_lote_sem_validade, cenário C).
             reconciliar_lote_sem_validade(session, produto_existente.id)
+            # Histórico de movimentações (Fase 4): ligada ao lote RASTREADO
+            # recém-criado acima (diferente do incremento manual via
+            # /estoque/inserir, aqui há um lote/validade reais por trás).
+            registrar_movimentacao(
+                session, produto_existente.id, "ENTRADA_COMPRA",
+                item.quantidade, funcionario_id, lote_id=lote.id,
+            )
             nome_produto = produto_existente.nomedoproduto
         else:
             # Produto novo (não existia ainda com esse código de barras):
@@ -305,12 +338,16 @@ def confirmar_pendente(item_id: int, dados: ConfirmarPendenteInput, funcionario_
             )
             session.add(novo)
             session.flush()  # para ter novo.id antes de criar o lote abaixo
-            criar_lote(session, novo.id, dados.codigo_lote, item.quantidade, dados.validade)
+            lote = criar_lote(session, novo.id, dados.codigo_lote, item.quantidade, dados.validade)
             # Produto novo: residual esperado é 0 (toda a quantidade já
             # está no lote recém-criado acima), mas chama mesmo assim por
             # consistência/defesa em profundidade -- é um no-op barato
             # quando o residual já é 0.
             reconciliar_lote_sem_validade(session, novo.id)
+            registrar_movimentacao(
+                session, novo.id, "ENTRADA_COMPRA",
+                item.quantidade, funcionario_id, lote_id=lote.id,
+            )
             nome_produto = novo.nomedoproduto
 
         item.lancado_em = datetime.now(timezone.utc)

@@ -432,3 +432,52 @@ SELECT e.id, 'LEGADO', e.quantidade, NULL, NOW()
 FROM `estoque` e
 WHERE e.quantidade > 0
   AND NOT EXISTS (SELECT 1 FROM `lote` l WHERE l.estoque_id = e.id);
+
+-- ============================================================================
+-- Migração aditiva (feat/historico-movimentacoes) -- Fase 4: histórico de
+-- movimentações de estoque. Tabela nova (CREATE TABLE IF NOT EXISTS, mesmo
+-- padrão das migrações anteriores), sem DROP/TRUNCATE, idempotente.
+--
+-- DECISÃO DE ARQUITETURA (ver também utils.database.MovimentacaoEstoque e
+-- repository/movimentacoes.py, no código da aplicação): toda alteração de
+-- `estoque.quantidade`/`lote.quantidade` passa a gerar uma linha aqui, na
+-- mesma transação da alteração. `quantidade` é sempre SIGNED (positiva =
+-- entrada, negativa = saída); a soma das quantidades de um produto, desde
+-- sempre, deve bater com `estoque.quantidade` atual desse produto -- mesma
+-- lógica de invariante já estabelecida para `lote` na fase anterior.
+--
+-- Dado existente: produtos/lotes cadastrados ANTES desta fase NÃO ganham
+-- histórico de movimentação retroativo -- diferente da migração de `lote`
+-- acima (que pré-popula um "lote legado" cobrindo o saldo existente), aqui
+-- não há como reconstruir de forma confiável QUEM fez CADA alteração
+-- histórica de quantidade, então nenhum INSERT de dado retroativo é feito.
+-- O histórico de movimentações só começa a existir a partir de agora, para
+-- toda alteração de saldo que ocorrer DAQUI PRA FRENTE.
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS `movimentacao_estoque` (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    estoque_id INT NOT NULL,
+    -- NULL = movimentação não ligada a um lote específico (ex.: incremento
+    -- manual via /estoque/inserir, ajuste de inventário) -- ver nota acima
+    -- e docstring de MovimentacaoEstoque.
+    lote_id INT NULL,
+    -- ENTRADA_COMPRA, VENDA, CANCELAMENTO_VENDA, PERDA, QUEBRA, VENCIMENTO
+    -- ou AJUSTE_INVENTARIO -- validado na camada Pydantic
+    -- (schemas.TipoMovimentacao), guardado aqui como VARCHAR simples, mesmo
+    -- padrão já usado para `funcionario.cargo`/`estoque.unidade_medida`.
+    tipo VARCHAR(30) NOT NULL,
+    quantidade DECIMAL(10, 3) NOT NULL,
+    -- Só obrigatório na camada Pydantic para o ajuste de inventário -- as
+    -- demais movimentações não exigem motivo.
+    motivo VARCHAR(255) NULL,
+    funcionario_id INT NOT NULL,
+    data DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX (estoque_id),
+    INDEX (lote_id),
+    INDEX (tipo),
+    INDEX (data),
+    FOREIGN KEY (estoque_id) REFERENCES estoque(id),
+    FOREIGN KEY (lote_id) REFERENCES lote(id),
+    FOREIGN KEY (funcionario_id) REFERENCES funcionario(id)
+) ENGINE=InnoDB;

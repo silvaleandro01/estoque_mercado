@@ -19,6 +19,19 @@ Cargo = Literal["operacional", "gerente", "diretoria"]
 # lugares (ver também `Funcionario.cargo`, que segue a mesma convenção).
 UnidadeMedida = Literal["UN", "KG", "L"]
 
+# Tipos de movimentação de estoque (Fase 4 -- "histórico de movimentações").
+# Mesmo padrão de `Cargo`/`UnidadeMedida`: valor fixo validado aqui na camada
+# Pydantic, coluna no banco (MovimentacaoEstoque.tipo) um VARCHAR simples,
+# sem ENUM do MySQL. Só ENTRADA_COMPRA, VENDA e AJUSTE_INVENTARIO têm código
+# que realmente os gera nesta fase -- os demais (CANCELAMENTO_VENDA, PERDA,
+# QUEBRA, VENCIMENTO) já ficam disponíveis no tipo para quando as fases
+# futuras que os disparam chegarem (ver docstring de
+# utils.database.MovimentacaoEstoque).
+TipoMovimentacao = Literal[
+    "ENTRADA_COMPRA", "VENDA", "CANCELAMENTO_VENDA",
+    "PERDA", "QUEBRA", "VENCIMENTO", "AJUSTE_INVENTARIO",
+]
+
 # Todas as colunas monetárias do banco são DECIMAL(10, 2): no máximo 8
 # dígitos inteiros + 2 decimais (até 99999999.99). Sem essa validação aqui,
 # um valor absurdamente grande (ex.: 999999999999.99) passa pelo Pydantic
@@ -137,6 +150,19 @@ class EstoqueUpdate(BaseModel):
     codigodebarras: str
     categoria: str
     fornecedor_id: Optional[int] = None
+
+
+class MovimentacaoEstoqueOut(BaseModel):
+    id: int
+    estoque_id: int
+    lote_id: Optional[int] = None
+    tipo: TipoMovimentacao
+    quantidade: DecimalQuantidade
+    motivo: Optional[str] = None
+    funcionario_id: int
+    data: datetime
+
+    model_config = {"from_attributes": True}
 
 
 class ItemVendaSchema(BaseModel):

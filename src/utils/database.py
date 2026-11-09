@@ -137,6 +137,82 @@ class Lote(SQLModel, table=True):
     data_entrada: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+class MovimentacaoEstoque(SQLModel, table=True):
+    """Histórico de movimentações de estoque (Fase 4 -- "histórico de
+    movimentações"). Toda alteração de `Estoque.quantidade` e/ou
+    `Lote.quantidade` feita pelos pontos de escrita que o produto já tinha
+    antes desta fase (criar_estoque, confirmar_pendente, criar_venda) e pelo
+    novo ponto de escrita desta fase (ajustar_inventario) grava uma linha
+    aqui, na MESMA transação da alteração -- nunca commita sozinha (mesmo
+    padrão de `Lote`/repository/lotes.py: quem chama é responsável por
+    commitar tudo junto).
+
+    __tablename__ = "movimentacaoestoque" (nome default do SQLModel a partir
+    do nome da classe) -- ver migration.sql, que usa o nome
+    `movimentacao_estoque` só na migração manual (snake_case por legibilidade
+    do SQL), reconciliado via `__tablename__` explícito logo abaixo.
+
+    CONVENÇÃO DE SINAL: `quantidade` é sempre SIGNED -- positiva para
+    entrada (ENTRADA_COMPRA), negativa para saída (VENDA, e
+    AJUSTE_INVENTARIO quando reduz o saldo; positiva quando o ajuste
+    aumenta). A soma de `quantidade` de todas as movimentações de um
+    produto, desde sempre, deve bater com `Estoque.quantidade` atual desse
+    produto -- a mesma invariante central já estabelecida para `Lote` na
+    Fase 3, agora também para o histórico de movimentações (ver
+    tests/test_movimentacoes.py).
+
+    `lote_id` é OPCIONAL: nem toda movimentação está ligada a um lote
+    específico. Entrada manual (POST /estoque/inserir, cadastro novo ou
+    incremento) e ajuste de inventário mexem só no saldo TOTAL do produto,
+    sem apontar pra um lote em particular -- o detalhamento desses casos
+    por lote já é tratado à parte por `reconciliar_lote_sem_validade`
+    (recalcula o residual do "lote sem validade" do zero, sem precisar de
+    uma movimentação própria por lote; ver docstring de `Lote`). Quando HÁ
+    um lote específico de verdade envolvido -- entrada rastreada via
+    confirmação de compra pendente (criar_lote), ou consumo FEFO numa venda
+    (consumir_fefo) -- `lote_id` aponta pra ele, e nesse caso a soma das
+    movimentações ligadas àquele lote específico também bate com o saldo
+    atual desse lote (soma(MovimentacaoEstoque.quantidade de um lote_id) ==
+    Lote.quantidade desse lote) -- EXCETO para o "lote sem validade"
+    (legado), cujo saldo é um residual recalculado, não um histórico
+    incremental de movimentações.
+
+    Só `ENTRADA_COMPRA`, `VENDA` e `AJUSTE_INVENTARIO` têm código que
+    realmente os gera nesta fase (ver repository/estoque.py,
+    repository/vendas.py). `CANCELAMENTO_VENDA`, `PERDA`, `QUEBRA` e
+    `VENCIMENTO` já existem no enum (schemas.TipoMovimentacao) só para
+    quando as fases futuras que os disparam (cancelamento de venda --
+    Fase 8; baixa por perda/quebra/vencimento -- fase futura) chegarem --
+    nenhum fluxo que os gere está implementado ainda.
+
+    Produtos/lotes cadastrados ANTES desta fase não têm histórico de
+    movimentação retroativo -- não é reconstruído, o histórico só começa a
+    partir de agora (mesma regra já aplicada ao "lote legado" na Fase 3,
+    ver migration.sql).
+    """
+    __tablename__ = "movimentacao_estoque"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    estoque_id: int = Field(foreign_key="estoque.id", index=True)
+    lote_id: Optional[int] = Field(default=None, foreign_key="lote.id", index=True)
+    # Valor fixo validado na camada Pydantic (schemas.TipoMovimentacao),
+    # guardado aqui como texto simples -- mesmo padrão já usado para
+    # `Funcionario.cargo`/`Estoque.unidade_medida`.
+    tipo: str = Field(index=True)
+    # Decimal(10,3): mesma precisão de Estoque.quantidade/Lote.quantidade.
+    # SIGNED -- ver convenção de sinal na docstring da classe.
+    quantidade: DecimalQuantidade = Field(max_digits=10, decimal_places=3)
+    # Só obrigatório na camada Pydantic para o endpoint de ajuste de
+    # inventário (schemas.AjusteInventarioInput) -- as demais movimentações
+    # (ENTRADA_COMPRA, VENDA) não exigem motivo, já que o próprio tipo +
+    # referência (compra/venda) já explica a origem.
+    motivo: Optional[str] = Field(default=None)
+    # Quem realizou/disparou a ação (funcionário autenticado na rota que
+    # originou a movimentação).
+    funcionario_id: int = Field(foreign_key="funcionario.id", index=True)
+    data: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
+
+
 class Venda(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     data: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
