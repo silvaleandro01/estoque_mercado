@@ -788,6 +788,7 @@ async function salvarAjusteInventario(id) {
 // ordenação já devolvida pelo endpoint (GET /estoque/{id}/movimentacoes).
 const LABEL_TIPO_MOVIMENTACAO = {
     ENTRADA_COMPRA: 'Entrada (compra)',
+    ENTRADA_MANUAL: 'Entrada (manual)',
     VENDA: 'Venda',
     CANCELAMENTO_VENDA: 'Cancelamento de venda',
     PERDA: 'Perda',

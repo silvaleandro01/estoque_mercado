@@ -5,8 +5,10 @@ arquitetura completa (convenção de sinal, quando `lote_id` é usado, quais
 tipos já têm código que os gera nesta fase).
 
 Esta primeira parte cobre a infraestrutura (registrar/listar), a geração de
-ENTRADA_COMPRA (cadastro novo, incremento manual, confirmação de pendente) e
-de VENDA (uma movimentação POR LOTE consumido via FEFO), além da invariante
+ENTRADA_MANUAL (cadastro novo e incremento manual via criar_estoque) e
+ENTRADA_COMPRA (confirmação de pendente -- entrada rastreada via
+compra/fornecedor de verdade), e de VENDA (uma movimentação POR LOTE
+consumido via FEFO), além da invariante
 central soma(MovimentacaoEstoque.quantidade de um produto) ==
 Estoque.quantidade e da invariante por lote rastreado. AJUSTE_INVENTARIO é
 coberto à parte (ver seção correspondente mais abaixo, adicionada junto com
@@ -119,9 +121,13 @@ def test_listar_movimentacoes_ordena_mais_recente_primeiro(engine, session):
     assert movs[1].quantidade == Decimal("1.000")
 
 
-# ── ENTRADA_COMPRA via criar_estoque (cadastro novo + incremento) ───────────
+# ── ENTRADA_MANUAL via criar_estoque (cadastro novo + incremento) ──────────
+# IMPORTANTE 5 (revisão da Fase 4): criar_estoque (cadastro e incremento, os
+# dois caminhos de POST /estoque/inserir) passa a gerar ENTRADA_MANUAL, não
+# mais ENTRADA_COMPRA -- esse tipo fica reservado só para confirmar_pendente
+# (entrada rastreada via compra/fornecedor de verdade).
 
-def test_criar_estoque_cadastro_novo_gera_entrada_compra(engine, session):
+def test_criar_estoque_cadastro_novo_gera_entrada_manual(engine, session):
     setor = make_setor(session, tipo="mov_cad1")
     func = make_funcionario(session, setor_id=setor.id)
     produto = criar_estoque(
@@ -132,7 +138,7 @@ def test_criar_estoque_cadastro_novo_gera_entrada_compra(engine, session):
     with Session(engine) as s:
         movs = _movimentacoes(s, produto.id)
         assert len(movs) == 1
-        assert movs[0].tipo == "ENTRADA_COMPRA"
+        assert movs[0].tipo == "ENTRADA_MANUAL"
         assert movs[0].quantidade == Decimal("20.000")
         # CRÍTICO 2 (revisão da Fase 4): lote_id agora aponta pro lote "sem
         # validade" (reconciliado pelo próprio cadastro), não mais None --
@@ -144,7 +150,12 @@ def test_criar_estoque_cadastro_novo_gera_entrada_compra(engine, session):
         assert movs[0].funcionario_id == func.id
 
 
-def test_criar_estoque_cadastro_com_quantidade_zero_nao_gera_movimentacao(engine, session):
+def test_criar_estoque_cadastro_com_quantidade_zero_gera_movimentacao_zerada(engine, session):
+    """IMPORTANTE 6 (revisão da Fase 4): diferente de incremento/ajuste em
+    produto JÁ existente (onde delta == 0 continua pulando o registro), o
+    CADASTRO de um produto novo sempre gera uma movimentação -- mesmo com
+    saldo inicial 0 -- deixando um rastro auditável de "quando o produto
+    nasceu" dentro do domínio de movimentações de estoque."""
     setor = make_setor(session, tipo="mov_cad0")
     func = make_funcionario(session, setor_id=setor.id)
     produto = criar_estoque(
@@ -153,10 +164,17 @@ def test_criar_estoque_cadastro_com_quantidade_zero_nao_gera_movimentacao(engine
         func.id,
     )
     with Session(engine) as s:
-        assert _movimentacoes(s, produto.id) == []
+        movs = _movimentacoes(s, produto.id)
+        assert len(movs) == 1
+        assert movs[0].tipo == "ENTRADA_MANUAL"
+        assert movs[0].quantidade == Decimal("0.000")
+        # Saldo 0: reconciliar_lote_sem_validade não cria lote nenhum
+        # (residual fica 0), então esta movimentação de criação fica sem
+        # lote_id mesmo.
+        assert movs[0].lote_id is None
 
 
-def test_criar_estoque_incremento_gera_entrada_compra(engine, session):
+def test_criar_estoque_incremento_gera_entrada_manual(engine, session):
     """Base criada via criar_estoque (cadastro), não make_produto direto --
     um produto 100% nascido dentro da Fase 4 não tem saldo legado
     pré-existente não rastreado, então o delta do incremento no lote "sem
@@ -181,7 +199,7 @@ def test_criar_estoque_incremento_gera_entrada_compra(engine, session):
         # (quantidade=5) -- ambas ligadas ao mesmo lote "sem validade".
         assert len(movs) == 2
         incremento = max(movs, key=lambda m: m.id)
-        assert incremento.tipo == "ENTRADA_COMPRA"
+        assert incremento.tipo == "ENTRADA_MANUAL"
         assert incremento.quantidade == Decimal("5.000")
         assert incremento.lote_id is not None
         lote_residual = s.exec(select(Lote).where(Lote.estoque_id == produto.id)).first()
@@ -783,7 +801,7 @@ def test_invariante_soma_movimentacoes_operacoes_mistas_com_ajuste_de_inventario
     setor = make_setor(session, tipo="mov_inv_completa")
     func = make_funcionario(session, setor_id=setor.id)
 
-    # 1) Cadastro com quantidade inicial -> ENTRADA_COMPRA.
+    # 1) Cadastro com quantidade inicial -> ENTRADA_MANUAL.
     produto = criar_estoque(
         EstoqueCreate(nomedoproduto="Produto Misto", quantidade=Decimal("30"),
                       preco=Decimal("10.00"), codigodebarras="MOVMISTO001", categoria="Geral"),
@@ -982,3 +1000,89 @@ def test_deletar_funcionario_com_movimentacao_vinculada_seta_funcionario_id_null
         mov_db = s.get(MovimentacaoEstoque, mov_id)
         assert mov_db is not None, "a movimentação não deveria ser apagada -- histórico de auditoria preservado"
         assert mov_db.funcionario_id is None, "ON DELETE SET NULL deveria anonimizar a autoria, não bloquear o delete"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# IMPORTANTE 1 (revisão do painel -- Fase 4) -- registrar_movimentacao (e o
+# bloco que a acompanha) precisa estar DENTRO do try/except de deadlock
+#
+# registrar_movimentacao() chama session.flush() imediatamente, disparando o
+# INSERT contra o banco. Em 3 de 4 pontos novos (criar_estoque/incremento,
+# confirmar_pendente/os dois ramos, ajustar_inventario) essa chamada estava
+# ANTES do bloco try/except OperationalError -- um deadlock durante esse
+# flush especificamente escaparia do tratamento e viraria 500 cru. Os testes
+# abaixo monkeypatcham Session.flush para falhar especificamente quando há
+# uma MovimentacaoEstoque pendente (ou seja, bem na hora do flush de
+# registrar_movimentacao, não em qualquer flush/autoflush anterior da
+# função) -- diferente dos testes de deadlock já existentes (que
+# monkeypatcham session.commit, e por isso não pegavam esta regressão
+# específica).
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _flush_falha_com_movimentacao_pendente(monkeypatch):
+    import sqlmodel as sqlmodel_mod
+
+    orig_flush = sqlmodel_mod.Session.flush
+
+    def flush_que_falha(self, *args, **kwargs):
+        if any(isinstance(obj, MovimentacaoEstoque) for obj in self.new):
+            raise _deadlock_mysql()
+        return orig_flush(self, *args, **kwargs)
+
+    monkeypatch.setattr(sqlmodel_mod.Session, "flush", flush_que_falha)
+
+
+def test_criar_estoque_incremento_deadlock_no_flush_de_movimentacao_vira_409(engine, session, monkeypatch):
+    setor = make_setor(session, tipo="imp1_incr")
+    func = make_funcionario(session, setor_id=setor.id)
+    make_produto(session, codigo="IMP1INCR001", qtd=5)
+
+    _flush_falha_com_movimentacao_pendente(monkeypatch)
+
+    with pytest.raises(HTTPException) as exc:
+        criar_estoque(
+            EstoqueCreate(nomedoproduto="Produto", quantidade=Decimal("3"),
+                          preco=Decimal("10.00"), codigodebarras="IMP1INCR001", categoria="Geral"),
+            func.id,
+        )
+    assert exc.value.status_code == 409
+    assert "tente novamente" in exc.value.detail.lower()
+
+
+def test_ajustar_inventario_deadlock_no_flush_de_movimentacao_vira_409(engine, session, monkeypatch):
+    setor = make_setor(session, tipo="imp1_ajuste")
+    func = make_funcionario(session, setor_id=setor.id)
+    produto = make_produto(session, codigo="IMP1AJUSTE001", qtd=10)
+
+    _flush_falha_com_movimentacao_pendente(monkeypatch)
+
+    with pytest.raises(HTTPException) as exc:
+        ajustar_inventario(
+            produto.id, AjusteInventarioInput(nova_quantidade=Decimal("6"), motivo="Contagem física"), func.id,
+        )
+    assert exc.value.status_code == 409
+    assert "tente novamente" in exc.value.detail.lower()
+
+
+def test_confirmar_pendente_produto_existente_deadlock_no_flush_de_movimentacao_vira_409(engine, session, monkeypatch):
+    setor = make_setor(session, tipo="imp1_pend")
+    func = make_funcionario(session, setor_id=setor.id)
+    make_produto(session, codigo="IMP1PEND001", qtd=5)
+    make_compra(session, func.id, status="autorizada", itens=[
+        {"codigodebarras": "IMP1PEND001", "nomedoproduto": "Produto", "categoria": "Geral",
+         "preco_venda": 10.0, "quantidade": 3, "preco_custo": 5.0},
+    ])
+    item_id = listar_pendentes()[0]["id"]
+
+    _flush_falha_com_movimentacao_pendente(monkeypatch)
+
+    with pytest.raises(HTTPException) as exc:
+        confirmar_pendente(
+            item_id,
+            ConfirmarPendenteInput(nomedoproduto="Produto", codigodebarras="IMP1PEND001",
+                                    preco_venda=10.0, categoria="Geral",
+                                    codigo_lote="LOTE-IMP1PEND001", validade=date(2030, 1, 1)),
+            func.id,
+        )
+    assert exc.value.status_code == 409
+    assert "tente novamente" in exc.value.detail.lower()

@@ -462,10 +462,11 @@ CREATE TABLE IF NOT EXISTS `movimentacao_estoque` (
     -- manual via /estoque/inserir, ajuste de inventário) -- ver nota acima
     -- e docstring de MovimentacaoEstoque.
     lote_id INT NULL,
-    -- ENTRADA_COMPRA, VENDA, CANCELAMENTO_VENDA, PERDA, QUEBRA, VENCIMENTO
-    -- ou AJUSTE_INVENTARIO -- validado na camada Pydantic
-    -- (schemas.TipoMovimentacao), guardado aqui como VARCHAR simples, mesmo
-    -- padrão já usado para `funcionario.cargo`/`estoque.unidade_medida`.
+    -- ENTRADA_COMPRA, ENTRADA_MANUAL, VENDA, CANCELAMENTO_VENDA, PERDA,
+    -- QUEBRA, VENCIMENTO ou AJUSTE_INVENTARIO -- validado na camada
+    -- Pydantic (schemas.TipoMovimentacao), guardado aqui como VARCHAR
+    -- simples, mesmo padrão já usado para
+    -- `funcionario.cargo`/`estoque.unidade_medida`.
     tipo VARCHAR(30) NOT NULL,
     quantidade DECIMAL(10, 3) NOT NULL,
     -- Só obrigatório na camada Pydantic para o ajuste de inventário -- as

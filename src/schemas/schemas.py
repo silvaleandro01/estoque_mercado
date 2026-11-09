@@ -22,13 +22,23 @@ UnidadeMedida = Literal["UN", "KG", "L"]
 # Tipos de movimentação de estoque (Fase 4 -- "histórico de movimentações").
 # Mesmo padrão de `Cargo`/`UnidadeMedida`: valor fixo validado aqui na camada
 # Pydantic, coluna no banco (MovimentacaoEstoque.tipo) um VARCHAR simples,
-# sem ENUM do MySQL. Só ENTRADA_COMPRA, VENDA e AJUSTE_INVENTARIO têm código
-# que realmente os gera nesta fase -- os demais (CANCELAMENTO_VENDA, PERDA,
-# QUEBRA, VENCIMENTO) já ficam disponíveis no tipo para quando as fases
+# sem ENUM do MySQL. ENTRADA_COMPRA, ENTRADA_MANUAL, VENDA e AJUSTE_INVENTARIO
+# têm código que realmente os gera nesta fase -- os demais (CANCELAMENTO_VENDA,
+# PERDA, QUEBRA, VENCIMENTO) já ficam disponíveis no tipo para quando as fases
 # futuras que os disparam chegarem (ver docstring de
 # utils.database.MovimentacaoEstoque).
+#
+# IMPORTANTE 5 (revisão da Fase 4): ENTRADA_MANUAL é NOVO -- antes, o
+# incremento manual de estoque via POST /estoque/inserir (sem nenhuma
+# compra/fornecedor por trás) gerava o mesmo tipo ENTRADA_COMPRA que a
+# confirmação de uma compra de verdade (com lote/fornecedor rastreados),
+# misturando duas origens bem diferentes sob o mesmo rótulo. ENTRADA_COMPRA
+# agora é gerado só por confirmar_pendente (repository/estoque.py);
+# ENTRADA_MANUAL é gerado só por criar_estoque (cadastro novo e incremento,
+# os dois caminhos de POST /estoque/inserir -- nenhum dos dois vem de uma
+# confirmação de pendente).
 TipoMovimentacao = Literal[
-    "ENTRADA_COMPRA", "VENDA", "CANCELAMENTO_VENDA",
+    "ENTRADA_COMPRA", "ENTRADA_MANUAL", "VENDA", "CANCELAMENTO_VENDA",
     "PERDA", "QUEBRA", "VENCIMENTO", "AJUSTE_INVENTARIO",
 ]
 
