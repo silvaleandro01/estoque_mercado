@@ -213,6 +213,11 @@ class MovimentacaoEstoqueOut(BaseModel):
     lote_id: Optional[int] = None
     tipo: TipoMovimentacao
     quantidade: DecimalQuantidade
+    # IMPORTANTE 3 (revisão da Fase 4): snapshot da unidade de medida do
+    # produto no momento desta movimentação (ver
+    # utils.database.MovimentacaoEstoque) -- o frontend usa este valor, não
+    # o unidade_medida ATUAL do produto, para formatar a quantidade exibida.
+    unidade_medida: UnidadeMedida
     motivo: Optional[str] = None
     # Optional (não mais int obrigatório): CRÍTICO 1 da revisão da Fase 4 --
     # ON DELETE SET NULL na FK (ver utils.database.MovimentacaoEstoque) faz

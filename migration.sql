@@ -469,6 +469,16 @@ CREATE TABLE IF NOT EXISTS `movimentacao_estoque` (
     -- `funcionario.cargo`/`estoque.unidade_medida`.
     tipo VARCHAR(30) NOT NULL,
     quantidade DECIMAL(10, 3) NOT NULL,
+    -- IMPORTANTE 3 (revisão da Fase 4): SNAPSHOT de estoque.unidade_medida
+    -- no momento desta movimentação -- NÃO uma referência viva ao produto.
+    -- Sem isso, o frontend formatava o histórico inteiro com a unidade
+    -- ATUAL do produto, distorcendo movimentações antigas se a unidade
+    -- mudasse depois (ex.: de KG pra UN). Default 'UN' só para a coluna em
+    -- si (linhas novas sempre preenchem de verdade via
+    -- repository/movimentacoes.py); correção aditiva mais abaixo neste
+    -- arquivo para quem já tinha rodado esta CREATE TABLE antes desta
+    -- correção existir.
+    unidade_medida VARCHAR(2) NOT NULL DEFAULT 'UN',
     -- Só obrigatório na camada Pydantic para o ajuste de inventário -- as
     -- demais movimentações não exigem motivo.
     motivo VARCHAR(255) NULL,
@@ -564,3 +574,39 @@ DELIMITER ;
 CALL `_set_fk_ondelete_set_null`('movimentacao_estoque', 'funcionario_id', 'funcionario', 'fk_movimentacao_estoque_funcionario');
 
 DROP PROCEDURE IF EXISTS `_set_fk_ondelete_set_null`;
+
+-- ============================================================================
+-- Migração aditiva (fix/historico-movimentacoes -- IMPORTANTE 3 da revisão
+-- da Fase 4) -- ver utils.database.MovimentacaoEstoque e
+-- repository/movimentacoes.py::registrar_movimentacao para o contexto
+-- completo. Mesmo padrão das migrações anteriores: aditiva, idempotente
+-- (IF NOT EXISTS), nenhum DROP/TRUNCATE.
+--
+-- `movimentacao_estoque` ganha `unidade_medida` -- SNAPSHOT da unidade de
+-- medida do produto no momento da movimentação (não uma referência viva).
+-- A CREATE TABLE IF NOT EXISTS logo acima já nasce com essa coluna para
+-- instalação nova; este bloco é a correção para quem já tinha a tabela
+-- criada antes dela existir.
+-- ============================================================================
+
+DELIMITER $$
+DROP PROCEDURE IF EXISTS `_add_column_if_not_exists`$$
+CREATE PROCEDURE `_add_column_if_not_exists`(
+    IN p_table VARCHAR(64), IN p_column VARCHAR(64), IN p_definition TEXT
+)
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = DATABASE() AND table_name = p_table AND column_name = p_column
+    ) THEN
+        SET @ddl = CONCAT('ALTER TABLE `', p_table, '` ADD COLUMN `', p_column, '` ', p_definition);
+        PREPARE stmt FROM @ddl;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+    END IF;
+END$$
+DELIMITER ;
+
+CALL `_add_column_if_not_exists`('movimentacao_estoque', 'unidade_medida', "VARCHAR(2) NOT NULL DEFAULT 'UN'");
+
+DROP PROCEDURE IF EXISTS `_add_column_if_not_exists`;

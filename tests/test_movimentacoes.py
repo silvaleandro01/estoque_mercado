@@ -525,6 +525,55 @@ def test_rota_movimentacoes_permite_setor_estoque(client, session, engine):
     assert len(corpo) == 1
     assert corpo[0]["tipo"] == "ENTRADA_COMPRA"
     assert corpo[0]["quantidade"] == 10.0
+    assert corpo[0]["unidade_medida"] == "UN"
+
+
+# ── IMPORTANTE 3 (revisão do painel -- Fase 4) -- snapshot de unidade_medida ─
+
+def test_registrar_movimentacao_grava_snapshot_da_unidade_medida_do_produto(engine, session):
+    setor = make_setor(session, tipo="unidade1")
+    func = make_funcionario(session, setor_id=setor.id)
+    produto = make_produto(session, codigo="UNIDADE001", qtd=10, unidade="KG")
+
+    with Session(engine) as s:
+        registrar_movimentacao(s, produto.id, "ENTRADA_COMPRA", Decimal("10"), func.id)
+        s.commit()
+
+    with Session(engine) as s:
+        mov = _movimentacoes(s, produto.id)[0]
+        assert mov.unidade_medida == "KG"
+
+
+def test_mudar_unidade_medida_do_produto_nao_altera_snapshot_de_movimentacao_antiga(client, session, engine):
+    """O bug que o painel apontou: o frontend formatava TODO o histórico com
+    a unidade ATUAL do produto -- se o produto mudasse de KG pra UN depois,
+    reabrir o histórico distorcia (arredondava) movimentações antigas que
+    eram fracionárias. A correção é o snapshot em si: uma movimentação
+    registrada quando o produto era KG continua com unidade_medida=KG na
+    resposta da API mesmo depois do produto virar UN."""
+    setor = make_setor(session, tipo="estoque")
+    func = make_funcionario(session, setor_id=setor.id)
+    produto = make_produto(session, codigo="UNIDADE002", qtd=10, unidade="KG")
+    token = set_token(session, func)
+
+    with Session(engine) as s:
+        registrar_movimentacao(s, produto.id, "ENTRADA_COMPRA", Decimal("1.350"), func.id)
+        s.commit()
+
+    # Produto muda de KG pra UN (ex.: correção de cadastro).
+    with Session(engine) as s:
+        produto_db = s.get(Estoque, produto.id)
+        produto_db.unidade_medida = "UN"
+        s.add(produto_db)
+        s.commit()
+
+    r = client.get(f"/estoque/{produto.id}/movimentacoes", headers=_headers(token))
+    assert r.status_code == 200
+    corpo = r.json()
+    assert len(corpo) == 1
+    # Snapshot preservado: continua KG, não UN (o valor atual do produto).
+    assert corpo[0]["unidade_medida"] == "KG"
+    assert corpo[0]["quantidade"] == 1.35
 
 
 def test_rota_movimentacoes_produto_inexistente_404(client):

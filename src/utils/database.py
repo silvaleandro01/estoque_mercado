@@ -218,6 +218,17 @@ class MovimentacaoEstoque(SQLModel, table=True):
     # Decimal(10,3): mesma precisão de Estoque.quantidade/Lote.quantidade.
     # SIGNED -- ver convenção de sinal na docstring da classe.
     quantidade: DecimalQuantidade = Field(max_digits=10, decimal_places=3)
+    # IMPORTANTE 3 (revisão da Fase 4): SNAPSHOT da unidade de medida do
+    # produto no momento desta movimentação (texto livre, mesmo valor de
+    # Estoque.unidade_medida -- "UN"/"KG"/"L" -- mas copiado, não uma FK/
+    # referência viva). Sem isso, o frontend formatava TODAS as linhas do
+    # histórico com a unidade ATUAL do produto -- se a unidade de medida
+    # mudasse depois (ex.: de KG pra UN), reabrir o histórico distorcia
+    # movimentações antigas (arredondando valores que antes eram
+    # fracionários). Preenchido em registrar_movimentacao a partir do
+    # produto (Estoque.unidade_medida) naquele instante; o frontend passa a
+    # formatar cada linha usando este valor salvo, não o atual do produto.
+    unidade_medida: str = Field(default="UN")
     # Só obrigatório na camada Pydantic para o endpoint de ajuste de
     # inventário (schemas.AjusteInventarioInput) -- as demais movimentações
     # (ENTRADA_COMPRA, VENDA) não exigem motivo, já que o próprio tipo +

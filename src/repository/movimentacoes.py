@@ -35,12 +35,26 @@ def registrar_movimentacao(
     """Registra uma linha de movimentação. `quantidade` já deve vir SIGNED
     (positiva = entrada, negativa = saída -- ver convenção de sinal na
     docstring de MovimentacaoEstoque) -- aqui só arredonda para 3 casas,
-    mesmo padrão de `criar_lote`."""
+    mesmo padrão de `criar_lote`.
+
+    IMPORTANTE 3 (revisão da Fase 4): grava um SNAPSHOT de
+    `Estoque.unidade_medida` no momento desta movimentação -- `session.get`
+    reaproveita, pela identity map da sessão, o mesmo objeto Estoque que
+    quem chama já tem carregado (todo caller passa por um
+    `select(Estoque)...` antes de chegar aqui), então isto normalmente não
+    dispara nenhuma query nova. Sem esse snapshot, o frontend formatava
+    TODO o histórico com a unidade ATUAL do produto -- se ela mudasse
+    depois (ex.: de KG pra UN), reabrir o histórico distorcia movimentações
+    antigas (arredondando valores que antes eram fracionários)."""
+    produto = session.get(Estoque, estoque_id)
+    unidade_medida = produto.unidade_medida if produto else "UN"
+
     movimentacao = MovimentacaoEstoque(
         estoque_id=estoque_id,
         lote_id=lote_id,
         tipo=tipo,
         quantidade=arredondar_quantidade(quantidade),
+        unidade_medida=unidade_medida,
         motivo=motivo,
         funcionario_id=funcionario_id,
     )

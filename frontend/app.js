@@ -805,7 +805,6 @@ async function abrirHistoricoMovimentacoes(id) {
         return;
     }
 
-    const unidade = p ? p.unidade_medida : 'UN';
     abrirModal(`
         <div class="card" style="width:720px; max-width:85vw;">
             <h3>Histórico de Movimentações${p ? `: ${escapeHtml(p.nomedoproduto)}` : ''}</h3>
@@ -818,6 +817,14 @@ async function abrirHistoricoMovimentacoes(id) {
                     ${movimentacoes.map(m => {
                         const positiva = Number(m.quantidade) >= 0;
                         const sinal = positiva ? '+' : '';
+                        // IMPORTANTE 3 (revisão da Fase 4): usa a unidade
+                        // SALVA na própria movimentação (snapshot de quando
+                        // ela foi registrada), não a unidade ATUAL do
+                        // produto -- senão, se a unidade mudar depois (ex.:
+                        // KG -> UN), reabrir o histórico distorce
+                        // movimentações antigas (arredonda valores que
+                        // antes eram fracionários).
+                        const unidade = m.unidade_medida || 'UN';
                         return `
                         <tr>
                             <td>${new Date(m.data).toLocaleString()}</td>
