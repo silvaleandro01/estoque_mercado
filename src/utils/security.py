@@ -19,6 +19,22 @@ TOKEN_EXPIRA_HORAS = int(os.getenv("TOKEN_EXPIRA_HORAS", "8"))
 
 _pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+# Hash bcrypt fixo, DUMMY -- não corresponde a nenhuma senha real de nenhum
+# funcionário (gerado uma única vez com
+# `_pwd_context.hash("dummy-tempo-constante-estoque-mercado-nao-e-senha-real")`
+# e colado aqui como literal). Usado por autenticar_funcionario para rodar
+# verificar_senha() mesmo quando o usuário não existe ou não tem senha
+# definida, só para gastar um tempo de CPU parecido com o caso "usuário
+# existe, senha errada".
+#
+# Por quê: bcrypt é propositalmente lento (dezenas a centenas de ms por
+# verificação). Sem essa chamada "de mentira", os dois casos abaixo teriam
+# tempo de resposta bem diferente, mesmo com a mensagem de erro já
+# unificada -- e essa diferença de tempo, medida de fora, vazaria de volta
+# a mesma informação (quais usernames existem) que a unificação da
+# mensagem tenta esconder.
+HASH_DUMMY_LOGIN = "$2b$12$CsmM0OyPNva84/ltbP4ej.4eUGhqFfk2NP5G4iBUwkgudt23aShQO"
+
 
 def hash_senha(senha: str) -> str:
     return _pwd_context.hash(senha)

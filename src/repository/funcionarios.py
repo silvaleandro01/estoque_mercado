@@ -5,9 +5,20 @@ from fastapi import HTTPException
 from sqlmodel import Session, select, delete
 
 from utils.database import Funcionario, HistoricoSenha, Setor, engine
-from utils.security import criar_token, hash_senha, verificar_senha
+from utils.security import criar_token, hash_senha, verificar_senha, HASH_DUMMY_LOGIN
 from utils.email import enviar_email
 from schemas.schemas import FuncionarioCreate, LoginRequest, TrocarSenhaRequest, RecuperarSenhaRequest
+
+# Mensagem de erro ÚNICA para TODO caso de login inválido -- usuário não
+# encontrado, usuário existe mas nunca teve senha definida, senha errada, e
+# (depois da Fase de lockout) conta temporariamente bloqueada. Antes desta
+# correção (fix/login-rate-limiting) cada caso tinha uma mensagem diferente
+# ("Usuário não encontrado" vs "Senha incorreta"), o que permitia descobrir
+# quais usernames existem no sistema só observando a resposta de
+# /funcionarios/login -- confirmado ao vivo contra o servidor real numa
+# varredura de segurança. Ver também HASH_DUMMY_LOGIN (utils/security.py)
+# para a mitigação do mesmo vazamento por tempo de resposta.
+MSG_LOGIN_INVALIDO = "Usuário ou senha inválidos"
 
 
 def _registrar_historico(session: Session, funcionario_id: int, password_hash: str):
@@ -38,14 +49,23 @@ def autenticar_funcionario(dados: LoginRequest):
             )
         ).first()
 
-        if not funcionario:
-            raise HTTPException(status_code=401, detail="Usuário não encontrado")
+        # Sempre roda verificar_senha() -- mesmo quando não há um
+        # funcionário/hash real para comparar -- contra HASH_DUMMY_LOGIN
+        # (hash bcrypt fixo que não corresponde a nenhuma senha real).
+        # Mitigação de timing-attack: bcrypt é propositalmente lento; pular
+        # essa chamada inteiramente quando o usuário não existe deixaria essa
+        # resposta mensuravelmente mais rápida que a de "usuário existe,
+        # senha errada", vazando por uma via diferente (tempo de resposta) a
+        # mesma informação que a mensagem genérica abaixo tenta esconder.
+        hash_para_verificar = (
+            funcionario.password_hash
+            if funcionario and funcionario.password_hash
+            else HASH_DUMMY_LOGIN
+        )
+        senha_confere = verificar_senha(dados.senha, hash_para_verificar)
 
-        if not funcionario.password_hash:
-            raise HTTPException(status_code=401, detail="Senha não definida. Contate o administrador.")
-
-        if not verificar_senha(dados.senha, funcionario.password_hash):
-            raise HTTPException(status_code=401, detail="Senha incorreta")
+        if not funcionario or not funcionario.password_hash or not senha_confere:
+            raise HTTPException(status_code=401, detail=MSG_LOGIN_INVALIDO)
 
         token = criar_token(funcionario.id, funcionario.is_admin)
         funcionario.token = token

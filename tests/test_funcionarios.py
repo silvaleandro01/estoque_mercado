@@ -8,7 +8,7 @@ from repository.funcionarios import (
     autenticar_funcionario, criar_funcionario, listar_funcionarios,
     buscar_funcionario, atualizar_funcionario, deletar_funcionario,
     renovar_token, trocar_senha, recuperar_senha,
-    _senha_ja_usada, _registrar_historico,
+    _senha_ja_usada, _registrar_historico, MSG_LOGIN_INVALIDO,
 )
 from schemas.schemas import (
     LoginRequest, FuncionarioCreate, TrocarSenhaRequest, RecuperarSenhaRequest,
@@ -54,6 +54,7 @@ def test_login_usuario_nao_encontrado(engine, session):
     with pytest.raises(HTTPException) as exc:
         autenticar_funcionario(LoginRequest(username="nao.existe", senha="x"))
     assert exc.value.status_code == 401
+    assert exc.value.detail == MSG_LOGIN_INVALIDO
 
 
 def test_login_sem_senha_definida(engine, session):
@@ -62,7 +63,7 @@ def test_login_sem_senha_definida(engine, session):
     with pytest.raises(HTTPException) as exc:
         autenticar_funcionario(LoginRequest(username="sem.senha", senha="Test@123"))
     assert exc.value.status_code == 401
-    assert "não definida" in exc.value.detail
+    assert exc.value.detail == MSG_LOGIN_INVALIDO
 
 
 def test_login_senha_errada(engine, session):
@@ -71,7 +72,28 @@ def test_login_senha_errada(engine, session):
     with pytest.raises(HTTPException) as exc:
         autenticar_funcionario(LoginRequest(username="pedro.certo", senha="SenhaErrada"))
     assert exc.value.status_code == 401
-    assert "incorreta" in exc.value.detail
+    assert exc.value.detail == MSG_LOGIN_INVALIDO
+
+
+def test_login_nao_revela_enumeracao_de_usuario(engine, session):
+    """
+    Correção de segurança (fix/login-rate-limiting): usuário inexistente e
+    usuário existente-mas-senha-errada precisam devolver EXATAMENTE a mesma
+    mensagem e o mesmo status HTTP -- antes da correção, "Usuário não
+    encontrado" vs "Senha incorreta" permitiam descobrir quais usernames
+    existem no sistema só pela resposta do login.
+    """
+    setor = make_setor(session, tipo="rh_enum")
+    make_funcionario(session, "existe", "mesmo", setor.id)
+
+    with pytest.raises(HTTPException) as exc_inexistente:
+        autenticar_funcionario(LoginRequest(username="nao.existe2", senha="QualquerSenha@1"))
+
+    with pytest.raises(HTTPException) as exc_senha_errada:
+        autenticar_funcionario(LoginRequest(username="existe.mesmo", senha="SenhaErrada@1"))
+
+    assert exc_inexistente.value.status_code == exc_senha_errada.value.status_code == 401
+    assert exc_inexistente.value.detail == exc_senha_errada.value.detail == MSG_LOGIN_INVALIDO
 
 
 def test_login_lembrete_senha_um_ano(engine, session):
