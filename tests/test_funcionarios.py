@@ -13,7 +13,8 @@ from repository.funcionarios import (
 from schemas.schemas import (
     LoginRequest, FuncionarioCreate, TrocarSenhaRequest, RecuperarSenhaRequest,
 )
-from utils.database import HistoricoSenha
+from utils.database import Funcionario, HistoricoSenha
+from utils.security import LOGIN_MAX_TENTATIVAS, LOGIN_BLOQUEIO_MINUTOS
 from conftest import make_setor, make_funcionario, pwd
 
 ENDERECO = dict(
@@ -142,6 +143,264 @@ def test_login_gera_novo_token_a_cada_vez(engine, session):
     r1 = autenticar_funcionario(LoginRequest(username="log.duplo", senha="Test@123"))
     r2 = autenticar_funcionario(LoginRequest(username="log.duplo", senha="Test@123"))
     assert r1["token"] != r2["token"]
+
+
+# ── lockout de login (fix/login-rate-limiting) ─────────────────────────────────
+
+def test_login_bloqueia_apos_max_tentativas(engine, session):
+    """
+    Correção do achado "zero rate-limiting" da varredura de segurança (20
+    tentativas de login seguidas contra a mesma conta em ~4s eram todas
+    processadas normalmente antes desta correção, sem nenhum 429/bloqueio).
+    Depois de LOGIN_MAX_TENTATIVAS tentativas de senha errada seguidas, a
+    conta fica com `bloqueado_ate` no futuro.
+    """
+    setor = make_setor(session, tipo="lock_login1")
+    f = make_funcionario(session, "bruto", "forca", setor.id)
+
+    for _ in range(LOGIN_MAX_TENTATIVAS):
+        with pytest.raises(HTTPException) as exc:
+            autenticar_funcionario(LoginRequest(username="bruto.forca", senha="SenhaErrada@1"))
+        assert exc.value.status_code == 401
+        assert exc.value.detail == MSG_LOGIN_INVALIDO
+
+    with Session(engine) as s:
+        func = s.get(Funcionario, f.id)
+    assert func.tentativas_login_falhas == LOGIN_MAX_TENTATIVAS
+    assert func.bloqueado_ate is not None
+    assert func.bloqueado_ate.replace(tzinfo=timezone.utc) > datetime.now(timezone.utc)
+
+
+def test_login_bloqueado_rejeita_mesmo_com_senha_certa(engine, session):
+    """
+    Uma vez bloqueada, a conta continua rejeitando login até o tempo de
+    bloqueio passar -- mesmo que a senha enviada esteja correta.
+    """
+    setor = make_setor(session, tipo="lock_login2")
+    make_funcionario(session, "ja", "bloqueado", setor.id)
+
+    for _ in range(LOGIN_MAX_TENTATIVAS):
+        with pytest.raises(HTTPException):
+            autenticar_funcionario(LoginRequest(username="ja.bloqueado", senha="SenhaErrada@1"))
+
+    with pytest.raises(HTTPException) as exc:
+        autenticar_funcionario(LoginRequest(username="ja.bloqueado", senha="Test@123"))
+    assert exc.value.status_code == 401
+    assert exc.value.detail == MSG_LOGIN_INVALIDO
+
+
+def test_login_nao_incrementa_tentativas_durante_bloqueio(engine, session):
+    """
+    Decisão documentada em autenticar_funcionario: tentativas adicionais
+    durante a janela de bloqueio NÃO reiniciam a contagem nem estendem
+    `bloqueado_ate` -- evita que um atacante consiga manter a conta
+    bloqueada indefinidamente só martelando login contra ela.
+    """
+    setor = make_setor(session, tipo="lock_login3")
+    f = make_funcionario(session, "trava", "fixa", setor.id)
+
+    for _ in range(LOGIN_MAX_TENTATIVAS):
+        with pytest.raises(HTTPException):
+            autenticar_funcionario(LoginRequest(username="trava.fixa", senha="SenhaErrada@1"))
+
+    with Session(engine) as s:
+        func = s.get(Funcionario, f.id)
+    tentativas_apos_bloqueio = func.tentativas_login_falhas
+    bloqueado_ate_original = func.bloqueado_ate
+
+    for _ in range(3):
+        with pytest.raises(HTTPException):
+            autenticar_funcionario(LoginRequest(username="trava.fixa", senha="SenhaErrada@1"))
+        with pytest.raises(HTTPException):
+            autenticar_funcionario(LoginRequest(username="trava.fixa", senha="Test@123"))
+
+    with Session(engine) as s:
+        func = s.get(Funcionario, f.id)
+    assert func.tentativas_login_falhas == tentativas_apos_bloqueio
+    assert func.bloqueado_ate == bloqueado_ate_original
+
+
+def test_login_sucesso_zera_tentativas_e_bloqueio(engine, session):
+    setor = make_setor(session, tipo="lock_login4")
+    f = make_funcionario(session, "reseta", "contador", setor.id)
+
+    for _ in range(LOGIN_MAX_TENTATIVAS - 1):
+        with pytest.raises(HTTPException):
+            autenticar_funcionario(LoginRequest(username="reseta.contador", senha="SenhaErrada@1"))
+
+    with Session(engine) as s:
+        func = s.get(Funcionario, f.id)
+    assert func.tentativas_login_falhas == LOGIN_MAX_TENTATIVAS - 1
+    assert func.bloqueado_ate is None
+
+    res = autenticar_funcionario(LoginRequest(username="reseta.contador", senha="Test@123"))
+    assert "token" in res
+
+    with Session(engine) as s:
+        func = s.get(Funcionario, f.id)
+    assert func.tentativas_login_falhas == 0
+    assert func.bloqueado_ate is None
+
+
+def test_login_bloqueio_expira_passado_o_tempo(engine, session):
+    """O bloqueio é TEMPORÁRIO: passado `bloqueado_ate`, a senha certa volta a funcionar normalmente."""
+    setor = make_setor(session, tipo="lock_login5")
+    f = make_funcionario(session, "expirou", "bloqueio", setor.id)
+    with Session(engine) as s:
+        func = s.get(Funcionario, f.id)
+        func.tentativas_login_falhas = LOGIN_MAX_TENTATIVAS
+        func.bloqueado_ate = datetime.now(timezone.utc) - timedelta(minutes=1)
+        s.add(func)
+        s.commit()
+
+    res = autenticar_funcionario(LoginRequest(username="expirou.bloqueio", senha="Test@123"))
+    assert "token" in res
+
+    with Session(engine) as s:
+        func = s.get(Funcionario, f.id)
+    assert func.tentativas_login_falhas == 0
+    assert func.bloqueado_ate is None
+
+
+def test_login_usuario_inexistente_nunca_gera_erro_mesmo_apos_varias_tentativas(engine, session):
+    """
+    Decisão de escopo (ver autenticar_funcionario): não existe linha/conta
+    pra bloquear quando o username não existe, então várias tentativas
+    contra um username inexistente não incrementam nada nem geram erro
+    inesperado -- só o 401 genérico de sempre, em todas as tentativas. Um
+    rate-limit por IP foi avaliado e descartado como desproporcional ao
+    escopo deste projeto acadêmico/pessoal (sem proxy/observabilidade de IP
+    hoje); fica documentado como limitação aceita.
+    """
+    for _ in range(LOGIN_MAX_TENTATIVAS + 5):
+        with pytest.raises(HTTPException) as exc:
+            autenticar_funcionario(LoginRequest(username="fantasma.inexistente", senha="QualquerSenha@1"))
+        assert exc.value.status_code == 401
+        assert exc.value.detail == MSG_LOGIN_INVALIDO
+
+
+def test_login_sem_senha_definida_nao_conta_tentativa(engine, session):
+    """Funcionário sem password_hash não tem senha pra 'forçar' -- essa tentativa não soma no contador."""
+    setor = make_setor(session, tipo="lock_login6")
+    f = make_funcionario(session, "sem", "senha2", setor.id, with_password=False)
+
+    for _ in range(LOGIN_MAX_TENTATIVAS + 2):
+        with pytest.raises(HTTPException) as exc:
+            autenticar_funcionario(LoginRequest(username="sem.senha2", senha="QualquerSenha@1"))
+        assert exc.value.detail == MSG_LOGIN_INVALIDO
+
+    with Session(engine) as s:
+        func = s.get(Funcionario, f.id)
+    assert func.tentativas_login_falhas == 0
+    assert func.bloqueado_ate is None
+
+
+# ── trava de concorrência (with_for_update) ─────────────────────────────────────
+
+def test_autenticar_consulta_funcionario_com_lock_for_update(engine, session, monkeypatch):
+    """
+    Mesma lógica de test_criar_venda_consulta_produto_com_lock_for_update
+    (tests/test_vendas.py): SQLite ignora `SELECT ... FOR UPDATE` (a
+    cláusula é apenas ignorada pelo driver), então não dá para reproduzir o
+    bloqueio real de linha do MySQL (produção) dentro da suíte de testes.
+    Em vez de simular um lock que o SQLite não tem como garantir, este
+    teste verifica o contrato que realmente importa: a consulta que
+    `autenticar_funcionario` faz ao funcionário pede o lock pessimista.
+    Isso é verificado compilando a própria instrução para o dialeto do
+    MySQL e conferindo que `FOR UPDATE` aparece no SQL gerado -- se alguém
+    remover o `.with_for_update()` do código, este teste quebra.
+
+    Sem essa trava, duas tentativas de login simultâneas contra a MESMA
+    conta poderiam ambas ler `tentativas_login_falhas` com o mesmo valor
+    "antigo" e incrementar a partir dele (lost update), atrasando o
+    bloqueio da conta sob um ataque de força bruta paralelo.
+    """
+    import sqlmodel as sqlmodel_mod
+    from sqlalchemy.dialects import mysql
+
+    setor = make_setor(session, tipo="lock_for_update1")
+    make_funcionario(session, "trava", "login", setor.id)
+
+    statements = []
+    orig_exec = sqlmodel_mod.Session.exec
+
+    def espiar_exec(self, statement, *args, **kwargs):
+        statements.append(statement)
+        return orig_exec(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(sqlmodel_mod.Session, "exec", espiar_exec)
+    autenticar_funcionario(LoginRequest(username="trava.login", senha="Test@123"))
+
+    assert statements, "esperava que autenticar_funcionario consultasse o funcionário via session.exec"
+
+    for statement in statements:
+        assert getattr(statement, "_for_update_arg", None) is not None, (
+            "a consulta ao funcionário em autenticar_funcionario precisa usar "
+            "with_for_update() para travar a linha e evitar race condition no "
+            "contador de tentativas em logins simultâneos"
+        )
+
+    compilada = str(statements[0].compile(dialect=mysql.dialect()))
+    assert "FOR UPDATE" in compilada
+
+
+# ── trava de concorrência (deadlock) ────────────────────────────────────────────
+
+def test_login_deadlock_mysql_vira_409_nao_500(engine, session, monkeypatch):
+    """
+    Mesmo padrão de test_criar_venda_deadlock_mysql_vira_409_nao_500
+    (tests/test_vendas.py): se o commit do login colidir com outra
+    transação que trave a mesma linha em ordem diferente, o MySQL recusa
+    com OperationalError (código 1213, deadlock). autenticar_funcionario
+    captura especificamente esse erro e devolve um 409 limpo, em vez de
+    deixar vazar um 500 cru. Testado no commit que grava o incremento de
+    `tentativas_login_falhas` (o commit novo introduzido pelo lockout) --
+    o commit do caminho de sucesso tem a mesma proteção, coberto por
+    test_login_outro_operational_error_nao_vira_409 logo abaixo.
+    """
+    import sqlmodel as sqlmodel_mod
+    from sqlalchemy.exc import OperationalError
+
+    setor = make_setor(session, tipo="deadlock_login1")
+    make_funcionario(session, "trava", "deadlock", setor.id)
+
+    class FakeOrigDeadlock(Exception):
+        args = (1213, "Deadlock found when trying to get lock; try restarting transaction")
+
+    chamadas = {"n": 0}
+
+    def commit_que_falha_com_deadlock(self, *args, **kwargs):
+        chamadas["n"] += 1
+        raise OperationalError("COMMIT", {}, FakeOrigDeadlock())
+
+    monkeypatch.setattr(sqlmodel_mod.Session, "commit", commit_que_falha_com_deadlock)
+
+    with pytest.raises(HTTPException) as exc:
+        autenticar_funcionario(LoginRequest(username="trava.deadlock", senha="SenhaErrada@1"))
+
+    assert exc.value.status_code == 409
+    assert "tente novamente" in exc.value.detail.lower()
+    assert chamadas["n"] == 1
+
+
+def test_login_outro_operational_error_nao_vira_409(engine, session, monkeypatch):
+    """O tratamento é específico do código 1213 -- outro OperationalError (ex.: perda de conexão) continua propagando."""
+    import sqlmodel as sqlmodel_mod
+    from sqlalchemy.exc import OperationalError
+
+    setor = make_setor(session, tipo="deadlock_login2")
+    make_funcionario(session, "outro", "erro", setor.id)
+
+    class FakeOrigOutroErro(Exception):
+        args = (2006, "MySQL server has gone away")
+
+    def commit_que_falha_outro_erro(self, *args, **kwargs):
+        raise OperationalError("COMMIT", {}, FakeOrigOutroErro())
+
+    monkeypatch.setattr(sqlmodel_mod.Session, "commit", commit_que_falha_outro_erro)
+
+    with pytest.raises(OperationalError):
+        autenticar_funcionario(LoginRequest(username="outro.erro", senha="Test@123"))
 
 
 # ── criar_funcionario ─────────────────────────────────────────────────────────

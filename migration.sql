@@ -637,3 +637,48 @@ DROP PROCEDURE IF EXISTS `_add_column_if_not_exists`;
 -- repository/estoque.py::deletar_estoque (CRÍTICO 1a acima). Nenhuma mudança
 -- de schema (ON DELETE CASCADE) é necessária para esta correção.
 -- ============================================================================
+
+-- ============================================================================
+-- Migração aditiva (fix/login-rate-limiting) -- ver utils.database.Funcionario
+-- e repository/funcionarios.py::autenticar_funcionario para o contexto
+-- completo. Mesmo padrão das migrações anteriores: aditiva, idempotente
+-- (IF NOT EXISTS), nenhum DROP/TRUNCATE.
+--
+-- Correção de uma varredura de segurança que confirmou ao vivo, contra o
+-- servidor real, dois problemas no login (POST /funcionarios/login):
+--   1) Mensagens de erro distintas revelavam quais usernames existem no
+--      sistema -- corrigido só na aplicação (mensagem genérica única +
+--      mitigação de timing-attack), sem precisar de mudança de schema.
+--   2) Zero rate-limiting/lockout -- 20 tentativas de login seguidas contra
+--      a mesma conta em ~4 segundos eram todas processadas normalmente, sem
+--      nenhum bloqueio. É o que este bloco resolve.
+--
+-- `funcionario` ganha:
+--   - tentativas_login_falhas: contador de tentativas de senha errada
+--     consecutivas (zera a cada login bem-sucedido).
+--   - bloqueado_ate: até quando a conta fica temporariamente bloqueada
+--     depois de atingir o limite de tentativas (NULL = não bloqueada).
+-- ============================================================================
+
+DELIMITER $$
+DROP PROCEDURE IF EXISTS `_add_column_if_not_exists`$$
+CREATE PROCEDURE `_add_column_if_not_exists`(
+    IN p_table VARCHAR(64), IN p_column VARCHAR(64), IN p_definition TEXT
+)
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = DATABASE() AND table_name = p_table AND column_name = p_column
+    ) THEN
+        SET @ddl = CONCAT('ALTER TABLE `', p_table, '` ADD COLUMN `', p_column, '` ', p_definition);
+        PREPARE stmt FROM @ddl;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+    END IF;
+END$$
+DELIMITER ;
+
+CALL `_add_column_if_not_exists`('funcionario', 'tentativas_login_falhas', 'INT NOT NULL DEFAULT 0');
+CALL `_add_column_if_not_exists`('funcionario', 'bloqueado_ate', 'DATETIME NULL');
+
+DROP PROCEDURE IF EXISTS `_add_column_if_not_exists`;

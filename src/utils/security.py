@@ -17,6 +17,13 @@ if not SECRET_KEY:
 ALGORITHM = "HS256"
 TOKEN_EXPIRA_HORAS = int(os.getenv("TOKEN_EXPIRA_HORAS", "8"))
 
+# Lockout de login (fix/login-rate-limiting) -- ver
+# repository/funcionarios.py::autenticar_funcionario. Quantas tentativas de
+# senha errada seguidas uma conta aguenta antes de ser bloqueada
+# temporariamente, e por quantos minutos o bloqueio dura.
+LOGIN_MAX_TENTATIVAS = int(os.getenv("LOGIN_MAX_TENTATIVAS", "5"))
+LOGIN_BLOQUEIO_MINUTOS = int(os.getenv("LOGIN_BLOQUEIO_MINUTOS", "15"))
+
 _pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # Hash bcrypt fixo, DUMMY -- não corresponde a nenhuma senha real de nenhum

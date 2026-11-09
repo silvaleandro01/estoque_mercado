@@ -2,11 +2,16 @@ import secrets
 import string
 from datetime import datetime, timezone, timedelta
 from fastapi import HTTPException
+from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, select, delete
 
 from utils.database import Funcionario, HistoricoSenha, Setor, engine
-from utils.security import criar_token, hash_senha, verificar_senha, HASH_DUMMY_LOGIN
+from utils.security import (
+    criar_token, hash_senha, verificar_senha, HASH_DUMMY_LOGIN,
+    LOGIN_MAX_TENTATIVAS, LOGIN_BLOQUEIO_MINUTOS,
+)
 from utils.email import enviar_email
+from utils.erros_banco import tratar_operational_error
 from schemas.schemas import FuncionarioCreate, LoginRequest, TrocarSenhaRequest, RecuperarSenhaRequest
 
 # Mensagem de erro ÚNICA para TODO caso de login inválido -- usuário não
@@ -35,6 +40,15 @@ def _senha_ja_usada(session: Session, funcionario_id: int, nova_senha: str) -> b
     return any(verificar_senha(nova_senha, h.password_hash) for h in historico)
 
 
+def _esta_bloqueado(funcionario: Funcionario, agora: datetime) -> bool:
+    bloqueado_ate = funcionario.bloqueado_ate
+    if not bloqueado_ate:
+        return False
+    if bloqueado_ate.tzinfo is None:
+        bloqueado_ate = bloqueado_ate.replace(tzinfo=timezone.utc)
+    return bloqueado_ate > agora
+
+
 def autenticar_funcionario(dados: LoginRequest):
     with Session(engine) as session:
         partes = dados.username.strip().split(".", 1)
@@ -42,21 +56,33 @@ def autenticar_funcionario(dados: LoginRequest):
             raise HTTPException(status_code=401, detail="Formato inválido. Use nome.sobrenome")
 
         nome, sobrenome = partes[0].strip(), partes[1].strip()
+        # with_for_update(): trava a linha do funcionário (quando ele existe)
+        # durante todo o processo de login -- mesmo padrão de concorrência já
+        # usado em repository/estoque.py e repository/vendas.py. Sem ela,
+        # duas tentativas de login simultâneas contra a MESMA conta poderiam
+        # ambas ler `tentativas_login_falhas` com o mesmo valor "antigo" e
+        # incrementar a partir dele (lost update), deixando o contador andar
+        # mais devagar do que deveria sob um ataque de força bruta paralelo.
         funcionario = session.exec(
-            select(Funcionario).where(
+            select(Funcionario)
+            .where(
                 Funcionario.nome.ilike(nome),
                 Funcionario.sobrenome.ilike(sobrenome),
             )
+            .with_for_update()
         ).first()
+
+        agora = datetime.now(timezone.utc)
 
         # Sempre roda verificar_senha() -- mesmo quando não há um
         # funcionário/hash real para comparar -- contra HASH_DUMMY_LOGIN
         # (hash bcrypt fixo que não corresponde a nenhuma senha real).
         # Mitigação de timing-attack: bcrypt é propositalmente lento; pular
-        # essa chamada inteiramente quando o usuário não existe deixaria essa
-        # resposta mensuravelmente mais rápida que a de "usuário existe,
-        # senha errada", vazando por uma via diferente (tempo de resposta) a
-        # mesma informação que a mensagem genérica abaixo tenta esconder.
+        # essa chamada inteiramente quando o usuário não existe (ou já está
+        # bloqueado) deixaria essa resposta mensuravelmente mais rápida que a
+        # de "usuário existe, senha errada", vazando por uma via diferente
+        # (tempo de resposta) a mesma informação que a mensagem genérica
+        # abaixo tenta esconder.
         hash_para_verificar = (
             funcionario.password_hash
             if funcionario and funcionario.password_hash
@@ -64,17 +90,64 @@ def autenticar_funcionario(dados: LoginRequest):
         )
         senha_confere = verificar_senha(dados.senha, hash_para_verificar)
 
-        if not funcionario or not funcionario.password_hash or not senha_confere:
+        bloqueado = bool(funcionario and _esta_bloqueado(funcionario, agora))
+
+        # Lockout (fix/login-rate-limiting) -- decisões de escopo:
+        #   - usuário inexistente: não existe linha/conta pra incrementar ou
+        #     bloquear. Um rate-limit por IP foi avaliado e descartado por
+        #     ser desproporcional ao escopo deste projeto acadêmico/pessoal
+        #     (sem proxy reverso/observabilidade de IP hoje); fica como
+        #     limitação aceita e documentada.
+        #   - funcionário existe mas nunca definiu senha (password_hash
+        #     nulo): mesma lógica -- não há senha "para forçar", então essa
+        #     tentativa não soma no contador.
+        #   - conta JÁ bloqueada (`bloqueado` True): tentativas adicionais
+        #     durante a janela de bloqueio NÃO reiniciam a contagem nem
+        #     estendem `bloqueado_ate` -- evita que um atacante consiga
+        #     manter a conta bloqueada indefinidamente só martelando login
+        #     contra ela (negação de serviço ao dono legítimo da conta).
+        tentativa_de_senha_errada = (
+            funcionario is not None
+            and funcionario.password_hash is not None
+            and not bloqueado
+            and not senha_confere
+        )
+
+        if tentativa_de_senha_errada:
+            funcionario.tentativas_login_falhas += 1
+            if funcionario.tentativas_login_falhas >= LOGIN_MAX_TENTATIVAS:
+                funcionario.bloqueado_ate = agora + timedelta(minutes=LOGIN_BLOQUEIO_MINUTOS)
+            session.add(funcionario)
+            try:
+                session.commit()
+            except OperationalError as exc:
+                session.rollback()
+                tratar_operational_error(exc, "Não foi possível processar o login, tente novamente")
+
+        if not funcionario or not funcionario.password_hash or bloqueado or not senha_confere:
+            # Mesma mensagem genérica também para conta bloqueada -- ver
+            # decisão documentada no relatório da correção: uma mensagem
+            # diferente tipo "conta bloqueada" confirmaria, por si só, que o
+            # username existe (voltaria a abrir o canal de enumeração que a
+            # unificação acima fechou), então o custo de usabilidade (o
+            # usuário não sabe que está bloqueado, só que "a senha está
+            # errada") foi aceito em troca de não vazar essa informação.
             raise HTTPException(status_code=401, detail=MSG_LOGIN_INVALIDO)
 
+        # Login bem-sucedido: zera o contador e qualquer bloqueio residual.
+        funcionario.tentativas_login_falhas = 0
+        funcionario.bloqueado_ate = None
         token = criar_token(funcionario.id, funcionario.is_admin)
         funcionario.token = token
         session.add(funcionario)
-        session.commit()
+        try:
+            session.commit()
+        except OperationalError as exc:
+            session.rollback()
+            tratar_operational_error(exc, "Não foi possível processar o login, tente novamente")
 
         setor = session.get(Setor, funcionario.setor_id)
 
-        agora = datetime.now(timezone.utc)
         ultima = funcionario.senha_atualizada_em
         if ultima and ultima.tzinfo is None:
             ultima = ultima.replace(tzinfo=timezone.utc)
