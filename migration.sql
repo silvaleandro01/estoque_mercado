@@ -432,3 +432,208 @@ SELECT e.id, 'LEGADO', e.quantidade, NULL, NOW()
 FROM `estoque` e
 WHERE e.quantidade > 0
   AND NOT EXISTS (SELECT 1 FROM `lote` l WHERE l.estoque_id = e.id);
+
+-- ============================================================================
+-- Migração aditiva (feat/historico-movimentacoes) -- Fase 4: histórico de
+-- movimentações de estoque. Tabela nova (CREATE TABLE IF NOT EXISTS, mesmo
+-- padrão das migrações anteriores), sem DROP/TRUNCATE, idempotente.
+--
+-- DECISÃO DE ARQUITETURA (ver também utils.database.MovimentacaoEstoque e
+-- repository/movimentacoes.py, no código da aplicação): toda alteração de
+-- `estoque.quantidade`/`lote.quantidade` passa a gerar uma linha aqui, na
+-- mesma transação da alteração. `quantidade` é sempre SIGNED (positiva =
+-- entrada, negativa = saída); a soma das quantidades de um produto, desde
+-- sempre, deve bater com `estoque.quantidade` atual desse produto -- mesma
+-- lógica de invariante já estabelecida para `lote` na fase anterior.
+--
+-- Dado existente: produtos/lotes cadastrados ANTES desta fase NÃO ganham
+-- histórico de movimentação retroativo -- diferente da migração de `lote`
+-- acima (que pré-popula um "lote legado" cobrindo o saldo existente), aqui
+-- não há como reconstruir de forma confiável QUEM fez CADA alteração
+-- histórica de quantidade, então nenhum INSERT de dado retroativo é feito.
+-- O histórico de movimentações só começa a existir a partir de agora, para
+-- toda alteração de saldo que ocorrer DAQUI PRA FRENTE.
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS `movimentacao_estoque` (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    estoque_id INT NOT NULL,
+    -- NULL = movimentação não ligada a um lote específico (ex.: incremento
+    -- manual via /estoque/inserir, ajuste de inventário) -- ver nota acima
+    -- e docstring de MovimentacaoEstoque.
+    lote_id INT NULL,
+    -- ENTRADA_COMPRA, ENTRADA_MANUAL, VENDA, CANCELAMENTO_VENDA, PERDA,
+    -- QUEBRA, VENCIMENTO ou AJUSTE_INVENTARIO -- validado na camada
+    -- Pydantic (schemas.TipoMovimentacao), guardado aqui como VARCHAR
+    -- simples, mesmo padrão já usado para
+    -- `funcionario.cargo`/`estoque.unidade_medida`.
+    tipo VARCHAR(30) NOT NULL,
+    quantidade DECIMAL(10, 3) NOT NULL,
+    -- IMPORTANTE 3 (revisão da Fase 4): SNAPSHOT de estoque.unidade_medida
+    -- no momento desta movimentação -- NÃO uma referência viva ao produto.
+    -- Sem isso, o frontend formatava o histórico inteiro com a unidade
+    -- ATUAL do produto, distorcendo movimentações antigas se a unidade
+    -- mudasse depois (ex.: de KG pra UN). Default 'UN' só para a coluna em
+    -- si (linhas novas sempre preenchem de verdade via
+    -- repository/movimentacoes.py); correção aditiva mais abaixo neste
+    -- arquivo para quem já tinha rodado esta CREATE TABLE antes desta
+    -- correção existir.
+    unidade_medida VARCHAR(2) NOT NULL DEFAULT 'UN',
+    -- Só obrigatório na camada Pydantic para o ajuste de inventário -- as
+    -- demais movimentações não exigem motivo.
+    motivo VARCHAR(255) NULL,
+    -- NULL = funcionário autor foi excluído depois (ON DELETE SET NULL
+    -- abaixo) -- ver CRÍTICO 1 da revisão da Fase 4, correção aditiva mais
+    -- abaixo neste arquivo para quem já tinha rodado esta CREATE TABLE
+    -- antes dessa correção existir.
+    funcionario_id INT NULL,
+    data DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX (estoque_id),
+    INDEX (lote_id),
+    INDEX (tipo),
+    INDEX (data),
+    FOREIGN KEY (estoque_id) REFERENCES estoque(id),
+    FOREIGN KEY (lote_id) REFERENCES lote(id),
+    CONSTRAINT `fk_movimentacao_estoque_funcionario` FOREIGN KEY (funcionario_id) REFERENCES funcionario(id) ON DELETE SET NULL
+) ENGINE=InnoDB;
+
+-- ============================================================================
+-- Migração aditiva (fix/historico-movimentacoes -- correções do painel de
+-- revisão da Fase 4) -- ver repository/estoque.py::deletar_estoque e
+-- repository/funcionarios.py::deletar_funcionario para o contexto completo
+-- dos dois achados CRÍTICOS corrigidos aqui.
+--
+-- CRÍTICO 1a (deletar_estoque): a FK de `movimentacao_estoque` para
+-- `estoque`/`lote` nunca teve ON DELETE CASCADE nem precisa ter -- a
+-- correção é só na aplicação (deletar_estoque passa a apagar as
+-- movimentações do produto ANTES de apagar lotes e o produto, mesmo padrão
+-- já usado para `Lote` desde a Fase 3). Nenhuma mudança de schema necessária
+-- para essa parte.
+--
+-- CRÍTICO 1b (deletar_funcionario): diferente do caso acima, aqui a correção
+-- É de schema -- `movimentacao_estoque.funcionario_id` passa a aceitar NULL
+-- e sua FK passa a ter ON DELETE SET NULL (em vez de bloquear/quebrar o
+-- DELETE do funcionário com IntegrityError). DECISÃO: preserva o histórico
+-- de movimentação (auditoria de estoque) mesmo depois que o funcionário sai
+-- da empresa, só "anonimizando" a autoria -- em vez de apagar o histórico
+-- junto (destruiria rastreabilidade de auditoria sem necessidade real) ou
+-- bloquear o delete do funcionário (não seria razoável impedir desligar um
+-- funcionário só porque ele mexeu no estoque alguma vez). Mesmo padrão já
+-- usado em `Estoque.funcionario_id`, que já é opcional/nullable nesta mesma
+-- base de código.
+--
+-- Bloco idempotente: para quem já criou a tabela `movimentacao_estoque` com
+-- a definição ANTERIOR (funcionario_id NOT NULL, FK sem ON DELETE), aplica a
+-- mesma correção via ALTER TABLE. Para quem ainda não tem a tabela, a
+-- CREATE TABLE IF NOT EXISTS logo acima já nasce corrigida e este bloco é um
+-- no-op (a stored procedure só age se a FK ainda não estiver como
+-- "SET NULL").
+-- ============================================================================
+
+ALTER TABLE `movimentacao_estoque` MODIFY COLUMN `funcionario_id` INT NULL;
+
+DELIMITER $$
+DROP PROCEDURE IF EXISTS `_set_fk_ondelete_set_null`$$
+CREATE PROCEDURE `_set_fk_ondelete_set_null`(
+    IN p_table VARCHAR(64), IN p_column VARCHAR(64), IN p_ref_table VARCHAR(64),
+    IN p_new_constraint VARCHAR(64)
+)
+BEGIN
+    DECLARE v_constraint_name VARCHAR(64);
+    DECLARE v_delete_rule VARCHAR(20);
+    DECLARE v_done INT DEFAULT 0;
+    DECLARE cur CURSOR FOR
+        SELECT kcu.CONSTRAINT_NAME, rc.DELETE_RULE
+          FROM information_schema.KEY_COLUMN_USAGE kcu
+          JOIN information_schema.REFERENTIAL_CONSTRAINTS rc
+            ON rc.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA AND rc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+         WHERE kcu.TABLE_SCHEMA = DATABASE() AND kcu.TABLE_NAME = p_table
+           AND kcu.COLUMN_NAME = p_column AND kcu.REFERENCED_TABLE_NAME = p_ref_table;
+    DECLARE CONTINUE HANDLER FOR NOT FOUND SET v_done = 1;
+
+    OPEN cur;
+    read_loop: LOOP
+        FETCH cur INTO v_constraint_name, v_delete_rule;
+        IF v_done THEN
+            LEAVE read_loop;
+        END IF;
+
+        IF v_delete_rule IS NULL OR v_delete_rule <> 'SET NULL' THEN
+            SET @ddl_drop = CONCAT('ALTER TABLE `', p_table, '` DROP FOREIGN KEY `', v_constraint_name, '`');
+            PREPARE stmt FROM @ddl_drop; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+            SET @ddl_add = CONCAT('ALTER TABLE `', p_table, '` ADD CONSTRAINT `', p_new_constraint,
+                                   '` FOREIGN KEY (`', p_column, '`) REFERENCES `', p_ref_table, '`(id) ON DELETE SET NULL');
+            PREPARE stmt FROM @ddl_add; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+        END IF;
+    END LOOP;
+    CLOSE cur;
+END$$
+DELIMITER ;
+
+CALL `_set_fk_ondelete_set_null`('movimentacao_estoque', 'funcionario_id', 'funcionario', 'fk_movimentacao_estoque_funcionario');
+
+DROP PROCEDURE IF EXISTS `_set_fk_ondelete_set_null`;
+
+-- ============================================================================
+-- Migração aditiva (fix/historico-movimentacoes -- IMPORTANTE 3 da revisão
+-- da Fase 4) -- ver utils.database.MovimentacaoEstoque e
+-- repository/movimentacoes.py::registrar_movimentacao para o contexto
+-- completo. Mesmo padrão das migrações anteriores: aditiva, idempotente
+-- (IF NOT EXISTS), nenhum DROP/TRUNCATE.
+--
+-- `movimentacao_estoque` ganha `unidade_medida` -- SNAPSHOT da unidade de
+-- medida do produto no momento da movimentação (não uma referência viva).
+-- A CREATE TABLE IF NOT EXISTS logo acima já nasce com essa coluna para
+-- instalação nova; este bloco é a correção para quem já tinha a tabela
+-- criada antes dela existir.
+-- ============================================================================
+
+DELIMITER $$
+DROP PROCEDURE IF EXISTS `_add_column_if_not_exists`$$
+CREATE PROCEDURE `_add_column_if_not_exists`(
+    IN p_table VARCHAR(64), IN p_column VARCHAR(64), IN p_definition TEXT
+)
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = DATABASE() AND table_name = p_table AND column_name = p_column
+    ) THEN
+        SET @ddl = CONCAT('ALTER TABLE `', p_table, '` ADD COLUMN `', p_column, '` ', p_definition);
+        PREPARE stmt FROM @ddl;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+    END IF;
+END$$
+DELIMITER ;
+
+CALL `_add_column_if_not_exists`('movimentacao_estoque', 'unidade_medida', "VARCHAR(2) NOT NULL DEFAULT 'UN'");
+
+DROP PROCEDURE IF EXISTS `_add_column_if_not_exists`;
+
+-- ============================================================================
+-- Correção adicional (fix/historico-movimentacoes) -- bug PRÉ-EXISTENTE, de
+-- uma fase anterior a esta (não é um achado da Fase 4 em si), descoberto
+-- durante a correção dos achados do painel de revisão da Fase 4: ver
+-- repository/funcionarios.py::deletar_funcionario para o contexto completo.
+--
+-- `historico_senha.funcionario_id -> funcionario.id` (criada bem acima
+-- neste arquivo) nunca teve ON DELETE configurado -- deletar um funcionário
+-- que já tivesse QUALQUER linha em historico_senha (ou seja, qualquer
+-- funcionário real que já trocou de senha alguma vez, seja pelo fluxo de
+-- troca obrigatória no primeiro acesso ou por recuperação de senha) quebrava
+-- com IntegrityError/500, reproduzido ao vivo contra MySQL real.
+--
+-- DECISÃO: diferente de `movimentacao_estoque.funcionario_id` (ON DELETE SET
+-- NULL logo acima -- preserva o histórico de auditoria de ESTOQUE,
+-- anonimizando só a autoria), `historico_senha` é puramente um mecanismo
+-- interno de bloqueio de reuso de senha (ver
+-- repository/funcionarios.py::_senha_ja_usada) -- não é log de auditoria de
+-- negócio que precise sobreviver à saída do funcionário; sem o funcionário
+-- dono, a linha não tem mais nenhum propósito. Por isso a correção é só na
+-- APLICAÇÃO (deletar_funcionario passa a apagar o histórico de senha do
+-- funcionário ANTES de apagar o funcionário, na mesma transação) -- mesmo
+-- padrão já usado para Lote/MovimentacaoEstoque em
+-- repository/estoque.py::deletar_estoque (CRÍTICO 1a acima). Nenhuma mudança
+-- de schema (ON DELETE CASCADE) é necessária para esta correção.
+-- ============================================================================

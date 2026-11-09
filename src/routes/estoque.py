@@ -1,14 +1,19 @@
 from typing import List
 from fastapi import APIRouter, Depends, Query
 
-from schemas.schemas import EstoqueCreate, EstoqueUpdate, EstoquePendenteOut, ConfirmarPendenteInput, AlertaVencimentoOut
+from schemas.schemas import (
+    EstoqueCreate, EstoqueUpdate, EstoquePendenteOut, ConfirmarPendenteInput,
+    AlertaVencimentoOut, AjusteInventarioInput, MovimentacaoEstoqueOut,
+)
 from services.auth import get_funcionario, verificar_permissao
 from repository.estoque import (
     criar_estoque, mostrar_produtos, buscar_estoque,
     atualizar_estoque, deletar_estoque,
     listar_pendentes, confirmar_pendente,
+    ajustar_inventario,
 )
 from repository.lotes import listar_alerta_vencimento
+from repository.movimentacoes import listar_movimentacoes, LIMIT_PADRAO, LIMIT_MAXIMO
 
 router = APIRouter(prefix="/estoque", tags=["Estoque"])
 
@@ -59,3 +64,20 @@ def confirmar(item_id: int, dados: ConfirmarPendenteInput, funcionario=Depends(g
 def alerta_vencimento(dias: int = Query(default=7, ge=0, le=365), funcionario=Depends(get_funcionario)):
     verificar_permissao(funcionario, "estoque")
     return listar_alerta_vencimento(dias)
+
+
+@router.post("/{estoque_id}/ajustar-inventario")
+def ajustar_inventario_rota(estoque_id: int, dados: AjusteInventarioInput, funcionario=Depends(get_funcionario)):
+    verificar_permissao(funcionario, "estoque")
+    return ajustar_inventario(estoque_id, dados, funcionario.id)
+
+
+@router.get("/{estoque_id}/movimentacoes", response_model=List[MovimentacaoEstoqueOut])
+def movimentacoes(
+    estoque_id: int,
+    limit: int = Query(default=LIMIT_PADRAO, ge=1, le=LIMIT_MAXIMO),
+    offset: int = Query(default=0, ge=0),
+    funcionario=Depends(get_funcionario),
+):
+    verificar_permissao(funcionario, "estoque")
+    return listar_movimentacoes(estoque_id, limit=limit, offset=offset)

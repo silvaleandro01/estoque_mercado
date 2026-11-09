@@ -275,15 +275,18 @@ def test_buscar_estoque_inexistente(client):
 
 
 def test_atualizar_estoque(client, session, engine):
-    p = make_produto(session, codigo="UPD_EST_MAIN")
+    p = make_produto(session, codigo="UPD_EST_MAIN", qtd=50)
     payload = dict(
         titulo="Atualizado", nomedoproduto="Atualizado",
-        quantidade=200, unidade_medida="UN", estoque_minimo=0, preco=12.0,
+        unidade_medida="UN", estoque_minimo=0, preco=12.0,
         codigodebarras="UPD_EST_MAIN", categoria="Geral",
     )
     r = client.put(f"/estoque/atualizar/{p.id}", json=payload)
     assert r.status_code == 200
-    assert r.json()["quantidade"] == 200
+    assert r.json()["nomedoproduto"] == "Atualizado"
+    # Fase 4: PUT não muda mais quantidade (ver docstring de
+    # schemas.EstoqueUpdate) -- continua a mesma de antes da edição.
+    assert r.json()["quantidade"] == 50
 
 
 def test_atualizar_estoque_sem_unidade_medida_e_estoque_minimo_rejeitado(client, session, engine):

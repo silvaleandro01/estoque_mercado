@@ -15,10 +15,10 @@ from fastapi import HTTPException
 from sqlmodel import Session, select
 from sqlalchemy.dialects import mysql
 
-from repository.estoque import criar_estoque, atualizar_estoque, deletar_estoque, confirmar_pendente
+from repository.estoque import criar_estoque, deletar_estoque, confirmar_pendente, ajustar_inventario
 from repository.vendas import criar_venda
 from repository.lotes import reconciliar_lote_sem_validade, consumir_fefo, CODIGO_LOTE_LEGADO
-from schemas.schemas import EstoqueCreate, EstoqueUpdate, VendaInput, ItemVendaSchema, ConfirmarPendenteInput
+from schemas.schemas import EstoqueCreate, VendaInput, ItemVendaSchema, ConfirmarPendenteInput, AjusteInventarioInput
 from utils.database import Lote, Estoque
 from conftest import make_setor, make_funcionario, make_produto, make_lote, make_compra, make_fornecedor
 
@@ -196,8 +196,10 @@ def test_invariante_soma_lotes_igual_estoque_apos_operacoes_mistas(engine, sessi
     mesmo passando por uma sequência de operações que "falam línguas"
     diferentes (lote/validade explícitos vs. ajuste manual sem lote) --
     cadastro com quantidade inicial, incremento manual via /estoque/inserir,
-    edição direta via PUT /estoque/atualizar, confirmação de pendente
-    (ainda sem lote nesta etapa) e venda com consumo FEFO.
+    ajuste de inventário (POST /estoque/{id}/ajustar-inventario -- Fase 4,
+    substituiu a antiga edição de quantidade via PUT /estoque/atualizar,
+    ver schemas.EstoqueUpdate), confirmação de pendente (ainda sem lote
+    nesta etapa) e venda com consumo FEFO.
 
     SQLite não reproduz concorrência real (ver outros testes de lock desta
     suíte) -- o que se verifica aqui, de forma honesta, é que a invariante
@@ -225,23 +227,19 @@ def test_invariante_soma_lotes_igual_estoque_apos_operacoes_mistas(engine, sessi
     with Session(engine) as s:
         assert _soma_lotes(s, criado.id) == s.get(Estoque, criado.id).quantidade
 
-    # 3) Edição direta via PUT /estoque/atualizar (reduz quantidade).
-    atualizar_estoque(
+    # 3) Ajuste de inventário (reduz quantidade).
+    ajustar_inventario(
         criado.id,
-        EstoqueUpdate(nomedoproduto="Produto Invariante", quantidade=Decimal("18"),
-                      unidade_medida="UN", estoque_minimo=Decimal("0"),
-                      preco=Decimal("10.00"), codigodebarras="INV001", categoria="Geral"),
+        AjusteInventarioInput(nova_quantidade=Decimal("18"), motivo="Contagem física"),
         func.id,
     )
     with Session(engine) as s:
         assert _soma_lotes(s, criado.id) == s.get(Estoque, criado.id).quantidade
 
-    # 4) Edição direta via PUT /estoque/atualizar (aumenta quantidade).
-    atualizar_estoque(
+    # 4) Ajuste de inventário (aumenta quantidade).
+    ajustar_inventario(
         criado.id,
-        EstoqueUpdate(nomedoproduto="Produto Invariante", quantidade=Decimal("25"),
-                      unidade_medida="UN", estoque_minimo=Decimal("0"),
-                      preco=Decimal("10.00"), codigodebarras="INV001", categoria="Geral"),
+        AjusteInventarioInput(nova_quantidade=Decimal("25"), motivo="Contagem física 2"),
         func.id,
     )
     with Session(engine) as s:
@@ -274,15 +272,20 @@ def test_invariante_soma_lotes_igual_estoque_apos_operacoes_mistas(engine, sessi
 def test_put_reduz_estoque_com_saldo_todo_em_lote_datado_mantem_invariante(engine, session):
     """
     CRÍTICO 1 (cenário A): saldo do produto está TODO em um lote COM
-    validade real (nenhum lote "sem validade"). Um PUT reduz
-    Estoque.quantidade direto, sem dizer de qual lote tirar -- a versão
-    antiga (delta) não achava nenhum lote sem validade, o delta era
+    validade real (nenhum lote "sem validade"). Um ajuste de inventário
+    reduz Estoque.quantidade direto, sem dizer de qual lote tirar -- a
+    versão antiga (delta) não achava nenhum lote sem validade, o delta era
     negativo, e a função não fazia nada: soma(Lote) ficava MAIOR que o
     saldo real. Agora o residual negativo é absorvido pelo lote "sem
     validade" (criado na hora, mesmo que negativo -- ver docstring de
     reconciliar_lote_sem_validade), mantendo a invariante. Confirma também
     que uma venda subsequente, com estoque realmente suficiente, não é
     rejeitada incorretamente.
+
+    (Fase 4: este cenário era reproduzido via PUT /estoque/atualizar, que
+    mudava quantidade diretamente -- a partir desta fase quem muda
+    quantidade manualmente é sempre `ajustar_inventario`, mesmo
+    mecanismo de reconciliação por baixo.)
     """
     setor = make_setor(session, tipo="critico1a")
     func = make_funcionario(session, setor_id=setor.id)
@@ -294,11 +297,9 @@ def test_put_reduz_estoque_com_saldo_todo_em_lote_datado_mantem_invariante(engin
             select(Lote).where(Lote.estoque_id == produto.id, Lote.validade.is_(None))
         ).first() is None
 
-    atualizar_estoque(
+    ajustar_inventario(
         produto.id,
-        EstoqueUpdate(nomedoproduto="Produto Teste", quantidade=Decimal("6"),
-                      unidade_medida="UN", estoque_minimo=Decimal("0"),
-                      preco=Decimal("5.00"), codigodebarras="CRIT1A", categoria="Geral"),
+        AjusteInventarioInput(nova_quantidade=Decimal("6"), motivo="Contagem física"),
         func.id,
     )
 

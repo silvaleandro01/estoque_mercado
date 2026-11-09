@@ -19,6 +19,29 @@ Cargo = Literal["operacional", "gerente", "diretoria"]
 # lugares (ver também `Funcionario.cargo`, que segue a mesma convenção).
 UnidadeMedida = Literal["UN", "KG", "L"]
 
+# Tipos de movimentação de estoque (Fase 4 -- "histórico de movimentações").
+# Mesmo padrão de `Cargo`/`UnidadeMedida`: valor fixo validado aqui na camada
+# Pydantic, coluna no banco (MovimentacaoEstoque.tipo) um VARCHAR simples,
+# sem ENUM do MySQL. ENTRADA_COMPRA, ENTRADA_MANUAL, VENDA e AJUSTE_INVENTARIO
+# têm código que realmente os gera nesta fase -- os demais (CANCELAMENTO_VENDA,
+# PERDA, QUEBRA, VENCIMENTO) já ficam disponíveis no tipo para quando as fases
+# futuras que os disparam chegarem (ver docstring de
+# utils.database.MovimentacaoEstoque).
+#
+# IMPORTANTE 5 (revisão da Fase 4): ENTRADA_MANUAL é NOVO -- antes, o
+# incremento manual de estoque via POST /estoque/inserir (sem nenhuma
+# compra/fornecedor por trás) gerava o mesmo tipo ENTRADA_COMPRA que a
+# confirmação de uma compra de verdade (com lote/fornecedor rastreados),
+# misturando duas origens bem diferentes sob o mesmo rótulo. ENTRADA_COMPRA
+# agora é gerado só por confirmar_pendente (repository/estoque.py);
+# ENTRADA_MANUAL é gerado só por criar_estoque (cadastro novo e incremento,
+# os dois caminhos de POST /estoque/inserir -- nenhum dos dois vem de uma
+# confirmação de pendente).
+TipoMovimentacao = Literal[
+    "ENTRADA_COMPRA", "ENTRADA_MANUAL", "VENDA", "CANCELAMENTO_VENDA",
+    "PERDA", "QUEBRA", "VENCIMENTO", "AJUSTE_INVENTARIO",
+]
+
 # Todas as colunas monetárias do banco são DECIMAL(10, 2): no máximo 8
 # dígitos inteiros + 2 decimais (até 99999999.99). Sem essa validação aqui,
 # um valor absurdamente grande (ex.: 999999999999.99) passa pelo Pydantic
@@ -121,22 +144,90 @@ class EstoqueCreate(BaseModel):
 
 
 class EstoqueUpdate(BaseModel):
+    """
+    DECISÃO DE ARQUITETURA (Fase 4 -- "histórico de movimentações"): até a
+    Fase 3, este schema também incluía `quantidade`, e PUT /estoque/atualizar
+    era o único ponto de alteração de saldo que não vinha de um evento de
+    negócio claro (venda, compra) -- permitia mudar a quantidade livremente,
+    sem pedir motivo nenhum. A partir desta fase, alteração manual de saldo
+    (correção de inventário) tem um endpoint PRÓPRIO e dedicado
+    (POST /estoque/{id}/ajustar-inventario, ver schemas.AjusteInventarioInput
+    e repository.estoque.ajustar_inventario), que exige `motivo` e gera uma
+    movimentação AJUSTE_INVENTARIO -- um fluxo de inventário é conceitualmente
+    diferente de "editar o cadastro do produto". Por isso `quantidade` saiu
+    deste schema: PUT /estoque/atualizar agora só edita METADADO do produto
+    (nome, preço, categoria, etc.), nunca mais o saldo.
+    """
     titulo: Optional[str] = None
     nomedoproduto: str
-    quantidade: Decimal = Field(..., ge=0, **DECIMAL_10_3)
     # Diferente de EstoqueCreate (onde faz sentido ter default, já que é um
     # cadastro novo), aqui os dois campos são obrigatórios -- sem default --
-    # igual aos outros campos deste schema (nomedoproduto, quantidade,
-    # preco, etc.). Um PUT que esqueça de enviar unidade_medida/
-    # estoque_minimo não pode resetar silenciosamente esses valores do
-    # produto para "UN"/0 -- precisa falhar com 422 e deixar claro que o
-    # payload está incompleto.
+    # igual aos outros campos deste schema (nomedoproduto, preco, etc.). Um
+    # PUT que esqueça de enviar unidade_medida/estoque_minimo não pode
+    # resetar silenciosamente esses valores do produto para "UN"/0 --
+    # precisa falhar com 422 e deixar claro que o payload está incompleto.
     unidade_medida: UnidadeMedida
     estoque_minimo: Decimal = Field(..., ge=0, **DECIMAL_10_3)
     preco: Decimal = Field(..., gt=0, **DECIMAL_10_2)
     codigodebarras: str
     categoria: str
     fornecedor_id: Optional[int] = None
+
+
+class AjusteInventarioInput(BaseModel):
+    """Entrada do novo endpoint POST /estoque/{id}/ajustar-inventario (Fase
+    4), a única forma de corrigir manualmente o saldo de um produto a partir
+    desta fase (ver docstring de EstoqueUpdate). `nova_quantidade` é o saldo
+    ABSOLUTO final do produto após a contagem/correção (não um delta) --
+    mesmo contrato que PUT /estoque/atualizar já usava para `quantidade`
+    antes desta fase, só que agora isolado num endpoint que exige motivo.
+    `motivo` é SEMPRE obrigatório, diferente de ENTRADA_COMPRA/VENDA (onde o
+    próprio tipo + referência à compra/venda já explica a origem) -- um
+    ajuste de inventário só existe porque algo precisa ser explicado (perda
+    não contabilizada, erro de contagem anterior, etc.).
+
+    IMPORTANTE 2 (revisão da Fase 4): `max_length=255` -- a coluna real
+    (MovimentacaoEstoque.motivo / migration.sql) é VARCHAR(255). Sem este
+    limite aqui, um motivo maior que 255 caracteres passava pelo Pydantic
+    sem erro e só quebrava lá na frente, contra o banco, com um erro de
+    banco não tratado em vez de um 422 limpo (mesmo raciocínio já aplicado
+    em DECIMAL_10_2/DECIMAL_10_3 para os campos numéricos deste arquivo).
+    """
+    nova_quantidade: Decimal = Field(..., ge=0, **DECIMAL_10_3)
+    motivo: str = Field(..., min_length=1, max_length=255)
+
+    @field_validator("motivo")
+    @classmethod
+    def validar_motivo(cls, v: str) -> str:
+        """Mesma razão de ConfirmarPendenteInput.validar_codigo_lote:
+        `min_length=1` sozinho aceita uma string só de espaços em branco."""
+        v = v.strip()
+        if not v:
+            raise ValueError("motivo não pode ser vazio")
+        return v
+
+
+class MovimentacaoEstoqueOut(BaseModel):
+    id: int
+    estoque_id: int
+    lote_id: Optional[int] = None
+    tipo: TipoMovimentacao
+    quantidade: DecimalQuantidade
+    # IMPORTANTE 3 (revisão da Fase 4): snapshot da unidade de medida do
+    # produto no momento desta movimentação (ver
+    # utils.database.MovimentacaoEstoque) -- o frontend usa este valor, não
+    # o unidade_medida ATUAL do produto, para formatar a quantidade exibida.
+    unidade_medida: UnidadeMedida
+    motivo: Optional[str] = None
+    # Optional (não mais int obrigatório): CRÍTICO 1 da revisão da Fase 4 --
+    # ON DELETE SET NULL na FK (ver utils.database.MovimentacaoEstoque) faz
+    # este campo virar NULL quando o funcionário autor é excluído depois,
+    # preservando o histórico de movimentação (auditoria) em vez de apagá-lo
+    # ou bloquear a exclusão do funcionário.
+    funcionario_id: Optional[int] = None
+    data: datetime
+
+    model_config = {"from_attributes": True}
 
 
 class ItemVendaSchema(BaseModel):

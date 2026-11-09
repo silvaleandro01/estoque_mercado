@@ -6,7 +6,7 @@ from pydantic import ValidationError
 from schemas.schemas import (
     FuncionarioCreate, EstoqueCreate, EstoqueUpdate,
     ItemVendaSchema, VendaInput, TrocarSenhaRequest, RecuperarSenhaRequest,
-    ItemCompraInput, ConfirmarPendenteInput, DespesaInput,
+    ItemCompraInput, ConfirmarPendenteInput, DespesaInput, AjusteInventarioInput,
 )
 
 DADOS_BASE = dict(
@@ -212,7 +212,7 @@ def test_estoque_preco_no_limite_maximo_do_decimal_10_2_valido():
 def test_estoque_update_preco_acima_do_limite_decimal_10_2_invalido():
     with pytest.raises(ValidationError):
         EstoqueUpdate(
-            nomedoproduto="X", quantidade=1, unidade_medida="UN", estoque_minimo=Decimal("0.000"),
+            nomedoproduto="X", unidade_medida="UN", estoque_minimo=Decimal("0.000"),
             preco=Decimal("999999999999.99"), codigodebarras="1", categoria="A",
         )
 
@@ -226,7 +226,7 @@ def test_estoque_update_sem_unidade_medida_rejeitado():
     """
     with pytest.raises(ValidationError):
         EstoqueUpdate(
-            nomedoproduto="X", quantidade=1, estoque_minimo=Decimal("0.000"),
+            nomedoproduto="X", estoque_minimo=Decimal("0.000"),
             preco=5.0, codigodebarras="1", categoria="A",
         )
 
@@ -234,9 +234,44 @@ def test_estoque_update_sem_unidade_medida_rejeitado():
 def test_estoque_update_sem_estoque_minimo_rejeitado():
     with pytest.raises(ValidationError):
         EstoqueUpdate(
-            nomedoproduto="X", quantidade=1, unidade_medida="UN",
+            nomedoproduto="X", unidade_medida="UN",
             preco=5.0, codigodebarras="1", categoria="A",
         )
+
+
+def test_estoque_update_nao_aceita_mais_quantidade():
+    """
+    Fase 4: `quantidade` saiu de EstoqueUpdate -- alteração de saldo manual
+    agora é sempre via POST /estoque/{id}/ajustar-inventario (schemas.
+    AjusteInventarioInput), que exige motivo. Passar `quantidade` aqui não
+    derruba (Pydantic ignora campo desconhecido por padrão), mas o valor é
+    descartado -- não vira um atributo do schema.
+    """
+    m = EstoqueUpdate(
+        nomedoproduto="X", unidade_medida="UN", estoque_minimo=Decimal("0.000"),
+        preco=5.0, codigodebarras="1", categoria="A", quantidade=999,
+    )
+    assert not hasattr(m, "quantidade")
+
+
+def test_ajuste_inventario_motivo_vazio_rejeitado():
+    with pytest.raises(ValidationError):
+        AjusteInventarioInput(nova_quantidade=Decimal("10"), motivo="")
+
+
+def test_ajuste_inventario_motivo_so_espacos_rejeitado():
+    with pytest.raises(ValidationError):
+        AjusteInventarioInput(nova_quantidade=Decimal("10"), motivo="   ")
+
+
+def test_ajuste_inventario_motivo_normaliza_espacos_nas_pontas():
+    m = AjusteInventarioInput(nova_quantidade=Decimal("10"), motivo="  Contagem física  ")
+    assert m.motivo == "Contagem física"
+
+
+def test_ajuste_inventario_nova_quantidade_negativa_rejeitada():
+    with pytest.raises(ValidationError):
+        AjusteInventarioInput(nova_quantidade=Decimal("-1"), motivo="Correção")
 
 
 def test_item_compra_preco_custo_acima_do_limite_decimal_10_2_invalido():

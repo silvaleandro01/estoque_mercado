@@ -9,6 +9,7 @@ from utils.quantidade import arredondar_quantidade, validar_quantidade_inteira_s
 from utils.timezone import hoje_brasil, limites_do_dia_brasil
 from utils.erros_banco import tratar_operational_error
 from repository.lotes import consumir_fefo
+from repository.movimentacoes import registrar_movimentacao
 from schemas.schemas import VendaInput
 
 
@@ -68,10 +69,20 @@ def criar_venda(dados: VendaInput, funcionario_id: int):
                 # quando o produto não tem nenhum lote cadastrado (ver
                 # docstring de repository.lotes.consumir_fefo).
                 try:
-                    consumir_fefo(session, produto.id, item.quantidade, produto.nomedoproduto)
+                    consumos = consumir_fefo(session, produto.id, item.quantidade, produto.nomedoproduto)
                 except HTTPException:
                     session.rollback()
                     raise
+
+                # Histórico de movimentações (Fase 4): uma movimentação
+                # VENDA POR LOTE consumido (não uma única linha agregando
+                # a venda inteira) -- cada consumo de lote é um evento
+                # distinto, espelhando exatamente o que consumir_fefo
+                # baixou de cada lote.
+                for lote_id, baixa in consumos:
+                    registrar_movimentacao(
+                        session, produto.id, "VENDA", -baixa, funcionario_id, lote_id=lote_id,
+                    )
 
                 produto.quantidade = arredondar_quantidade(produto.quantidade - item.quantidade)
                 preco_total = arredondar(produto.preco * item.quantidade)

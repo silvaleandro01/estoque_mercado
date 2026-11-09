@@ -28,7 +28,7 @@ desperdício por vencimento).
 
 from decimal import Decimal
 from datetime import datetime, timezone, date, timedelta
-from typing import Optional
+from typing import List, Optional, Tuple
 
 from fastapi import HTTPException
 from sqlmodel import Session, select
@@ -50,7 +50,7 @@ def _lote_sem_validade(session: Session, estoque_id: int) -> Optional[Lote]:
     ).first()
 
 
-def reconciliar_lote_sem_validade(session: Session, estoque_id: int) -> None:
+def reconciliar_lote_sem_validade(session: Session, estoque_id: int) -> Tuple[Optional[Lote], Decimal]:
     """
     Reconcilia a quantidade do lote "sem validade" (legado) do produto para
     que a invariante
@@ -106,6 +106,35 @@ def reconciliar_lote_sem_validade(session: Session, estoque_id: int) -> None:
     própria: ele só reaproveita, dentro da mesma sessão/transação, o lock
     que o chamador já adquiriu -- mesmo raciocínio já usado em
     `consumir_fefo`).
+
+    RETORNO (CRÍTICO 2 da revisão da Fase 4): `(lote, delta)` -- `lote` é a
+    linha "sem validade" após a reconciliação (`None` só quando nada mudou
+    E a linha ainda não existia, ou seja, `delta == 0`); `delta` é quanto
+    `Lote.quantidade` dessa linha mudou NESTA chamada (residual novo menos
+    residual anterior, SIGNED, igual à convenção de
+    `MovimentacaoEstoque.quantidade`), considerando "anterior" como 0
+    quando a linha ainda não existia (mesma convenção de "lote não existe
+    == saldo 0" usada no resto desta função). Quem chama usa esse retorno
+    para registrar uma `MovimentacaoEstoque` ligada a `lote.id` sempre que
+    `delta != 0` -- ver repository/estoque.py (criar_estoque,
+    ajustar_inventario, confirmar_pendente) -- fechando a contradição que o
+    docstring de `MovimentacaoEstoque` tinha antes: o lote "sem validade"
+    passa a ter movimentação própria, igual aos lotes datados.
+
+    NUANCE (produto genuinamente legado, sem NENHUM histórico de
+    movimentação/lote anterior a esta chamada -- ex.: linha inserida direto
+    no banco antes da Fase 4 existir): como "anterior" é tratado como 0
+    quando a linha ainda não existe, a primeira reconciliação de um produto
+    nessas condições produz um `delta` que inclui, de uma vez só, TODO o
+    saldo pré-existente nunca antes rastreado (não só a mudança desta
+    operação específica) -- mesmo raciocínio documentado em migration.sql
+    sobre não reconstruir histórico retroativo: aqui ele não é reconstruído
+    linha a linha, mas a primeira reconciliação "absorve" o saldo
+    pré-existente de uma vez, o que efetivamente FECHA o gap entre
+    `Estoque.quantidade` e a soma de movimentações (em vez de deixá-lo
+    aberto para sempre). Fora isso (produto que já nasceu dentro da Fase 4,
+    via criar_estoque), `delta` sempre bate exatamente com o delta nominal
+    da própria operação, sem nenhuma surpresa.
     """
     produto = session.get(Estoque, estoque_id)
     quantidade_total = produto.quantidade if produto else Decimal("0.000")
@@ -120,9 +149,11 @@ def reconciliar_lote_sem_validade(session: Session, estoque_id: int) -> None:
     residual = arredondar_quantidade(quantidade_total - soma_datados)
 
     lote = _lote_sem_validade(session, estoque_id)
+    quantidade_anterior = lote.quantidade if lote is not None else Decimal("0.000")
+
     if lote is None:
         if residual == 0:
-            return
+            return None, Decimal("0.000")
         lote = Lote(
             estoque_id=estoque_id,
             codigo_lote=CODIGO_LOTE_LEGADO,
@@ -135,6 +166,9 @@ def reconciliar_lote_sem_validade(session: Session, estoque_id: int) -> None:
 
     lote.quantidade = residual
     session.add(lote)
+
+    delta = arredondar_quantidade(residual - quantidade_anterior)
+    return lote, delta
 
 
 def criar_lote(session: Session, estoque_id: int, codigo_lote: str, quantidade: Decimal,
@@ -154,11 +188,17 @@ def criar_lote(session: Session, estoque_id: int, codigo_lote: str, quantidade: 
     return lote
 
 
-def consumir_fefo(session: Session, estoque_id: int, quantidade: Decimal, nome_produto: str) -> None:
+def consumir_fefo(session: Session, estoque_id: int, quantidade: Decimal, nome_produto: str) -> List[Tuple[int, Decimal]]:
     """
     Baixa `quantidade` dos lotes do produto, sempre do que vence mais cedo
     primeiro (First Expired, First Out) -- se um lote não bastar sozinho,
     continua baixando do(s) próximo(s) por ordem de validade até completar.
+
+    Retorna a lista de consumos (lote_id, quantidade baixada DESSE lote),
+    um item por lote tocado -- usado por repository/vendas.py (Fase 4) para
+    registrar uma movimentação VENDA POR LOTE consumido (cada consumo de
+    lote é um evento distinto, não uma linha só agregando tudo), em vez de
+    uma única movimentação para a venda inteira.
 
     IMPORTANTE (ordem de chamada): deve ser chamada DEPOIS de travar
     (`with_for_update()`) e confirmar que `Estoque.quantidade >= quantidade`,
@@ -204,6 +244,7 @@ def consumir_fefo(session: Session, estoque_id: int, quantidade: Decimal, nome_p
     )
 
     restante = arredondar_quantidade(quantidade)
+    consumos: List[Tuple[int, Decimal]] = []
     for lote in lotes_ordenados:
         if restante <= 0:
             break
@@ -211,9 +252,13 @@ def consumir_fefo(session: Session, estoque_id: int, quantidade: Decimal, nome_p
         lote.quantidade = arredondar_quantidade(lote.quantidade - baixa)
         restante = arredondar_quantidade(restante - baixa)
         session.add(lote)
+        if baixa > 0:
+            consumos.append((lote.id, baixa))
 
     if restante > 0:
         raise HTTPException(status_code=400, detail=f"Estoque insuficiente para {nome_produto}")
+
+    return consumos
 
 
 def listar_alerta_vencimento(dias: int = 7):
