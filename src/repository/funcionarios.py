@@ -2,7 +2,7 @@ import secrets
 import string
 from datetime import datetime, timezone, timedelta
 from fastapi import HTTPException
-from sqlmodel import Session, select
+from sqlmodel import Session, select, delete
 
 from utils.database import Funcionario, HistoricoSenha, Setor, engine
 from utils.security import criar_token, hash_senha, verificar_senha
@@ -186,6 +186,33 @@ def deletar_funcionario(funcionario_id: int):
         if not funcionario:
             raise HTTPException(status_code=404, detail="Funcionário não encontrado")
         try:
+            # Bug pré-existente (de uma fase anterior a esta, não da Fase 4 de
+            # histórico de movimentações) descoberto durante a correção dos
+            # achados do painel de revisão da Fase 4: a FK de
+            # `historico_senha` para `funcionario` (ver migration.sql) nunca
+            # teve ON DELETE configurado -- deletar um funcionário que já
+            # tivesse QUALQUER linha em historico_senha (ou seja, qualquer
+            # funcionário real que já trocou de senha alguma vez, seja pelo
+            # fluxo de troca obrigatória no primeiro acesso ou por
+            # recuperação de senha -- ver criar_funcionario/trocar_senha/
+            # recuperar_senha acima, que sempre chamam _registrar_historico)
+            # quebrava com IntegrityError/500 -- reproduzido ao vivo contra
+            # MySQL real.
+            #
+            # DECISÃO: diferente de `movimentacao_estoque.funcionario_id`
+            # (ON DELETE SET NULL -- preserva o histórico de auditoria de
+            # ESTOQUE, só anonimiza a autoria; ver repository/estoque.py e
+            # migration.sql), `historico_senha` é só um mecanismo interno de
+            # bloqueio de reuso de senha (ver _senha_ja_usada acima) -- não
+            # é log de auditoria de negócio que precise sobreviver à saída
+            # do funcionário. Sem o funcionário dono, a linha não tem mais
+            # nenhum propósito, então apaga junto -- mesmo padrão (DELETE
+            # explícito por query, na MESMA transação, com flush ANTES do
+            # delete do pai) já usado para Lote/MovimentacaoEstoque em
+            # repository/estoque.py::deletar_estoque. Nenhuma mudança de
+            # schema (ON DELETE CASCADE) foi necessária para esta correção.
+            session.exec(delete(HistoricoSenha).where(HistoricoSenha.funcionario_id == funcionario_id))
+            session.flush()
             session.delete(funcionario)
             session.commit()
             return {"msg": "Funcionário deletado com sucesso"}

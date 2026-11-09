@@ -610,3 +610,30 @@ DELIMITER ;
 CALL `_add_column_if_not_exists`('movimentacao_estoque', 'unidade_medida', "VARCHAR(2) NOT NULL DEFAULT 'UN'");
 
 DROP PROCEDURE IF EXISTS `_add_column_if_not_exists`;
+
+-- ============================================================================
+-- Correção adicional (fix/historico-movimentacoes) -- bug PRÉ-EXISTENTE, de
+-- uma fase anterior a esta (não é um achado da Fase 4 em si), descoberto
+-- durante a correção dos achados do painel de revisão da Fase 4: ver
+-- repository/funcionarios.py::deletar_funcionario para o contexto completo.
+--
+-- `historico_senha.funcionario_id -> funcionario.id` (criada bem acima
+-- neste arquivo) nunca teve ON DELETE configurado -- deletar um funcionário
+-- que já tivesse QUALQUER linha em historico_senha (ou seja, qualquer
+-- funcionário real que já trocou de senha alguma vez, seja pelo fluxo de
+-- troca obrigatória no primeiro acesso ou por recuperação de senha) quebrava
+-- com IntegrityError/500, reproduzido ao vivo contra MySQL real.
+--
+-- DECISÃO: diferente de `movimentacao_estoque.funcionario_id` (ON DELETE SET
+-- NULL logo acima -- preserva o histórico de auditoria de ESTOQUE,
+-- anonimizando só a autoria), `historico_senha` é puramente um mecanismo
+-- interno de bloqueio de reuso de senha (ver
+-- repository/funcionarios.py::_senha_ja_usada) -- não é log de auditoria de
+-- negócio que precise sobreviver à saída do funcionário; sem o funcionário
+-- dono, a linha não tem mais nenhum propósito. Por isso a correção é só na
+-- APLICAÇÃO (deletar_funcionario passa a apagar o histórico de senha do
+-- funcionário ANTES de apagar o funcionário, na mesma transação) -- mesmo
+-- padrão já usado para Lote/MovimentacaoEstoque em
+-- repository/estoque.py::deletar_estoque (CRÍTICO 1a acima). Nenhuma mudança
+-- de schema (ON DELETE CASCADE) é necessária para esta correção.
+-- ============================================================================

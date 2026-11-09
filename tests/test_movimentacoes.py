@@ -29,7 +29,7 @@ from repository.funcionarios import deletar_funcionario
 from repository.vendas import criar_venda
 from repository.movimentacoes import registrar_movimentacao, listar_movimentacoes
 from schemas.schemas import EstoqueCreate, VendaInput, ItemVendaSchema, ConfirmarPendenteInput
-from utils.database import Estoque, Funcionario, Lote, MovimentacaoEstoque
+from utils.database import Estoque, Funcionario, HistoricoSenha, Lote, MovimentacaoEstoque
 from conftest import make_setor, make_funcionario, make_produto, make_lote, make_compra, set_token
 
 
@@ -1133,10 +1133,12 @@ def test_deletar_funcionario_com_movimentacao_vinculada_seta_funcionario_id_null
     eng = _engine_com_fk_habilitada(monkeypatch)
     with Session(eng) as s:
         setor = make_setor(s, tipo="crit1_del_func")
-        # with_password=False: evita acionar de propósito uma FK PRÉ-EXISTENTE
-        # e totalmente separada (historico_senha.funcionario_id -> funcionario.id,
-        # sem ON DELETE, de uma fase anterior) -- fora do escopo desta
-        # correção (que é só sobre movimentacao_estoque.funcionario_id).
+        # with_password=False: isola o teste para cobrir SÓ a FK de
+        # movimentacao_estoque.funcionario_id (ON DELETE SET NULL) -- a outra
+        # FK pré-existente e separada (historico_senha.funcionario_id, sem
+        # ON DELETE) tem teste dedicado logo abaixo
+        # (test_deletar_funcionario_com_historico_senha_nao_quebra), que usa
+        # with_password=True de propósito para exercitá-la.
         func = make_funcionario(s, setor_id=setor.id, with_password=False)
         produto = make_produto(s, codigo="CRIT1DELFUNC001", qtd=10)
         mov = MovimentacaoEstoque(
@@ -1156,6 +1158,44 @@ def test_deletar_funcionario_com_movimentacao_vinculada_seta_funcionario_id_null
         mov_db = s.get(MovimentacaoEstoque, mov_id)
         assert mov_db is not None, "a movimentação não deveria ser apagada -- histórico de auditoria preservado"
         assert mov_db.funcionario_id is None, "ON DELETE SET NULL deveria anonimizar a autoria, não bloquear o delete"
+
+
+def test_deletar_funcionario_com_historico_senha_nao_quebra(monkeypatch):
+    """Bug PRÉ-EXISTENTE (de uma fase anterior a esta, não um achado da Fase
+    4 em si) descoberto durante a correção dos achados do painel de revisão
+    da Fase 4: `historico_senha.funcionario_id -> funcionario.id` nunca teve
+    ON DELETE configurado -- deletar um funcionário que já tivesse QUALQUER
+    linha em historico_senha (todo funcionário real que já trocou de senha
+    alguma vez, seja pelo fluxo de troca obrigatória no primeiro acesso ou
+    por recuperação de senha -- `make_funcionario(with_password=True)`, o
+    default, já cria essa linha, igual `criar_funcionario` faz de verdade)
+    quebrava com IntegrityError/500.
+
+    DECISÃO (diferente do caso acima de movimentacao_estoque/SET NULL):
+    historico_senha é só um mecanismo interno de bloqueio de reuso de senha,
+    não um log de auditoria de negócio -- sem motivo para sobreviver à saída
+    do funcionário. A correção apaga o histórico de senha do funcionário
+    junto, no mesmo DELETE explícito que o teste acima teria pego se não
+    tivesse usado with_password=False."""
+    eng = _engine_com_fk_habilitada(monkeypatch)
+    with Session(eng) as s:
+        setor = make_setor(s, tipo="hist_senha_del_func")
+        func = make_funcionario(s, setor_id=setor.id, with_password=True)
+        func_id = func.id
+        hist_antes = s.exec(
+            select(HistoricoSenha).where(HistoricoSenha.funcionario_id == func_id)
+        ).all()
+    assert len(hist_antes) >= 1, "pré-condição do teste: funcionário precisa ter histórico de senha"
+
+    resultado = deletar_funcionario(func_id)
+    assert "deletado" in resultado["msg"]
+
+    with Session(eng) as s:
+        assert s.get(Funcionario, func_id) is None
+        hist_depois = s.exec(
+            select(HistoricoSenha).where(HistoricoSenha.funcionario_id == func_id)
+        ).all()
+        assert hist_depois == [], "histórico de senha deveria ser apagado junto com o funcionário"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
