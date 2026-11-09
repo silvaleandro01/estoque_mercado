@@ -162,20 +162,36 @@ class MovimentacaoEstoque(SQLModel, table=True):
     tests/test_movimentacoes.py).
 
     `lote_id` é OPCIONAL: nem toda movimentação está ligada a um lote
-    específico. Entrada manual (POST /estoque/inserir, cadastro novo ou
-    incremento) e ajuste de inventário mexem só no saldo TOTAL do produto,
-    sem apontar pra um lote em particular -- o detalhamento desses casos
-    por lote já é tratado à parte por `reconciliar_lote_sem_validade`
-    (recalcula o residual do "lote sem validade" do zero, sem precisar de
-    uma movimentação própria por lote; ver docstring de `Lote`). Quando HÁ
-    um lote específico de verdade envolvido -- entrada rastreada via
-    confirmação de compra pendente (criar_lote), ou consumo FEFO numa venda
-    (consumir_fefo) -- `lote_id` aponta pra ele, e nesse caso a soma das
-    movimentações ligadas àquele lote específico também bate com o saldo
-    atual desse lote (soma(MovimentacaoEstoque.quantidade de um lote_id) ==
-    Lote.quantidade desse lote) -- EXCETO para o "lote sem validade"
-    (legado), cujo saldo é um residual recalculado, não um histórico
-    incremental de movimentações.
+    específico -- só quando a origem da movimentação não tem nenhum lote
+    por trás (ex.: `VENDA`/`AJUSTE_INVENTARIO` reconstruídos manualmente
+    fora do fluxo normal da aplicação, ou um teste de unidade que registra
+    direto). Entrada manual (POST /estoque/inserir, cadastro novo ou
+    incremento) e ajuste de inventário mexem no saldo TOTAL do produto sem
+    informar lote/validade -- mas SEMPRE acabam refletidos em algum lote: o
+    "lote sem validade" (legado), reconciliado por
+    `reconciliar_lote_sem_validade` (ver docstring de `Lote`). Entrada
+    rastreada via confirmação de compra pendente (`criar_lote`) ou consumo
+    FEFO numa venda (`consumir_fefo`) usam, em vez disso, um lote datado de
+    verdade.
+
+    CORRIGIDO (CRÍTICO 2 da revisão da Fase 4): até então, toda movimentação
+    que caía no "lote sem validade" era gravada com `lote_id=None` -- o lote
+    "sem validade" nunca tinha uma movimentação própria ligada a ele,
+    contradizendo a promessa acima ("toda alteração de Lote.quantidade grava
+    uma linha aqui"). `reconciliar_lote_sem_validade` agora retorna o delta
+    que efetivamente aplicou a esse lote, e os pontos que a chamam
+    (`criar_estoque`, `ajustar_inventario`, `confirmar_pendente`) registram a
+    movimentação com `lote_id` apontando pra ele (não mais `None`) sempre
+    que esse delta for diferente de zero. Resultado: a invariante
+    soma(MovimentacaoEstoque.quantidade de um lote_id) == Lote.quantidade
+    desse lote agora vale TAMBÉM para o "lote sem validade" (ver
+    tests/test_movimentacoes.py), igual já valia só para lotes datados --
+    com uma única ressalva, documentada na nuance do docstring de
+    `reconciliar_lote_sem_validade`: um produto genuinamente legado (saldo
+    pré-existente nunca antes rastreado em nenhum lote/movimentação) tem seu
+    gap histórico absorvido de uma vez na primeira reconciliação, em vez de
+    reconstruído retroativamente linha a linha (consistente com a regra geral
+    de não reconstruir histórico retroativo, ver migration.sql).
 
     Só `ENTRADA_COMPRA`, `VENDA` e `AJUSTE_INVENTARIO` têm código que
     realmente os gera nesta fase (ver repository/estoque.py,

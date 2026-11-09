@@ -50,7 +50,7 @@ def _lote_sem_validade(session: Session, estoque_id: int) -> Optional[Lote]:
     ).first()
 
 
-def reconciliar_lote_sem_validade(session: Session, estoque_id: int) -> None:
+def reconciliar_lote_sem_validade(session: Session, estoque_id: int) -> Tuple[Optional[Lote], Decimal]:
     """
     Reconcilia a quantidade do lote "sem validade" (legado) do produto para
     que a invariante
@@ -106,6 +106,35 @@ def reconciliar_lote_sem_validade(session: Session, estoque_id: int) -> None:
     própria: ele só reaproveita, dentro da mesma sessão/transação, o lock
     que o chamador já adquiriu -- mesmo raciocínio já usado em
     `consumir_fefo`).
+
+    RETORNO (CRÍTICO 2 da revisão da Fase 4): `(lote, delta)` -- `lote` é a
+    linha "sem validade" após a reconciliação (`None` só quando nada mudou
+    E a linha ainda não existia, ou seja, `delta == 0`); `delta` é quanto
+    `Lote.quantidade` dessa linha mudou NESTA chamada (residual novo menos
+    residual anterior, SIGNED, igual à convenção de
+    `MovimentacaoEstoque.quantidade`), considerando "anterior" como 0
+    quando a linha ainda não existia (mesma convenção de "lote não existe
+    == saldo 0" usada no resto desta função). Quem chama usa esse retorno
+    para registrar uma `MovimentacaoEstoque` ligada a `lote.id` sempre que
+    `delta != 0` -- ver repository/estoque.py (criar_estoque,
+    ajustar_inventario, confirmar_pendente) -- fechando a contradição que o
+    docstring de `MovimentacaoEstoque` tinha antes: o lote "sem validade"
+    passa a ter movimentação própria, igual aos lotes datados.
+
+    NUANCE (produto genuinamente legado, sem NENHUM histórico de
+    movimentação/lote anterior a esta chamada -- ex.: linha inserida direto
+    no banco antes da Fase 4 existir): como "anterior" é tratado como 0
+    quando a linha ainda não existe, a primeira reconciliação de um produto
+    nessas condições produz um `delta` que inclui, de uma vez só, TODO o
+    saldo pré-existente nunca antes rastreado (não só a mudança desta
+    operação específica) -- mesmo raciocínio documentado em migration.sql
+    sobre não reconstruir histórico retroativo: aqui ele não é reconstruído
+    linha a linha, mas a primeira reconciliação "absorve" o saldo
+    pré-existente de uma vez, o que efetivamente FECHA o gap entre
+    `Estoque.quantidade` e a soma de movimentações (em vez de deixá-lo
+    aberto para sempre). Fora isso (produto que já nasceu dentro da Fase 4,
+    via criar_estoque), `delta` sempre bate exatamente com o delta nominal
+    da própria operação, sem nenhuma surpresa.
     """
     produto = session.get(Estoque, estoque_id)
     quantidade_total = produto.quantidade if produto else Decimal("0.000")
@@ -120,9 +149,11 @@ def reconciliar_lote_sem_validade(session: Session, estoque_id: int) -> None:
     residual = arredondar_quantidade(quantidade_total - soma_datados)
 
     lote = _lote_sem_validade(session, estoque_id)
+    quantidade_anterior = lote.quantidade if lote is not None else Decimal("0.000")
+
     if lote is None:
         if residual == 0:
-            return
+            return None, Decimal("0.000")
         lote = Lote(
             estoque_id=estoque_id,
             codigo_lote=CODIGO_LOTE_LEGADO,
@@ -135,6 +166,9 @@ def reconciliar_lote_sem_validade(session: Session, estoque_id: int) -> None:
 
     lote.quantidade = residual
     session.add(lote)
+
+    delta = arredondar_quantidade(residual - quantidade_anterior)
+    return lote, delta
 
 
 def criar_lote(session: Session, estoque_id: int, codigo_lote: str, quantidade: Decimal,

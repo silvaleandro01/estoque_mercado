@@ -134,7 +134,13 @@ def test_criar_estoque_cadastro_novo_gera_entrada_compra(engine, session):
         assert len(movs) == 1
         assert movs[0].tipo == "ENTRADA_COMPRA"
         assert movs[0].quantidade == Decimal("20.000")
-        assert movs[0].lote_id is None
+        # CRÍTICO 2 (revisão da Fase 4): lote_id agora aponta pro lote "sem
+        # validade" (reconciliado pelo próprio cadastro), não mais None --
+        # fecha a contradição do docstring de MovimentacaoEstoque.
+        assert movs[0].lote_id is not None
+        lote_residual = s.exec(select(Lote).where(Lote.estoque_id == produto.id)).first()
+        assert movs[0].lote_id == lote_residual.id
+        assert lote_residual.quantidade == Decimal("20.000")
         assert movs[0].funcionario_id == func.id
 
 
@@ -151,9 +157,19 @@ def test_criar_estoque_cadastro_com_quantidade_zero_nao_gera_movimentacao(engine
 
 
 def test_criar_estoque_incremento_gera_entrada_compra(engine, session):
+    """Base criada via criar_estoque (cadastro), não make_produto direto --
+    um produto 100% nascido dentro da Fase 4 não tem saldo legado
+    pré-existente não rastreado, então o delta do incremento no lote "sem
+    validade" bate exatamente com o incremento nominal (sem nenhuma
+    surpresa de materialização de saldo antigo -- ver nuance no docstring
+    de reconciliar_lote_sem_validade)."""
     setor = make_setor(session, tipo="mov_incr1")
     func = make_funcionario(session, setor_id=setor.id)
-    produto = make_produto(session, codigo="MOVINCR001", qtd=10)
+    produto = criar_estoque(
+        EstoqueCreate(nomedoproduto="Produto", quantidade=Decimal("10"),
+                      preco=Decimal("10.00"), codigodebarras="MOVINCR001", categoria="Geral"),
+        func.id,
+    )
     criar_estoque(
         EstoqueCreate(nomedoproduto="Produto", quantidade=Decimal("5"),
                       preco=Decimal("10.00"), codigodebarras="MOVINCR001", categoria="Geral"),
@@ -161,10 +177,16 @@ def test_criar_estoque_incremento_gera_entrada_compra(engine, session):
     )
     with Session(engine) as s:
         movs = _movimentacoes(s, produto.id)
-        assert len(movs) == 1
-        assert movs[0].tipo == "ENTRADA_COMPRA"
-        assert movs[0].quantidade == Decimal("5.000")
-        assert movs[0].lote_id is None
+        # 2 movimentações: a do cadastro (quantidade=10) + a do incremento
+        # (quantidade=5) -- ambas ligadas ao mesmo lote "sem validade".
+        assert len(movs) == 2
+        incremento = max(movs, key=lambda m: m.id)
+        assert incremento.tipo == "ENTRADA_COMPRA"
+        assert incremento.quantidade == Decimal("5.000")
+        assert incremento.lote_id is not None
+        lote_residual = s.exec(select(Lote).where(Lote.estoque_id == produto.id)).first()
+        assert incremento.lote_id == lote_residual.id
+        assert lote_residual.quantidade == Decimal("15.000")
 
 
 # ── ENTRADA_COMPRA via confirmar_pendente (ligada ao lote criado) ───────────
@@ -195,6 +217,16 @@ def test_confirmar_pendente_produto_novo_gera_entrada_compra_com_lote(engine, se
 
 
 def test_confirmar_pendente_produto_existente_gera_entrada_compra_com_lote(engine, session):
+    """Produto criado via make_produto (legado: saldo=10 pré-existente, sem
+    NENHUM lote/movimentação antes) -- confirmar um pendente com lote
+    rastreado de verdade gera DUAS movimentações (CRÍTICO 2 da revisão da
+    Fase 4): a do lote recém-criado (quantidade=4, o que esta confirmação
+    de fato trouxe) e uma SEGUNDA, ligada ao lote "sem validade", cobrindo o
+    saldo de 10 que nunca tinha sido rastreado em nenhum lote (cenário C do
+    docstring de reconciliar_lote_sem_validade -- "descoberto" só agora
+    porque a lista de lotes deixou de estar vazia). As duas juntas fecham a
+    invariante: soma(movimentações do produto) == Estoque.quantidade final
+    (14), não só os 4 desta confirmação."""
     setor = make_setor(session, tipo="mov_pend2")
     func = make_funcionario(session, setor_id=setor.id)
     produto = make_produto(session, codigo="MOVPEND002", qtd=10)
@@ -214,11 +246,22 @@ def test_confirmar_pendente_produto_existente_gera_entrada_compra_com_lote(engin
         lote_datado = s.exec(
             select(Lote).where(Lote.estoque_id == produto.id, Lote.validade.is_not(None))
         ).first()
+        lote_residual = s.exec(
+            select(Lote).where(Lote.estoque_id == produto.id, Lote.validade.is_(None))
+        ).first()
         movs = _movimentacoes(s, produto.id)
-        assert len(movs) == 1
-        assert movs[0].tipo == "ENTRADA_COMPRA"
-        assert movs[0].quantidade == Decimal("4.000")
-        assert movs[0].lote_id == lote_datado.id
+        assert len(movs) == 2
+
+        mov_rastreada = next(m for m in movs if m.lote_id == lote_datado.id)
+        assert mov_rastreada.tipo == "ENTRADA_COMPRA"
+        assert mov_rastreada.quantidade == Decimal("4.000")
+
+        mov_residual = next(m for m in movs if m.lote_id == lote_residual.id)
+        assert mov_residual.tipo == "ENTRADA_COMPRA"
+        assert mov_residual.quantidade == Decimal("10.000")
+
+        assert s.get(Estoque, produto.id).quantidade == Decimal("14.000")
+        assert _soma_movimentacoes(s, produto.id) == Decimal("14.000")
 
 
 # ── VENDA: uma movimentação POR LOTE consumido (não uma linha agregada) ────
@@ -340,13 +383,16 @@ def test_invariante_lote_rastreado_soma_movimentacoes_bate_com_saldo_do_lote(eng
     da Fase 3 (soma(Lote.quantidade) == Estoque.quantidade), só que por
     lote individual em vez de por produto.
 
-    NÃO vale para o "lote sem validade" (legado): esse lote não nasce de
-    uma movimentação própria -- é um residual recalculado do zero por
-    reconciliar_lote_sem_validade (ver repository/lotes.py), sem um
-    histórico incremental de movimentações por trás. Produtos/lotes
-    anteriores a esta fase (ou cujo saldo nunca passou por um ponto que
-    gera movimentação ligada a lote) não têm histórico retroativo
-    reconstruído -- documentado também na migration.sql.
+    CORRIGIDO (CRÍTICO 2 da revisão da Fase 4): até então, esta invariante
+    NÃO valia para o "lote sem validade" (legado) -- a movimentação que o
+    alimentava era sempre gravada com lote_id=None. Ver
+    test_invariante_lote_sem_validade_soma_movimentacoes_bate_com_saldo_do_lote
+    logo abaixo para a mesma invariante, agora valendo também pra ele (com
+    uma ressalva: só para um produto que nasce inteiramente dentro da Fase 4
+    -- um produto genuinamente legado, com saldo pré-existente nunca antes
+    rastreado em nenhum lote/movimentação, ainda não tem esse histórico
+    reconstruído retroativamente, só absorvido de uma vez na primeira
+    reconciliação -- ver docstring de reconciliar_lote_sem_validade).
     """
     setor = make_setor(session, tipo="mov_inv_lote")
     func = make_funcionario(session, setor_id=setor.id)
@@ -375,6 +421,64 @@ def test_invariante_lote_rastreado_soma_movimentacoes_bate_com_saldo_do_lote(eng
         lote_db = s.get(Lote, lote_id)
         assert lote_db.quantidade == Decimal("6.000")
         assert _soma_movimentacoes_do_lote(s, lote_id) == lote_db.quantidade
+
+
+def test_invariante_lote_sem_validade_soma_movimentacoes_bate_com_saldo_do_lote(engine, session):
+    """
+    CRÍTICO 2 (revisão da Fase 4): a mesma invariante "por lote" acima
+    (soma(MovimentacaoEstoque.quantidade de um lote_id) == Lote.quantidade
+    desse lote), que já valia só para lotes DATADOS, agora vale TAMBÉM para
+    o "lote sem validade" -- desde que o produto nasça inteiramente dentro
+    da Fase 4 (sem saldo legado pré-existente não rastreado, ver nuance no
+    docstring de reconciliar_lote_sem_validade).
+
+    Sequência: cadastro (gera o lote "sem validade" + sua primeira
+    movimentação) -> incremento manual (mexe no mesmo lote) -> ajuste de
+    inventário que REDUZ o saldo (mexe no mesmo lote de novo) -- a soma das
+    três movimentações ligadas a esse lote_id bate com Lote.quantidade dele
+    depois de cada passo.
+    """
+    setor = make_setor(session, tipo="mov_inv_lote_sv")
+    func = make_funcionario(session, setor_id=setor.id)
+
+    # 1) Cadastro com saldo inicial -> primeira movimentação do lote "sem
+    # validade" (criado agora).
+    produto = criar_estoque(
+        EstoqueCreate(nomedoproduto="Produto Lote SV", quantidade=Decimal("20"),
+                      preco=Decimal("10.00"), codigodebarras="MOVINVLOTESV001", categoria="Geral"),
+        func.id,
+    )
+    with Session(engine) as s:
+        lote_sv = s.exec(select(Lote).where(Lote.estoque_id == produto.id)).first()
+        assert lote_sv.quantidade == Decimal("20.000")
+        assert _soma_movimentacoes_do_lote(s, lote_sv.id) == lote_sv.quantidade
+        lote_id = lote_sv.id
+
+    # 2) Incremento manual -> segunda movimentação, mesmo lote.
+    criar_estoque(
+        EstoqueCreate(nomedoproduto="Produto Lote SV", quantidade=Decimal("5"),
+                      preco=Decimal("10.00"), codigodebarras="MOVINVLOTESV001", categoria="Geral"),
+        func.id,
+    )
+    with Session(engine) as s:
+        lote_db = s.get(Lote, lote_id)
+        assert lote_db.quantidade == Decimal("25.000")
+        assert _soma_movimentacoes_do_lote(s, lote_id) == lote_db.quantidade
+
+    # 3) Ajuste de inventário que reduz o saldo -> terceira movimentação,
+    # mesmo lote (ajustar_inventario nunca toca lote datado -- não há
+    # nenhum neste produto -- então o delta cai inteiro no residual).
+    ajustar_inventario(
+        produto.id, AjusteInventarioInput(nova_quantidade=Decimal("18"), motivo="Perda não contabilizada"), func.id,
+    )
+    with Session(engine) as s:
+        lote_db = s.get(Lote, lote_id)
+        assert lote_db.quantidade == Decimal("18.000")
+        assert _soma_movimentacoes_do_lote(s, lote_id) == lote_db.quantidade
+        # Fecha também a invariante por PRODUTO (sempre válida, ver seção
+        # acima) -- as três movimentações, todas ligadas ao mesmo lote,
+        # também batem com Estoque.quantidade.
+        assert _soma_movimentacoes(s, produto.id) == s.get(Estoque, produto.id).quantidade == Decimal("18.000")
 
 
 # ── permissão via rota HTTP (GET /estoque/{id}/movimentacoes) ───────────────
@@ -424,9 +528,17 @@ from schemas.schemas import AjusteInventarioInput, EstoqueUpdate
 
 
 def test_ajustar_inventario_reduz_gera_movimentacao_negativa_com_motivo(engine, session):
+    """Base criada via criar_estoque (cadastro), não make_produto direto --
+    mesmo raciocínio de test_criar_estoque_incremento_gera_entrada_compra:
+    sem saldo legado pré-existente, o delta_residual do ajuste bate
+    exatamente com o delta nominal, sem surpresa."""
     setor = make_setor(session, tipo="ajuste1")
     func = make_funcionario(session, setor_id=setor.id)
-    produto = make_produto(session, codigo="AJUSTE001", qtd=10)
+    produto = criar_estoque(
+        EstoqueCreate(nomedoproduto="Produto Ajuste", quantidade=Decimal("10"),
+                      preco=Decimal("10.00"), codigodebarras="AJUSTE001", categoria="Geral"),
+        func.id,
+    )
 
     resultado = ajustar_inventario(
         produto.id, AjusteInventarioInput(nova_quantidade=Decimal("6"), motivo="Contagem física"), func.id,
@@ -435,17 +547,28 @@ def test_ajustar_inventario_reduz_gera_movimentacao_negativa_com_motivo(engine, 
 
     with Session(engine) as s:
         movs = _movimentacoes(s, produto.id)
-        assert len(movs) == 1
-        assert movs[0].tipo == "AJUSTE_INVENTARIO"
-        assert movs[0].quantidade == Decimal("-4.000")
-        assert movs[0].motivo == "Contagem física"
-        assert movs[0].lote_id is None
+        # cadastro (quantidade=10) + ajuste (-4).
+        assert len(movs) == 2
+        ajuste = max(movs, key=lambda m: m.id)
+        assert ajuste.tipo == "AJUSTE_INVENTARIO"
+        assert ajuste.quantidade == Decimal("-4.000")
+        assert ajuste.motivo == "Contagem física"
+        # CRÍTICO 2 (revisão da Fase 4): lote_id agora aponta pro lote "sem
+        # validade", não mais None.
+        assert ajuste.lote_id is not None
+        lote_residual = s.exec(select(Lote).where(Lote.estoque_id == produto.id)).first()
+        assert ajuste.lote_id == lote_residual.id
+        assert lote_residual.quantidade == Decimal("6.000")
 
 
 def test_ajustar_inventario_aumenta_gera_movimentacao_positiva(engine, session):
     setor = make_setor(session, tipo="ajuste2")
     func = make_funcionario(session, setor_id=setor.id)
-    produto = make_produto(session, codigo="AJUSTE002", qtd=10)
+    produto = criar_estoque(
+        EstoqueCreate(nomedoproduto="Produto Ajuste 2", quantidade=Decimal("10"),
+                      preco=Decimal("10.00"), codigodebarras="AJUSTE002", categoria="Geral"),
+        func.id,
+    )
 
     ajustar_inventario(
         produto.id, AjusteInventarioInput(nova_quantidade=Decimal("15"), motivo="Sobra encontrada"), func.id,
@@ -453,9 +576,10 @@ def test_ajustar_inventario_aumenta_gera_movimentacao_positiva(engine, session):
 
     with Session(engine) as s:
         movs = _movimentacoes(s, produto.id)
-        assert len(movs) == 1
-        assert movs[0].tipo == "AJUSTE_INVENTARIO"
-        assert movs[0].quantidade == Decimal("5.000")
+        assert len(movs) == 2
+        ajuste = max(movs, key=lambda m: m.id)
+        assert ajuste.tipo == "AJUSTE_INVENTARIO"
+        assert ajuste.quantidade == Decimal("5.000")
 
 
 def test_ajustar_inventario_sem_mudanca_de_saldo_nao_gera_movimentacao(engine, session):

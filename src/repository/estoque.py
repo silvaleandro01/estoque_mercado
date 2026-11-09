@@ -56,22 +56,26 @@ def criar_estoque(dados: EstoqueCreate, funcionario_id: int):
             # é frágil quando o produto já tinha saldo que não estava
             # registrado em nenhum lote). Mantém a invariante soma(Lote.
             # quantidade) == Estoque.quantidade (ver repository/lotes.py).
-            reconciliar_lote_sem_validade(session, produto_existente.id)
-            # Histórico de movimentações (Fase 4): incremento manual via
-            # /estoque/inserir é tratado como ENTRADA_COMPRA (entrada de
-            # saldo fora do fluxo formal de compra/confirmação de
-            # pendente, mas ainda assim uma entrada por aquisição, não uma
-            # correção de inventário -- essa tem endpoint e motivo próprios,
-            # ver ajustar_inventario). Sem lote_id: este incremento não cria
-            # nenhum lote rastreado específico, só mexe no residual "sem
-            # validade" acima -- ver docstring de MovimentacaoEstoque sobre
-            # quando lote_id fica de fora. Pula quando dados.quantidade é 0
-            # (nada de fato entrou), mesmo raciocínio de no-op já usado em
-            # reconciliar_lote_sem_validade.
-            if dados.quantidade != 0:
+            #
+            # Histórico de movimentações (Fase 4): CRÍTICO 2 da revisão --
+            # reconciliar_lote_sem_validade agora retorna o delta que
+            # efetivamente aplicou ao lote "sem validade" (lote_residual,
+            # delta_residual) -- a movimentação do incremento é registrada
+            # DIRETO nesse lote (lote_id=lote_residual.id), não mais
+            # lote_id=None, fechando a contradição do docstring de
+            # MovimentacaoEstoque (prometia movimentação para toda
+            # alteração de Lote.quantidade, mas nunca gerava uma para o
+            # lote "sem validade"). Uma ÚNICA movimentação por incremento,
+            # não uma segunda somada a esta -- delta_residual é exatamente
+            # igual a dados.quantidade neste caminho (incremento manual não
+            # toca nenhum lote datado), exceto no primeiro toque num
+            # produto genuinamente legado (ver nuance no docstring de
+            # reconciliar_lote_sem_validade).
+            lote_residual, delta_residual = reconciliar_lote_sem_validade(session, produto_existente.id)
+            if delta_residual != 0:
                 registrar_movimentacao(
                     session, produto_existente.id, "ENTRADA_COMPRA",
-                    dados.quantidade, funcionario_id,
+                    delta_residual, funcionario_id, lote_id=lote_residual.id,
                 )
             try:
                 session.commit()
@@ -118,15 +122,18 @@ def criar_estoque(dados: EstoqueCreate, funcionario_id: int):
             # reconciliar_lote_sem_validade já é um no-op quando a
             # quantidade inicial é 0 (residual fica 0), então chama
             # incondicionalmente.
-            reconciliar_lote_sem_validade(session, estoque.id)
-            # Histórico de movimentações (Fase 4): cadastro novo com
-            # quantidade inicial > 0 também é uma ENTRADA_COMPRA (mesmo
-            # raciocínio do incremento acima). Pula quando a quantidade
-            # inicial é 0 (cadastro de produto sem estoque ainda).
-            if estoque.quantidade != 0:
+            #
+            # Histórico de movimentações (Fase 4): CRÍTICO 2, mesmo
+            # raciocínio do incremento acima -- movimentação ligada DIRETO
+            # ao lote "sem validade" (lote_id=lote_residual.id), não mais
+            # lote_id=None. Para um cadastro novo, delta_residual sempre
+            # bate exatamente com estoque.quantidade (produto acabou de
+            # nascer, impossível ter saldo pré-existente não rastreado).
+            lote_residual, delta_residual = reconciliar_lote_sem_validade(session, estoque.id)
+            if delta_residual != 0:
                 registrar_movimentacao(
                     session, estoque.id, "ENTRADA_COMPRA",
-                    estoque.quantidade, funcionario_id,
+                    delta_residual, funcionario_id, lote_id=lote_residual.id,
                 )
             session.commit()
             session.refresh(estoque)
@@ -254,11 +261,21 @@ def ajustar_inventario(estoque_id: int, dados: AjusteInventarioInput, funcionari
             # "sem validade" a partir do saldo final -- esse comportamento
             # migrou pra cá junto com a responsabilidade de alterar saldo
             # manualmente (ver docstring de schemas.EstoqueUpdate).
-            reconciliar_lote_sem_validade(session, estoque.id)
-            registrar_movimentacao(
-                session, estoque.id, "AJUSTE_INVENTARIO", delta, funcionario_id,
-                motivo=dados.motivo,
-            )
+            #
+            # Histórico de movimentações (Fase 4): CRÍTICO 2 da revisão --
+            # mesmo raciocínio de criar_estoque (ver comentários lá) --
+            # movimentação ligada DIRETO ao lote "sem validade"
+            # (lote_id=lote_residual.id), não mais lote_id=None.
+            # ajustar_inventario nunca toca lote datado, então
+            # delta_residual bate exatamente com `delta` (nominal), exceto
+            # no primeiro toque num produto genuinamente legado (ver nuance
+            # no docstring de reconciliar_lote_sem_validade).
+            lote_residual, delta_residual = reconciliar_lote_sem_validade(session, estoque.id)
+            if delta_residual != 0:
+                registrar_movimentacao(
+                    session, estoque.id, "AJUSTE_INVENTARIO", delta_residual, funcionario_id,
+                    lote_id=lote_residual.id, motivo=dados.motivo,
+                )
 
         try:
             session.commit()
@@ -382,7 +399,7 @@ def confirmar_pendente(item_id: int, dados: ConfirmarPendenteInput, funcionario_
             # sempre, já que a lista de lotes do produto deixa de estar
             # vazia a partir daqui (ver docstring de
             # reconciliar_lote_sem_validade, cenário C).
-            reconciliar_lote_sem_validade(session, produto_existente.id)
+            lote_residual, delta_residual = reconciliar_lote_sem_validade(session, produto_existente.id)
             # Histórico de movimentações (Fase 4): ligada ao lote RASTREADO
             # recém-criado acima (diferente do incremento manual via
             # /estoque/inserir, aqui há um lote/validade reais por trás).
@@ -390,6 +407,24 @@ def confirmar_pendente(item_id: int, dados: ConfirmarPendenteInput, funcionario_
                 session, produto_existente.id, "ENTRADA_COMPRA",
                 item.quantidade, funcionario_id, lote_id=lote.id,
             )
+            # Histórico de movimentações (Fase 4): CRÍTICO 2 da revisão --
+            # movimentação ADICIONAL (não substitui a de cima) sempre que
+            # reconciliar_lote_sem_validade materializar/mudar algo no lote
+            # "sem validade" -- cenário C do docstring de
+            # reconciliar_lote_sem_validade: saldo pré-existente do produto
+            # que nunca tinha sido rastreado em NENHUM lote, só agora
+            # "descoberto" porque a lista de lotes deixou de estar vazia.
+            # Não duplica a contabilidade do item.quantidade acima: esta
+            # segunda movimentação só existe quando delta_residual != 0,
+            # que só acontece por causa desse saldo pré-existente (um
+            # produto sem esse saldo "extra" dá delta_residual == 0 aqui,
+            # já que o lote recém-criado cobre sozinho toda a entrada desta
+            # confirmação).
+            if delta_residual != 0:
+                registrar_movimentacao(
+                    session, produto_existente.id, "ENTRADA_COMPRA",
+                    delta_residual, funcionario_id, lote_id=lote_residual.id,
+                )
             nome_produto = produto_existente.nomedoproduto
         else:
             # Produto novo (não existia ainda com esse código de barras):
@@ -418,11 +453,22 @@ def confirmar_pendente(item_id: int, dados: ConfirmarPendenteInput, funcionario_
             # está no lote recém-criado acima), mas chama mesmo assim por
             # consistência/defesa em profundidade -- é um no-op barato
             # quando o residual já é 0.
-            reconciliar_lote_sem_validade(session, novo.id)
+            lote_residual, delta_residual = reconciliar_lote_sem_validade(session, novo.id)
             registrar_movimentacao(
                 session, novo.id, "ENTRADA_COMPRA",
                 item.quantidade, funcionario_id, lote_id=lote.id,
             )
+            # Histórico de movimentações (Fase 4): CRÍTICO 2 -- mesmo
+            # raciocínio do ramo de produto existente acima. Produto novo:
+            # delta_residual normalmente é 0 (residual esperado é 0, toda a
+            # quantidade já está no lote recém-criado), então esta segunda
+            # movimentação normalmente não é gerada -- mantido por defesa
+            # em profundidade/consistência.
+            if delta_residual != 0:
+                registrar_movimentacao(
+                    session, novo.id, "ENTRADA_COMPRA",
+                    delta_residual, funcionario_id, lote_id=lote_residual.id,
+                )
             nome_produto = novo.nomedoproduto
 
         item.lancado_em = datetime.now(timezone.utc)
