@@ -136,6 +136,24 @@ def autenticar_funcionario(dados: LoginRequest):
 
         bloqueado = bool(funcionario and _esta_bloqueado(funcionario, agora))
 
+        # CORRIGIDO (CRÍTICO 3 da revisão desta trava): até aqui, só o login
+        # BEM-SUCEDIDO zerava `tentativas_login_falhas`/`bloqueado_ate` (ver
+        # mais abaixo). Se o bloqueio já tinha EXPIRADO só pelo tempo
+        # (`bloqueado_ate` no passado) mas nunca houve um login bem-sucedido
+        # depois disso, o contador antigo (ex.: LOGIN_MAX_TENTATIVAS) ficava
+        # parado -- e a PRÓXIMA tentativa, mesmo uma senha ERRADA isolada
+        # dias depois, já somava LOGIN_MAX_TENTATIVAS + 1 e rebloqueava a
+        # conta instantaneamente, em vez de dar as LOGIN_MAX_TENTATIVAS
+        # tentativas completas de novo (confirmado por reprodução). Reset
+        # explícito ANTES de computar `tentativa_de_senha_errada` abaixo, pra
+        # que o incremento desta tentativa (se for o caso) parta de 0, não do
+        # valor antigo -- junto do commit que já existir mais abaixo para
+        # este mesmo fluxo (sem round-trip extra ao banco).
+        bloqueio_expirado = bool(funcionario and funcionario.bloqueado_ate is not None and not bloqueado)
+        if bloqueio_expirado:
+            funcionario.tentativas_login_falhas = 0
+            funcionario.bloqueado_ate = None
+
         # Lockout (fix/login-rate-limiting) -- decisões de escopo:
         #   - usuário inexistente: não existe linha/conta pra incrementar ou
         #     bloquear. Um rate-limit por IP foi avaliado e descartado por

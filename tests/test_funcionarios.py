@@ -262,6 +262,43 @@ def test_login_bloqueio_expira_passado_o_tempo(engine, session):
     assert func.bloqueado_ate is None
 
 
+def test_login_bloqueio_expirado_reseta_contador_antes_de_tentativa_errada(engine, session):
+    """
+    CRÍTICO 3 da revisão de fix/login-rate-limiting: test_login_bloqueio_
+    expira_passado_o_tempo (acima) só cobria o caso de a próxima tentativa
+    ser com a senha CERTA. Mas se `bloqueado_ate` já passou e a PRÓXIMA
+    tentativa é uma senha ERRADA (mesmo uma só, isolada, dias depois), o
+    contador antigo (ex.: LOGIN_MAX_TENTATIVAS, deixado pelo bloqueio
+    anterior) não podia continuar de onde parou -- sem o reset explícito
+    quando o bloqueio expira, essa tentativa isolada somaria
+    LOGIN_MAX_TENTATIVAS + 1 e rebloquearia a conta instantaneamente, em
+    vez de dar as LOGIN_MAX_TENTATIVAS tentativas completas de novo (como
+    aconteceria para qualquer conta que nunca tivesse sido bloqueada antes).
+    """
+    setor = make_setor(session, tipo="lock_login_reset_errada")
+    f = make_funcionario(session, "bloqueio", "expirado2", setor.id)
+    with Session(engine) as s:
+        func = s.get(Funcionario, f.id)
+        func.tentativas_login_falhas = LOGIN_MAX_TENTATIVAS
+        func.bloqueado_ate = datetime.now(timezone.utc) - timedelta(minutes=1)
+        s.add(func)
+        s.commit()
+
+    with pytest.raises(HTTPException) as exc:
+        autenticar_funcionario(LoginRequest(username="bloqueio.expirado2", senha="SenhaErrada@1"))
+    assert exc.value.status_code == 401
+    assert exc.value.detail == MSG_LOGIN_INVALIDO
+
+    with Session(engine) as s:
+        func = s.get(Funcionario, f.id)
+    assert func.tentativas_login_falhas == 1, (
+        "o bloqueio expirado deveria ter resetado o contador para 0 ANTES de "
+        "contar esta tentativa errada -- não acumular a partir do valor antigo "
+        "e rebloquear a conta instantaneamente"
+    )
+    assert func.bloqueado_ate is None
+
+
 def test_login_usuario_inexistente_nunca_gera_erro_mesmo_apos_varias_tentativas(engine, session):
     """
     Decisão de escopo (ver autenticar_funcionario): não existe linha/conta
