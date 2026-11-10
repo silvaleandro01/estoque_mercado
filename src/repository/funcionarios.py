@@ -3,7 +3,7 @@ import string
 from datetime import datetime, timezone, timedelta
 from fastapi import HTTPException
 from sqlalchemy.exc import OperationalError
-from sqlmodel import Session, select, delete
+from sqlmodel import Session, select, delete, func
 
 from utils.database import Funcionario, HistoricoSenha, Setor, engine
 from utils.security import (
@@ -63,11 +63,40 @@ def autenticar_funcionario(dados: LoginRequest):
         # ambas ler `tentativas_login_falhas` com o mesmo valor "antigo" e
         # incrementar a partir dele (lost update), deixando o contador andar
         # mais devagar do que deveria sob um ataque de força bruta paralelo.
+        #
+        # CORRIGIDO (CRÍTICO 1 da revisão desta trava): esta consulta usava
+        # `.ilike()` (comparação case-insensitive), que o dialeto MySQL do
+        # SQLAlchemy compila como `WHERE LOWER(nome) LIKE LOWER(%s) AND
+        # LOWER(sobrenome) LIKE LOWER(%s)` -- confirmado inspecionando o SQL
+        # compilado. Sem NENHUM índice utilizável em nome/sobrenome, isso já
+        # forçava um full table scan (EXPLAIN type=ALL); e sob REPEATABLE
+        # READ (padrão do InnoDB), uma leitura de bloqueio (FOR UPDATE) que
+        # faz table scan trava a tabela `funcionario` INTEIRA durante a
+        # transação, não só a linha procurada -- medido ao vivo contra MySQL
+        # real: 10 contas DIFERENTES logando simultaneamente levaram ~9x mais
+        # tempo que uma chamada isolada, quando deveriam ser independentes. A
+        # própria correção de segurança (lockout) tinha introduzido assim um
+        # problema de disponibilidade pior do que o resolvido.
+        #
+        # A correção tem DUAS partes, as duas necessárias:
+        #   1) índice funcional em (LOWER(nome), LOWER(sobrenome))
+        #      (ver migration.sql) -- cobre a expressão exata usada aqui.
+        #   2) trocar `.ilike()` por `func.lower(col) == valor.lower()`
+        #      (equivalente em resultado -- nome/sobrenome não têm wildcards
+        #      de uso legítimo, então LIKE nunca fazia pattern matching real
+        #      aqui, só comparação case-insensitive; como bônus, fecha
+        #      também a possibilidade de alguém injetar `%`/`_` no username
+        #      para forçar um scan ainda mais caro ou casar múltiplas
+        #      contas). Confirmado ao vivo com EXPLAIN que só com as DUAS
+        #      partes juntas o MySQL passa a usar o índice (type=ref) --
+        #      `LOWER(col) LIKE LOWER(%s)` (a forma antiga) não usa um
+        #      índice funcional mesmo quando ele existe e cobre a expressão;
+        #      só `LOWER(col) = LOWER(%s)` usa.
         funcionario = session.exec(
             select(Funcionario)
             .where(
-                Funcionario.nome.ilike(nome),
-                Funcionario.sobrenome.ilike(sobrenome),
+                func.lower(Funcionario.nome) == nome.lower(),
+                func.lower(Funcionario.sobrenome) == sobrenome.lower(),
             )
             .with_for_update()
         ).first()
