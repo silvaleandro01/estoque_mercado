@@ -381,6 +381,93 @@ def test_autenticar_consulta_funcionario_com_lock_for_update(engine, session, mo
     assert "FOR UPDATE" in compilada
 
 
+def test_autenticar_consulta_usa_lower_sql_dos_dois_lados(engine, session, monkeypatch):
+    """
+    A consulta comparava
+    `func.lower(Funcionario.nome) == nome.lower()` -- o lado esquerdo vira
+    `LOWER()` do MySQL (resolvido em cima do valor armazenado), mas o lado
+    direito usava `.lower()` do PYTHON, aplicado antes de virar parâmetro da
+    query. Python e MySQL não garantem o MESMO case-folding para todo
+    caractere Unicode -- se divergissem para algum caractere específico, um
+    usuário legítimo tomaria 401 mesmo com a senha certa. Corrigido aplicando
+    `func.lower()` nos dois lados (MySQL faz o case-folding dos dois, nunca
+    mistura com Python). Confirma, inspecionando o SQL compilado para o
+    dialeto MySQL, que `LOWER()` envolve o parâmetro em AMBOS os lados da
+    comparação (duas ocorrências de `lower(%s)`, uma por coluna).
+    """
+    import sqlmodel as sqlmodel_mod
+    from sqlalchemy.dialects import mysql
+
+    setor = make_setor(session, tipo="lower_sql1")
+    make_funcionario(session, "maria", "lower", setor.id)
+
+    statements = []
+    orig_exec = sqlmodel_mod.Session.exec
+
+    def espiar_exec(self, statement, *args, **kwargs):
+        statements.append(statement)
+        return orig_exec(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(sqlmodel_mod.Session, "exec", espiar_exec)
+    autenticar_funcionario(LoginRequest(username="maria.lower", senha="Test@123"))
+
+    assert statements
+    compilada = str(statements[0].compile(dialect=mysql.dialect()))
+    assert compilada.count("lower(%s)") == 2, (
+        "esperava LOWER() do MySQL envolvendo o parâmetro dos dois lados da "
+        "comparação (nome e sobrenome) -- não misturar com .lower() do "
+        f"Python no valor de entrada. SQL compilado: {compilada!r}"
+    )
+
+
+def test_trocar_senha_consulta_funcionario_com_lock_for_update(engine, session, monkeypatch):
+    """
+    Este endpoint lia o funcionário com `session.get(Funcionario, funcionario_id)`
+    (sem trava nenhuma) e fazia o mesmo padrão "ler, incrementar em memória,
+    escrever" que o login tinha antes da correção equivalente lá.
+    Reproduzido ao vivo (threads reais contra MySQL real, descartado depois):
+    20 tentativas simultâneas de senha_atual errada contra a MESMA conta
+    deixavam o contador em 1-2 (nunca nos 5 esperados) -- a conta nunca
+    bloqueava de verdade.
+
+    Mesma limitação de ambiente que test_autenticar_consulta_funcionario_com_
+    lock_for_update: SQLite (usado pela suíte) ignora `SELECT ... FOR UPDATE`,
+    então não reproduz o lock real de linha do MySQL aqui -- o teste verifica
+    o contrato que importa (a consulta pede o lock pessimista), compilando a
+    própria instrução para o dialeto MySQL.
+    """
+    import sqlmodel as sqlmodel_mod
+    from sqlalchemy.dialects import mysql
+
+    setor = make_setor(session, tipo="lock_for_update_troca")
+    f = make_funcionario(session, "trava", "trocasenha", setor.id)
+
+    statements = []
+    orig_exec = sqlmodel_mod.Session.exec
+
+    def espiar_exec(self, statement, *args, **kwargs):
+        statements.append(statement)
+        return orig_exec(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(sqlmodel_mod.Session, "exec", espiar_exec)
+    trocar_senha(f.id, TrocarSenhaRequest(senha_atual="Test@123", nova_senha="NovaSenha@456"))
+
+    assert statements, "esperava que trocar_senha consultasse o funcionário via session.exec"
+
+    # A primeira consulta é a do funcionário (com lock); as seguintes (ex.:
+    # _senha_ja_usada consultando HistoricoSenha) não usam -- nem precisam de
+    # -- with_for_update(), então só a primeira é verificada aqui.
+    primeira = statements[0]
+    assert getattr(primeira, "_for_update_arg", None) is not None, (
+        "a consulta ao funcionário em trocar_senha precisa usar "
+        "with_for_update() para travar a linha e evitar race condition no "
+        "contador de tentativas sob chamadas simultâneas a este endpoint"
+    )
+
+    compilada = str(primeira.compile(dialect=mysql.dialect()))
+    assert "FOR UPDATE" in compilada
+
+
 # ── trava de concorrência (deadlock) ────────────────────────────────────────────
 
 def test_login_deadlock_mysql_vira_409_nao_500(engine, session, monkeypatch):
@@ -817,21 +904,23 @@ def test_trocar_senha_erro_interno(engine, session):
 
 # ── trocar_senha -- lockout (IMPORTANTE 1 e 2 da revisão de fix/login-rate-limiting) ──
 
-def test_trocar_senha_sucesso_reseta_lockout(engine, session):
+def test_trocar_senha_sucesso_reseta_lockout_ja_expirado(engine, session):
     """
     IMPORTANTE 1: trocar_senha muda o password_hash mas, antes desta
     correção, não tocava em tentativas_login_falhas/bloqueado_ate -- mesmo
     com a senha corrigida, a vítima de um lockout malicioso (via /login)
     continuava travada os minutos inteiros. Com a senha_atual CORRETA, a
-    troca bem-sucedida agora zera o lockout, mesmo que ele estivesse ATIVO
-    no momento (ver decisão de assimetria documentada em trocar_senha).
+    troca bem-sucedida zera o lockout de uma conta cujo bloqueio já EXPIROU
+    só pelo tempo (diferente de uma conta ainda ATIVAMENTE bloqueada, que é
+    rejeitada antes mesmo de chegar aqui -- ver
+    test_trocar_senha_rejeitada_mesmo_com_senha_correta_durante_bloqueio).
     """
     setor = make_setor(session, tipo="troca_lockout1")
     f = make_funcionario(session, setor_id=setor.id)
     with Session(engine) as s:
         func = s.get(Funcionario, f.id)
         func.tentativas_login_falhas = LOGIN_MAX_TENTATIVAS
-        func.bloqueado_ate = datetime.now(timezone.utc) + timedelta(minutes=LOGIN_BLOQUEIO_MINUTOS)
+        func.bloqueado_ate = datetime.now(timezone.utc) - timedelta(minutes=1)  # já expirado
         s.add(func)
         s.commit()
 
@@ -897,13 +986,16 @@ def test_trocar_senha_bloqueio_tambem_afeta_login(engine, session):
     assert exc.value.detail == MSG_LOGIN_INVALIDO
 
 
-def test_trocar_senha_correta_funciona_mesmo_com_conta_bloqueada_por_login(engine, session):
+def test_trocar_senha_rejeitada_mesmo_com_senha_correta_durante_bloqueio(engine, session):
     """
-    Assimetria intencional vs login (documentada em trocar_senha): uma
-    conta bloqueada por força bruta no /login ainda aceita trocar_senha com
-    a senha_atual CORRETA -- senão a vítima de um lockout malicioso nunca
-    conseguiria usar este endpoint pra se recuperar enquanto o bloqueio
-    estivesse ativo, e o IMPORTANTE 1 ficaria inalcançável aqui.
+    Simétrico ao login (ver comentário em trocar_senha): com a conta
+    bloqueada por força bruta no /login, trocar_senha rejeita mesmo com a
+    senha_atual CORRETA, sem sequer verificá-la -- caso contrário, alguém
+    com um token roubado poderia continuar testando a senha atual à vontade
+    enquanto a conta estivesse bloqueada, tornando o lockout deste endpoint
+    cosmético contra o próprio ataque que ele existe pra conter. A
+    recuperação durante o bloqueio passa por `recuperar_senha` (e-mail) ou
+    `atualizar_funcionario` (RH/admin), não mais por este endpoint.
     """
     setor = make_setor(session, tipo="troca_lockout4")
     f = make_funcionario(session, "bloqueado", "porlogin", setor.id)
@@ -915,13 +1007,55 @@ def test_trocar_senha_correta_funciona_mesmo_com_conta_bloqueada_por_login(engin
     with Session(engine) as s:
         func = s.get(Funcionario, f.id)
     assert func.bloqueado_ate is not None
+    bloqueado_ate_original = func.bloqueado_ate
+    tentativas_original = func.tentativas_login_falhas
 
-    resultado = trocar_senha(f.id, TrocarSenhaRequest(senha_atual="Test@123", nova_senha="NovaSenha@999"))
-    assert "sucesso" in resultado["msg"]
+    with pytest.raises(HTTPException) as exc:
+        trocar_senha(f.id, TrocarSenhaRequest(senha_atual="Test@123", nova_senha="NovaSenha@999"))
+    assert exc.value.status_code == 401
 
     with Session(engine) as s:
         func = s.get(Funcionario, f.id)
-    assert func.tentativas_login_falhas == 0
+    # Rejeitado sem sequer tocar no contador/bloqueio -- a senha nunca foi
+    # verificada.
+    assert func.tentativas_login_falhas == tentativas_original
+    assert func.bloqueado_ate == bloqueado_ate_original
+
+
+def test_trocar_senha_reset_de_lockout_expirado_persiste_mesmo_com_senha_reutilizada(engine, session):
+    """
+    Cenário: bloqueio já EXPIRADO só pelo tempo (contador alto,
+    `bloqueado_ate` no passado, sem nenhuma troca de senha bem-sucedida
+    depois) + senha_atual CERTA + nova_senha igual a uma das últimas 3
+    (dispara 400 de reuso). Antes desta correção, o reset do lockout (feito
+    só em memória no topo de trocar_senha) nunca era persistido nesse
+    caminho -- a sessão saía pelo 400 sem nenhum commit alcançar o
+    `funcionario`, recriando o mesmo bug do CRÍTICO 3 do login (bloqueio
+    "preso" além do tempo configurado) só que por este caminho específico.
+    Confirma que, mesmo recebendo o 400 esperado, o contador fica resetado
+    no banco depois.
+    """
+    setor = make_setor(session, tipo="troca_lockout5")
+    f = make_funcionario(session, "reset", "expirado", setor.id)
+
+    with Session(engine) as s:
+        func = s.get(Funcionario, f.id)
+        func.tentativas_login_falhas = LOGIN_MAX_TENTATIVAS
+        func.bloqueado_ate = datetime.now(timezone.utc) - timedelta(minutes=1)  # já expirado
+        s.add(func)
+        s.commit()
+
+    with pytest.raises(HTTPException) as exc:
+        trocar_senha(f.id, TrocarSenhaRequest(senha_atual="Test@123", nova_senha="Test@123"))
+    assert exc.value.status_code == 400
+    assert "últimas senhas" in exc.value.detail
+
+    with Session(engine) as s:
+        func = s.get(Funcionario, f.id)
+    assert func.tentativas_login_falhas == 0, (
+        "o reset do lockout expirado precisa ser persistido mesmo quando a "
+        "checagem de reuso de senha dispara um 400 em seguida"
+    )
     assert func.bloqueado_ate is None
 
 
@@ -1020,22 +1154,25 @@ def test_recuperar_senha_erro_db(engine, session):
 
 # ── helpers internos ──────────────────────────────────────────────────────────
 
+_MSG_ERRO_TRANSITORIO_TESTE = "Não foi possível processar a solicitação, tente novamente"
+
+
 def test_senha_ja_usada_true(engine, session):
     setor = make_setor(session, tipo="hlp")
     f = make_funcionario(session, setor_id=setor.id)
     with Session(engine) as s:
-        assert _senha_ja_usada(s, f.id, "Test@123") is True
+        assert _senha_ja_usada(s, f.id, "Test@123", _MSG_ERRO_TRANSITORIO_TESTE) is True
 
 
 def test_senha_ja_usada_false(engine, session):
     setor = make_setor(session, tipo="hlp2")
     f = make_funcionario(session, setor_id=setor.id)
     with Session(engine) as s:
-        assert _senha_ja_usada(s, f.id, "SenhaNova@999") is False
+        assert _senha_ja_usada(s, f.id, "SenhaNova@999", _MSG_ERRO_TRANSITORIO_TESTE) is False
 
 
 def test_senha_ja_usada_sem_historico(engine, session):
     setor = make_setor(session, tipo="hlp3")
     f = make_funcionario(session, setor_id=setor.id, with_password=False)
     with Session(engine) as s:
-        assert _senha_ja_usada(s, f.id, "Qualquer@123") is False
+        assert _senha_ja_usada(s, f.id, "Qualquer@123", _MSG_ERRO_TRANSITORIO_TESTE) is False

@@ -30,17 +30,34 @@ def _registrar_historico(session: Session, funcionario_id: int, password_hash: s
     session.add(HistoricoSenha(funcionario_id=funcionario_id, password_hash=password_hash))
 
 
-def _senha_ja_usada(session: Session, funcionario_id: int, nova_senha: str) -> bool:
-    historico = session.exec(
-        select(HistoricoSenha)
-        .where(HistoricoSenha.funcionario_id == funcionario_id)
-        .order_by(HistoricoSenha.criado_em.desc())
-        .limit(3)
-    ).all()
+def _senha_ja_usada(
+    session: Session, funcionario_id: int, nova_senha: str, mensagem_erro_transitorio: str
+) -> bool:
+    # Envolvida em _com_tratamento_operational_error: chamada de dentro de
+    # trocar_senha/atualizar_funcionario enquanto a linha do funcionário já
+    # está travada (FOR UPDATE) nessas duas rotas, então um deadlock/lock-
+    # wait-timeout aqui precisa virar o mesmo 409 "tente novamente" do resto
+    # do fluxo, não escapar cru como 500.
+    historico = _com_tratamento_operational_error(
+        session,
+        lambda: session.exec(
+            select(HistoricoSenha)
+            .where(HistoricoSenha.funcionario_id == funcionario_id)
+            .order_by(HistoricoSenha.criado_em.desc())
+            .limit(3)
+        ).all(),
+        mensagem_erro_transitorio,
+    )
     return any(verificar_senha(nova_senha, h.password_hash) for h in historico)
 
 
 def _esta_bloqueado(funcionario: Funcionario, agora: datetime) -> bool:
+    # `bloqueado_ate` só é zerado quando alguém tenta logar/trocar senha
+    # depois que o bloqueio expirou (ver _resetar_lockout) -- não há job que
+    # limpe contas paradas. Por isso NUNCA consultar o banco com
+    # `bloqueado_ate IS NOT NULL` sozinho (dá falso positivo em conta cujo
+    # bloqueio já passou do tempo); sempre repetir esta comparação com
+    # `agora`, igual abaixo.
     bloqueado_ate = funcionario.bloqueado_ate
     if not bloqueado_ate:
         return False
@@ -75,18 +92,28 @@ def _com_tratamento_operational_error(session: Session, operacao, mensagem: str)
     se ela levantar OperationalError, faz rollback da sessão e delega para
     `tratar_operational_error` (-> HTTPException 409 se for deadlock/lock-
     wait-timeout do MySQL, senão relança a exceção original sem mudança).
-
-    NITPICK (revisão de fix/login-rate-limiting): extraído pra eliminar a
-    duplicação entre os 3 pontos de `autenticar_funcionario` que viraram
-    `try: ... / except OperationalError: tratar_operational_error(...)`
-    depois do CRÍTICO 2 -- o SELECT ... FOR UPDATE em si, o commit do
-    incremento de tentativas, e o commit do login bem-sucedido.
     """
     try:
         return operacao()
     except OperationalError as exc:
         session.rollback()
         tratar_operational_error(exc, mensagem)
+
+
+def _registrar_tentativa_falha(
+    session: Session, funcionario: Funcionario, agora: datetime, mensagem_erro_transitorio: str
+) -> None:
+    """
+    Incrementa tentativas_login_falhas, aplica bloqueado_ate quando atinge
+    LOGIN_MAX_TENTATIVAS, e persiste -- compartilhado entre
+    autenticar_funcionario e trocar_senha, que reaproveitam a mesma
+    infraestrutura de lockout para a mesma conta.
+    """
+    funcionario.tentativas_login_falhas += 1
+    if funcionario.tentativas_login_falhas >= LOGIN_MAX_TENTATIVAS:
+        funcionario.bloqueado_ate = agora + timedelta(minutes=LOGIN_BLOQUEIO_MINUTOS)
+    session.add(funcionario)
+    _com_tratamento_operational_error(session, session.commit, mensagem_erro_transitorio)
 
 
 def autenticar_funcionario(dados: LoginRequest):
@@ -104,24 +131,24 @@ def autenticar_funcionario(dados: LoginRequest):
         # incrementar a partir dele (lost update), deixando o contador andar
         # mais devagar do que deveria sob um ataque de força bruta paralelo.
         #
-        # CORRIGIDO (CRÍTICO 1 da revisão desta trava): esta consulta usava
-        # `.ilike()` (comparação case-insensitive), que o dialeto MySQL do
-        # SQLAlchemy compila como `WHERE LOWER(nome) LIKE LOWER(%s) AND
-        # LOWER(sobrenome) LIKE LOWER(%s)` -- confirmado inspecionando o SQL
-        # compilado. Sem NENHUM índice utilizável em nome/sobrenome, isso já
-        # forçava um full table scan (EXPLAIN type=ALL); e sob REPEATABLE
-        # READ (padrão do InnoDB), uma leitura de bloqueio (FOR UPDATE) que
-        # faz table scan trava a tabela `funcionario` INTEIRA durante a
-        # transação, não só a linha procurada -- medido ao vivo contra MySQL
-        # real: 10 contas DIFERENTES logando simultaneamente levaram ~9x mais
-        # tempo que uma chamada isolada, quando deveriam ser independentes. A
-        # própria correção de segurança (lockout) tinha introduzido assim um
-        # problema de disponibilidade pior do que o resolvido.
+        # CORRIGIDO: esta consulta usava `.ilike()` (comparação case-
+        # insensitive), que o dialeto MySQL do SQLAlchemy compila como
+        # `WHERE LOWER(nome) LIKE LOWER(%s) AND LOWER(sobrenome) LIKE
+        # LOWER(%s)` -- confirmado inspecionando o SQL compilado. Sem NENHUM
+        # índice utilizável em nome/sobrenome, isso já forçava um full table
+        # scan (EXPLAIN type=ALL); e sob REPEATABLE READ (padrão do InnoDB),
+        # uma leitura de bloqueio (FOR UPDATE) que faz table scan trava a
+        # tabela `funcionario` INTEIRA durante a transação, não só a linha
+        # procurada -- medido ao vivo contra MySQL real: 10 contas DIFERENTES
+        # logando simultaneamente levaram ~9x mais tempo que uma chamada
+        # isolada, quando deveriam ser independentes. A própria correção de
+        # segurança (lockout) tinha introduzido assim um problema de
+        # disponibilidade pior do que o resolvido.
         #
         # A correção tem DUAS partes, as duas necessárias:
         #   1) índice funcional em (LOWER(nome), LOWER(sobrenome))
         #      (ver migration.sql) -- cobre a expressão exata usada aqui.
-        #   2) trocar `.ilike()` por `func.lower(col) == valor.lower()`
+        #   2) trocar `.ilike()` por `func.lower(col) == func.lower(valor)`
         #      (equivalente em resultado -- nome/sobrenome não têm wildcards
         #      de uso legítimo, então LIKE nunca fazia pattern matching real
         #      aqui, só comparação case-insensitive; como bônus, fecha
@@ -133,8 +160,25 @@ def autenticar_funcionario(dados: LoginRequest):
         #      índice funcional mesmo quando ele existe e cobre a expressão;
         #      só `LOWER(col) = LOWER(%s)` usa.
         #
-        # CORRIGIDO (CRÍTICO 2 da revisão desta trava): este SELECT ... FOR
-        # UPDATE em si não tinha nenhum tratamento de OperationalError --
+        # CORRIGIDO: o lado direito da comparação usava
+        # `nome.lower()`/`sobrenome.lower()` -- `.lower()`
+        # do PYTHON, aplicado ANTES de virar parâmetro da query -- enquanto o
+        # lado esquerdo (`func.lower(Funcionario.nome)`) é resolvido pelo
+        # MySQL (`LOWER()` do SQL) em cima do valor armazenado. Python e
+        # MySQL não usam necessariamente o MESMO algoritmo de case-folding
+        # para todo caractere Unicode (ex.: alguns caracteres especiais se
+        # comportam diferente em cada um) -- se um username legítimo contiver
+        # um desses caracteres, os dois lados poderiam divergir e um usuário
+        # real tomaria 401 mesmo com a senha certa. Corrigido aplicando
+        # `func.lower()` dos DOIS lados (deixa o MySQL fazer o case-folding
+        # dos dois, nunca mistura com `.lower()` do Python) -- elimina a
+        # possibilidade de divergência entre os dois mecanismos. Não muda a
+        # expressão indexada (continua `LOWER(coluna)` do lado esquerdo),
+        # então o índice funcional acima continua válido sem nenhuma mudança
+        # de schema.
+        #
+        # CORRIGIDO: este SELECT ... FOR UPDATE em si não tinha nenhum
+        # tratamento de OperationalError --
         # só os commits mais abaixo tinham. Reproduzido ao vivo contra MySQL
         # real (innodb_lock_wait_timeout reduzido só para o teste): um
         # lock-wait-timeout de verdade (código 1205 -- outra transação
@@ -149,8 +193,8 @@ def autenticar_funcionario(dados: LoginRequest):
             lambda: session.exec(
                 select(Funcionario)
                 .where(
-                    func.lower(Funcionario.nome) == nome.lower(),
-                    func.lower(Funcionario.sobrenome) == sobrenome.lower(),
+                    func.lower(Funcionario.nome) == func.lower(nome),
+                    func.lower(Funcionario.sobrenome) == func.lower(sobrenome),
                 )
                 .with_for_update()
             ).first(),
@@ -177,8 +221,8 @@ def autenticar_funcionario(dados: LoginRequest):
 
         bloqueado = bool(funcionario and _esta_bloqueado(funcionario, agora))
 
-        # CORRIGIDO (CRÍTICO 3 da revisão desta trava): até aqui, só o login
-        # BEM-SUCEDIDO zerava `tentativas_login_falhas`/`bloqueado_ate` (ver
+        # CORRIGIDO: até aqui, só o login BEM-SUCEDIDO zerava
+        # `tentativas_login_falhas`/`bloqueado_ate` (ver
         # mais abaixo). Se o bloqueio já tinha EXPIRADO só pelo tempo
         # (`bloqueado_ate` no passado) mas nunca houve um login bem-sucedido
         # depois disso, o contador antigo (ex.: LOGIN_MAX_TENTATIVAS) ficava
@@ -216,35 +260,30 @@ def autenticar_funcionario(dados: LoginRequest):
         )
 
         if tentativa_de_senha_errada:
-            # AVALIADO (IMPORTANTE 3 da revisão desta trava): só este ramo
-            # ("conta existe, desbloqueada, senha errada") faz um commit
-            # extra aqui (pra persistir o incremento do contador) -- os
-            # outros ramos que levam ao mesmo 401 genérico (usuário
-            # inexistente, sem senha definida, já bloqueada) não passam por
-            # aqui, então respondem sem esse round-trip de escrita extra.
-            # Isso cria uma pequena descontinuidade de tempo que, em teoria,
-            # poderia ajudar a distinguir de fora o momento em que uma conta
-            # passa a existir/estar desbloqueada vs os outros estados.
-            # DECISÃO: aceito como risco baixo, sem equalizar, porque (1) o
-            # custo DOMINANTE do tempo de resposta já é o bcrypt de
-            # verificar_senha() -- dezenas a centenas de ms -- e esse custo
-            # já é igual em TODOS os ramos (HASH_DUMMY_LOGIN garante que
-            # verificar_senha() roda sempre, ver mais acima); o commit extra
-            # aqui é uma única escrita numa linha já localizada pelo índice
-            # (CRÍTICO 1), ordens de grandeza mais rápido que o bcrypt, então
-            # uma fração pequena do tempo total; (2) distinguir essa
-            # diferença de fora exigiria medir muitas requisições com
-            # precisão maior que o jitter normal de rede -- fora do modelo
-            # de ameaça realista para este projeto acadêmico/pessoal.
-            # Equalizar de verdade (ex.: forçar algum round-trip de escrita
-            # equivalente nos outros 3 ramos) adicionaria complexidade/risco
-            # de bug novo pra fechar uma brecha residual de baixíssimo
-            # impacto prático -- não foi considerado valer a pena.
-            funcionario.tentativas_login_falhas += 1
-            if funcionario.tentativas_login_falhas >= LOGIN_MAX_TENTATIVAS:
-                funcionario.bloqueado_ate = agora + timedelta(minutes=LOGIN_BLOQUEIO_MINUTOS)
-            session.add(funcionario)
-            _com_tratamento_operational_error(session, session.commit, mensagem_erro_transitorio)
+            # AVALIADO: só este ramo ("conta existe, desbloqueada, senha
+            # errada") faz um commit extra aqui (pra persistir o incremento
+            # do contador) -- os outros ramos que levam ao mesmo 401 genérico
+            # (usuário inexistente, sem senha definida, já bloqueada) não
+            # passam por aqui, então respondem sem esse round-trip de escrita
+            # extra. Isso cria uma pequena descontinuidade de tempo que, em
+            # teoria, poderia ajudar a distinguir de fora o momento em que
+            # uma conta passa a existir/estar desbloqueada vs os outros
+            # estados. DECISÃO: aceito como risco baixo, sem equalizar,
+            # porque (1) o custo DOMINANTE do tempo de resposta já é o bcrypt
+            # de verificar_senha() -- dezenas a centenas de ms -- e esse
+            # custo já é igual em TODOS os ramos (HASH_DUMMY_LOGIN garante
+            # que verificar_senha() roda sempre, ver mais acima); o commit
+            # extra aqui é uma única escrita numa linha já localizada pelo
+            # índice, ordens de grandeza mais rápido que o bcrypt, então uma
+            # fração pequena do tempo total; (2) distinguir essa diferença de
+            # fora exigiria medir muitas requisições com precisão maior que
+            # o jitter normal de rede -- fora do modelo de ameaça realista
+            # para este projeto acadêmico/pessoal. Equalizar de verdade (ex.:
+            # forçar algum round-trip de escrita equivalente nos outros 3
+            # ramos) adicionaria complexidade/risco de bug novo pra fechar
+            # uma brecha residual de baixíssimo impacto prático -- não foi
+            # considerado valer a pena.
+            _registrar_tentativa_falha(session, funcionario, agora, mensagem_erro_transitorio)
 
         if not funcionario or not funcionario.password_hash or bloqueado or not senha_confere:
             # Mesma mensagem genérica também para conta bloqueada -- ver
@@ -339,6 +378,8 @@ def buscar_funcionario(funcionario_id: int):
 
 def atualizar_funcionario(funcionario_id: int, dados: FuncionarioCreate):
     with Session(engine) as session:
+        mensagem_erro_transitorio = "Não foi possível processar a solicitação, tente novamente"
+
         funcionario = session.get(Funcionario, funcionario_id)
         if not funcionario:
             raise HTTPException(status_code=404, detail="Funcionário não encontrado")
@@ -372,7 +413,7 @@ def atualizar_funcionario(funcionario_id: int, dados: FuncionarioCreate):
         funcionario.numero = dados.numero
 
         if dados.senha:
-            if _senha_ja_usada(session, funcionario_id, dados.senha):
+            if _senha_ja_usada(session, funcionario_id, dados.senha, mensagem_erro_transitorio):
                 raise HTTPException(
                     status_code=400,
                     detail="Nova senha não pode ser igual às 3 últimas senhas utilizadas",
@@ -380,16 +421,19 @@ def atualizar_funcionario(funcionario_id: int, dados: FuncionarioCreate):
             funcionario.password_hash = hash_senha(dados.senha)
             funcionario.senha_atualizada_em = datetime.now(timezone.utc)
             _registrar_historico(session, funcionario_id, funcionario.password_hash)
-            # IMPORTANTE 1 da revisão de fix/login-rate-limiting -- ver
-            # docstring de _resetar_lockout: reset manual de senha via RH/
-            # admin também precisa liberar um lockout em andamento, senão a
-            # vítima continua travada mesmo com a senha já corrigida.
+            # Ver docstring de _resetar_lockout: reset manual de senha via
+            # RH/admin também precisa liberar um lockout em andamento, senão
+            # a vítima continua travada mesmo com a senha já corrigida.
             _resetar_lockout(funcionario)
 
         try:
-            session.commit()
+            _com_tratamento_operational_error(session, session.commit, mensagem_erro_transitorio)
             session.refresh(funcionario)
             return funcionario
+        except HTTPException:
+            raise
+        except OperationalError:
+            raise
         except Exception:
             session.rollback()
             raise HTTPException(status_code=500, detail="Erro ao atualizar funcionário")
@@ -456,16 +500,38 @@ def renovar_token(funcionario_id: int):
 
 def trocar_senha(funcionario_id: int, dados: TrocarSenhaRequest):
     with Session(engine) as session:
-        funcionario = session.get(Funcionario, funcionario_id)
+        mensagem_erro_transitorio = "Não foi possível processar a solicitação, tente novamente"
+
+        # CORRIGIDO: este endpoint lia o funcionário com
+        # `session.get(Funcionario, funcionario_id)` -- sem nenhuma trava --
+        # e fazia o MESMO padrão "ler, incrementar em memória, escrever" que
+        # o login tinha antes da correção equivalente lá (ver
+        # autenticar_funcionario acima para o raciocínio completo sobre por
+        # que isso é um lost update sob concorrência). Reproduzido ao vivo
+        # (threads reais contra MySQL real): 20 tentativas simultâneas de
+        # senha_atual errada deixavam o contador em 1-2 (nunca nos 5
+        # esperados) -- a conta nunca bloqueava de verdade.
+        #
+        # Diferente do login, `funcionario_id` aqui já vem validado do token
+        # JWT (ver services/auth.py) -- é a própria PK da tabela, que já tem
+        # índice (chave primária) -- então a correção não precisou de nenhum
+        # índice novo em migration.sql, só travar esta leitura com
+        # `with_for_update()`, mesmo padrão já usado no login.
+        funcionario = _com_tratamento_operational_error(
+            session,
+            lambda: session.exec(
+                select(Funcionario).where(Funcionario.id == funcionario_id).with_for_update()
+            ).first(),
+            mensagem_erro_transitorio,
+        )
         if not funcionario:
             raise HTTPException(status_code=404, detail="Funcionário não encontrado")
 
         agora = datetime.now(timezone.utc)
 
-        # CORRIGIDO (IMPORTANTE 2 da revisão de fix/login-rate-limiting):
-        # este endpoint verificava a senha ATUAL sem nenhum limite de
-        # tentativas -- alguém com um token roubado (mas sem saber a senha
-        # atual) podia tentar adivinhar indefinidamente, sem nenhum
+        # CORRIGIDO: este endpoint verificava a senha ATUAL sem nenhum
+        # limite de tentativas -- alguém com um token roubado (mas sem saber
+        # a senha atual) podia tentar adivinhar indefinidamente, sem nenhum
         # throttle; o mesmo tipo de força bruta que o lockout do login
         # mitiga. DECISÃO: reaproveita a MESMA infraestrutura
         # (tentativas_login_falhas/bloqueado_ate) em vez de um mecanismo
@@ -476,50 +542,70 @@ def trocar_senha(funcionario_id: int, dados: TrocarSenhaRequest):
         # enumeração), então não precisa da mitigação de timing/mensagem
         # genérica do login -- só do limite de tentativas em si.
         #
-        # ASSIMETRIA INTENCIONAL vs login: aqui, uma senha_atual CORRETA
-        # sempre passa, MESMO com a conta `bloqueado_ate` ativo (diferente
-        # de autenticar_funcionario, que rejeita até senha certa durante o
-        # bloqueio). Isso é necessário pro próprio IMPORTANTE 1 funcionar
-        # neste endpoint: sem isso, a vítima de um lockout malicioso
-        # (alguém martelando senha errada contra ela via /login OU via este
-        # mesmo endpoint) nunca conseguiria chegar até o ponto que reseta o
-        # lockout (_resetar_lockout mais abaixo) enquanto o bloqueio
-        # estivesse ativo -- o IMPORTANTE 1 ficaria inalcançável aqui.
-        # Aceitável porque este endpoint já exige uma prova de identidade
-        # mais forte que o login sozinho: um JWT válido para ESTE
-        # funcionário_id específico (que só existe se alguém já fez login
-        # com sucesso antes, dentro da validade do token) -- diferente do
-        # login, que é público e não exige nenhuma prova prévia.
+        # SIMÉTRICO ao login: com a conta bloqueada, rejeita incondicionalmente
+        # -- mesmo com a senha_atual CORRETA -- sem gastar uma tentativa de
+        # verificação de senha. Alguém com um token roubado não consegue
+        # seguir testando a senha atual indefinidamente só porque a conta já
+        # está bloqueada (isso tornaria o próprio lockout deste endpoint
+        # cosmético contra o ataque que ele existe pra conter). A recuperação
+        # de uma conta travada por um lockout malicioso não passa mais por
+        # aqui enquanto o bloqueio estiver ativo -- usa `recuperar_senha`
+        # (reset por e-mail/CPF) ou `atualizar_funcionario` (reset via
+        # RH/admin), que já liberam o lockout (ver docstring de
+        # _resetar_lockout) e não reabrem esta janela de adivinhação.
         bloqueado = _esta_bloqueado(funcionario, agora)
+        if bloqueado:
+            raise HTTPException(status_code=401, detail="Senha atual incorreta")
 
-        # Mesmo reset de CRÍTICO 3: se o bloqueio já expirou só pelo tempo
-        # (sem uma troca de senha bem-sucedida depois), zera o contador
-        # antigo antes de processar esta tentativa.
-        if funcionario.bloqueado_ate is not None and not bloqueado:
+        # Mesmo reset do login: se o bloqueio já expirou só pelo tempo (sem
+        # uma troca de senha bem-sucedida depois), zera o contador antigo
+        # antes de processar esta tentativa.
+        #
+        # CORRIGIDO: este reset, feito só em memória aqui, podia ser
+        # descartado SILENCIOSAMENTE se a checagem de reuso de senha
+        # (_senha_ja_usada, mais abaixo) disparasse um 400 antes de qualquer
+        # commit alcançar este `funcionario` -- a sessão saía sem persistir
+        # nada, recriando o mesmo bug do CRÍTICO 3 do login, só que por este
+        # caminho específico. Reproduzido: conta com contador alto +
+        # `bloqueado_ate` no passado (bloqueio já expirado) + senha atual
+        # CERTA + nova senha igual a uma das últimas 3 -> 400, e o contador
+        # continuava alto no banco depois.
+        #
+        # `bloqueio_resetado` sinaliza que este reset ainda precisa ser
+        # persistido antes de qualquer saída da função -- os dois pontos mais
+        # abaixo que podem terminar a função (o 400 de reutilização de senha,
+        # e o commit final de sucesso) verificam essa flag e garantem que ele
+        # seja commitado independentemente de qual dos dois for alcançado. A
+        # trava pega no SELECT ... FOR UPDATE acima continua ativa o tempo
+        # todo até ali -- nenhum commit acontece entre a leitura e estes dois
+        # pontos de saída, então não há janela destravada no meio.
+        bloqueio_resetado = False
+        if funcionario.bloqueado_ate is not None:
             _resetar_lockout(funcionario)
+            bloqueio_resetado = True
 
         senha_atual_confere = bool(
             funcionario.password_hash and verificar_senha(dados.senha_atual, funcionario.password_hash)
         )
 
         if not senha_atual_confere:
-            # Mesma decisão do login: tentativas adicionais durante uma
-            # janela de bloqueio já ativa não reiniciam a contagem nem
-            # estendem `bloqueado_ate` (evita manter a conta bloqueada
-            # indefinidamente só martelando tentativas erradas contra ela).
-            if not bloqueado:
-                funcionario.tentativas_login_falhas += 1
-                if funcionario.tentativas_login_falhas >= LOGIN_MAX_TENTATIVAS:
-                    funcionario.bloqueado_ate = agora + timedelta(minutes=LOGIN_BLOQUEIO_MINUTOS)
-                session.add(funcionario)
-                try:
-                    session.commit()
-                except OperationalError as exc:
-                    session.rollback()
-                    tratar_operational_error(exc, "Não foi possível processar a solicitação, tente novamente")
+            # Chegou até aqui só se a conta NÃO estava bloqueada (ver early
+            # return acima), então sempre soma a tentativa -- sem o guard
+            # "if not bloqueado" que o login tem (lá, usuário inexistente/
+            # sem senha/já bloqueado levam ao mesmo 401 sem esse commit
+            # extra; aqui já se sabe que o funcionário existe e não está
+            # bloqueado antes de chegar neste ramo).
+            _registrar_tentativa_falha(session, funcionario, agora, mensagem_erro_transitorio)
             raise HTTPException(status_code=401, detail="Senha atual incorreta")
 
-        if _senha_ja_usada(session, funcionario_id, dados.nova_senha):
+        if _senha_ja_usada(session, funcionario_id, dados.nova_senha, mensagem_erro_transitorio):
+            # Se o bloqueio tinha expirado e foi resetado só em memória (este
+            # caminho não passa pelo branch de "senha errada" acima, que já
+            # persistiria o reset junto do incremento), commita agora, ANTES
+            # deste 400 -- senão o reset nunca chegaria ao banco.
+            if bloqueio_resetado:
+                session.add(funcionario)
+                _com_tratamento_operational_error(session, session.commit, mensagem_erro_transitorio)
             raise HTTPException(
                 status_code=400,
                 detail="Nova senha não pode ser igual às 3 últimas senhas utilizadas",
@@ -530,15 +616,23 @@ def trocar_senha(funcionario_id: int, dados: TrocarSenhaRequest):
         funcionario.senha_atualizada_em = datetime.now(timezone.utc)
         funcionario.senha_temporaria = False
         _registrar_historico(session, funcionario_id, novo_hash)
-        # IMPORTANTE 1 -- ver docstring de _resetar_lockout.
+        # IMPORTANTE 1 -- ver docstring de _resetar_lockout. Idempotente se
+        # já tiver sido resetado (e persistido) acima.
         _resetar_lockout(funcionario)
+        session.add(funcionario)
 
+        # `except OperationalError: raise` preserva o comportamento de deixar
+        # um OperationalError que NÃO seja deadlock/lock-wait-timeout
+        # propagar cru (mesmo padrão do login -- ver
+        # test_login_outro_operational_error_nao_vira_409), em vez de
+        # convertê-lo também em 500 genérico.
         try:
-            session.commit()
+            _com_tratamento_operational_error(session, session.commit, mensagem_erro_transitorio)
             return {"msg": "Senha alterada com sucesso"}
-        except OperationalError as exc:
-            session.rollback()
-            tratar_operational_error(exc, "Não foi possível processar a solicitação, tente novamente")
+        except HTTPException:
+            raise
+        except OperationalError:
+            raise
         except Exception:
             session.rollback()
             raise HTTPException(status_code=500, detail="Erro ao alterar senha")
@@ -546,6 +640,8 @@ def trocar_senha(funcionario_id: int, dados: TrocarSenhaRequest):
 
 def recuperar_senha(dados: RecuperarSenhaRequest):
     with Session(engine) as session:
+        mensagem_erro_transitorio = "Não foi possível processar a solicitação, tente novamente"
+
         funcionario = session.exec(
             select(Funcionario).where(Funcionario.cpf == dados.cpf)
         ).first()
@@ -564,14 +660,17 @@ def recuperar_senha(dados: RecuperarSenhaRequest):
         funcionario.senha_atualizada_em = datetime.now(timezone.utc)
         funcionario.senha_temporaria = True
         _registrar_historico(session, funcionario.id, novo_hash)
-        # IMPORTANTE 1 da revisão de fix/login-rate-limiting -- ver
-        # docstring de _resetar_lockout: recuperação de senha por e-mail
+        # Ver docstring de _resetar_lockout: recuperação de senha por e-mail
         # também precisa liberar um lockout em andamento, senão a vítima
         # continua travada mesmo com a senha nova já na caixa de entrada.
         _resetar_lockout(funcionario)
 
         try:
-            session.commit()
+            _com_tratamento_operational_error(session, session.commit, mensagem_erro_transitorio)
+        except HTTPException:
+            raise
+        except OperationalError:
+            raise
         except Exception:
             session.rollback()
             raise HTTPException(status_code=500, detail="Erro ao redefinir senha")
