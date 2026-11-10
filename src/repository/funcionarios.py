@@ -68,6 +68,27 @@ def _resetar_lockout(funcionario: Funcionario) -> None:
     funcionario.bloqueado_ate = None
 
 
+def _com_tratamento_operational_error(session: Session, operacao, mensagem: str):
+    """
+    Executa `operacao` (uma função sem argumentos -- tipicamente
+    `session.commit` ou um `lambda` envolvendo um `session.exec(...)`) e,
+    se ela levantar OperationalError, faz rollback da sessão e delega para
+    `tratar_operational_error` (-> HTTPException 409 se for deadlock/lock-
+    wait-timeout do MySQL, senão relança a exceção original sem mudança).
+
+    NITPICK (revisão de fix/login-rate-limiting): extraído pra eliminar a
+    duplicação entre os 3 pontos de `autenticar_funcionario` que viraram
+    `try: ... / except OperationalError: tratar_operational_error(...)`
+    depois do CRÍTICO 2 -- o SELECT ... FOR UPDATE em si, o commit do
+    incremento de tentativas, e o commit do login bem-sucedido.
+    """
+    try:
+        return operacao()
+    except OperationalError as exc:
+        session.rollback()
+        tratar_operational_error(exc, mensagem)
+
+
 def autenticar_funcionario(dados: LoginRequest):
     with Session(engine) as session:
         partes = dados.username.strip().split(".", 1)
@@ -122,18 +143,19 @@ def autenticar_funcionario(dados: LoginRequest):
         # sistema já usa para contenção transitória de lock. `erros_banco.py`
         # foi estendido para tratar 1205 igual a 1213 (deadlock) -- do ponto
         # de vista do cliente são o mesmo tipo de falha transitória.
-        try:
-            funcionario = session.exec(
+        mensagem_erro_transitorio = "Não foi possível processar o login, tente novamente"
+        funcionario = _com_tratamento_operational_error(
+            session,
+            lambda: session.exec(
                 select(Funcionario)
                 .where(
                     func.lower(Funcionario.nome) == nome.lower(),
                     func.lower(Funcionario.sobrenome) == sobrenome.lower(),
                 )
                 .with_for_update()
-            ).first()
-        except OperationalError as exc:
-            session.rollback()
-            tratar_operational_error(exc, "Não foi possível processar o login, tente novamente")
+            ).first(),
+            mensagem_erro_transitorio,
+        )
 
         agora = datetime.now(timezone.utc)
 
@@ -222,11 +244,7 @@ def autenticar_funcionario(dados: LoginRequest):
             if funcionario.tentativas_login_falhas >= LOGIN_MAX_TENTATIVAS:
                 funcionario.bloqueado_ate = agora + timedelta(minutes=LOGIN_BLOQUEIO_MINUTOS)
             session.add(funcionario)
-            try:
-                session.commit()
-            except OperationalError as exc:
-                session.rollback()
-                tratar_operational_error(exc, "Não foi possível processar o login, tente novamente")
+            _com_tratamento_operational_error(session, session.commit, mensagem_erro_transitorio)
 
         if not funcionario or not funcionario.password_hash or bloqueado or not senha_confere:
             # Mesma mensagem genérica também para conta bloqueada -- ver
@@ -243,11 +261,7 @@ def autenticar_funcionario(dados: LoginRequest):
         token = criar_token(funcionario.id, funcionario.is_admin)
         funcionario.token = token
         session.add(funcionario)
-        try:
-            session.commit()
-        except OperationalError as exc:
-            session.rollback()
-            tratar_operational_error(exc, "Não foi possível processar o login, tente novamente")
+        _com_tratamento_operational_error(session, session.commit, mensagem_erro_transitorio)
 
         setor = session.get(Setor, funcionario.setor_id)
 
