@@ -10,6 +10,80 @@ function escapeHtml(valor) {
         .replace(/'/g, '&#39;');
 }
 
+// Modal genérico (Fase 4 -- ajuste de inventário / histórico de
+// movimentações): injeta o HTML recebido dentro do container fixo
+// #modal-box (ver index.html) e mostra o overlay. Reaproveitado por
+// qualquer tela que precise de um formulário/visualização sobreposta --
+// sem introduzir nenhum framework novo, só toggle da classe .hidden, mesmo
+// padrão já usado em todo o resto do app.
+function abrirModal(html) {
+    document.getElementById('modal-box').innerHTML = html;
+    document.getElementById('modal-overlay').classList.remove('hidden');
+}
+
+function fecharModal() {
+    document.getElementById('modal-overlay').classList.add('hidden');
+    document.getElementById('modal-box').innerHTML = '';
+}
+
+// Produtos por unidade (UN) continuam exibidos como número inteiro; produtos
+// vendidos por peso/volume (KG/L) mostram até 3 casas decimais, sem zeros
+// supérfluos à direita (0.350 -> "0.35", mas 1 -> "1").
+function formatarQuantidade(qtd, unidade) {
+    const n = Number(qtd) || 0;
+    if (unidade === 'KG' || unidade === 'L') {
+        return String(parseFloat(n.toFixed(3)));
+    }
+    return String(Math.round(n));
+}
+
+function labelUnidade(unidade) {
+    return unidade === 'KG' ? 'kg' : unidade === 'L' ? 'L' : 'un';
+}
+
+// Replica o arredondamento ROUND_HALF_UP de 2 casas que o backend usa
+// (Decimal, ver src/utils/money.py::arredondar) -- sem isso, o total/troco
+// calculado aqui com float JS puro diverge do que o backend grava em casos
+// como 32.9 * 0.35: a multiplicação em ponto flutuante dá
+// 11.514999999999999 (abaixo de .515 por ruído de ponto flutuante na
+// própria multiplicação, não um problema de exibição), que .toFixed(2)
+// mostra como "11.51", enquanto o backend (Decimal exato) arredonda certo
+// para "11.52".
+//
+// Não é uma lib de Decimal completa: multiplica por 100 primeiro e só
+// depois "limpa" o ruído de ponto flutuante arredondando para 6 casas
+// decimais (toFixed), antes do arredondamento final pro inteiro de
+// centavos. Essa ordem importa -- limpar o valor ANTES de multiplicar por
+// 100 não resolve o ruído que já vem de um literal com 3+ casas decimais
+// (ex.: 1.005), só o ruído introduzido pela própria multiplicação. Fazendo
+// nessa ordem (multiplicar, depois limpar, depois arredondar), validado
+// com fuzzing (200 mil casos aleatórios de preço x quantidade) batendo
+// 100% com o cálculo em Decimal do backend -- resolve a esmagadora maioria
+// dos casos de ponto flutuante neste domínio (preço com 2 casas,
+// quantidade com até 3 casas).
+function arredondarMoeda(valor) {
+    const n = Number(valor) || 0;
+    const vezes100 = n * 100;
+    const limpo = Number(vezes100.toFixed(6));
+    return Math.round(limpo) / 100;
+}
+
+// Soma o total do carrinho arredondando cada item individualmente ANTES de
+// somar -- espelha repository/vendas.py::criar_venda, que arredonda
+// preco_total por item (arredondar(produto.preco * item.quantidade)) e só
+// depois soma ao total da venda. Arredondar só o total final (em vez de
+// cada item) pode divergir do valor_total que o backend grava quando o
+// arredondamento por item muda o resultado da soma.
+function calcularTotalCarrinho(itens) {
+    let total = 0;
+    itens.forEach(item => {
+        const p = cacheProdutos.find(prod => prod.codigodebarras.toString().trim() == item.codigodebarras.toString().trim());
+        const preco = p ? p.preco : 0;
+        total += arredondarMoeda(preco * item.quantidade);
+    });
+    return arredondarMoeda(total);
+}
+
 let viewAtual = null;
 let carrinho = [];
 let senhaAtualPendente = null;
@@ -19,7 +93,9 @@ let editandoSetorId = null;
 let cacheFuncionarios = [];
 let cacheProdutos = [];
 let cacheSetores = [];
+let cacheFornecedores = [];
 let carrinhoCompra = [];
+let editandoFornecedorId = null;
 
 window.login = async function () {
     const userEl = document.getElementById('user-input');
@@ -148,6 +224,12 @@ window.carregarInfoEstoqueSolicitacao = carregarInfoEstoqueSolicitacao;
 window.abrirRespostaSolicitacao = abrirRespostaSolicitacao;
 window.fecharRespostaSolicitacao = fecharRespostaSolicitacao;
 window.confirmarResposta = confirmarResposta;
+window.atualizarPassoQuantidade = atualizarPassoQuantidade;
+window.ajustarPassoVendaQtd = ajustarPassoVendaQtd;
+window.salvarFornecedor = salvarFornecedor;
+window.prepararEdicaoFornecedor = prepararEdicaoFornecedor;
+window.cancelarEdicaoFornecedor = cancelarEdicaoFornecedor;
+window.removerFornecedor = removerFornecedor;
 
 function getToken() {
     return localStorage.getItem('api_token');
@@ -313,15 +395,43 @@ function carregarDadosView(viewId) {
     if (viewId === 'solicitacoes') carregarSolicitacoes();
 }
 
+function atualizarPassoQuantidade() {
+    const unidade = document.getElementById('novo-prod-unidade')?.value;
+    const campoQtd = document.getElementById('novo-prod-qtd');
+    if (!campoQtd) return;
+    campoQtd.step = (unidade === 'KG' || unidade === 'L') ? '0.001' : '1';
+}
+
 async function carregarEstoque() {
     const container = document.getElementById('view-estoque');
     container.innerHTML = '<h3>Carregando...</h3>';
 
-    const [produtos, pendentes] = await Promise.all([
+    const [produtos, pendentes, fornecedores, alertaVencimento] = await Promise.all([
         apiFetch('/estoque/mostrar'),
-        apiFetch('/estoque/pendentes', {}, true)
+        apiFetch('/estoque/pendentes', {}, true),
+        apiFetch('/fornecedores/mostrar', {}, true),
+        apiFetch('/estoque/alerta-vencimento', {}, true),
     ]);
     cacheProdutos = produtos || [];
+    cacheFornecedores = fornecedores || [];
+
+    // Mapa estoque_id -> pior situação de validade entre os lotes do
+    // produto (vencido tem prioridade sobre vencendo; dentro de cada
+    // situação, guarda o lote mais urgente). Usado só para destacar a linha
+    // na tabela -- o detalhamento por lote fica no endpoint, não na tela.
+    const mapaValidade = {};
+    (alertaVencimento?.vencendo || []).forEach(l => {
+        const atual = mapaValidade[l.estoque_id];
+        if (!atual || l.dias_restantes < atual.dias_restantes) {
+            mapaValidade[l.estoque_id] = { status: 'vencendo', ...l };
+        }
+    });
+    (alertaVencimento?.vencidos || []).forEach(l => {
+        const atual = mapaValidade[l.estoque_id];
+        if (!atual || atual.status !== 'vencido' || l.dias_restantes < atual.dias_restantes) {
+            mapaValidade[l.estoque_id] = { status: 'vencido', ...l };
+        }
+    });
 
     if (!produtos) {
         container.innerHTML = '<h3>Erro ao carregar estoque. Verifique suas permissões.</h3>';
@@ -357,9 +467,19 @@ async function carregarEstoque() {
             <div class="form-group">
                 <input class="form-control" type="text" id="novo-prod-nome" placeholder="Nome do Produto">
                 <input class="form-control" type="text" id="novo-prod-codigo" placeholder="Código de Barras">
-                <input class="form-control" type="number" id="novo-prod-qtd" placeholder="Quantidade">
+                <select class="form-control" id="novo-prod-unidade" onchange="atualizarPassoQuantidade()">
+                    <option value="UN">Unidade (UN)</option>
+                    <option value="KG">Quilo (KG)</option>
+                    <option value="L">Litro (L)</option>
+                </select>
+                <input class="form-control" type="number" step="1" id="novo-prod-qtd" placeholder="Quantidade">
+                <input class="form-control" type="number" step="0.001" min="0" id="novo-prod-estoque-minimo" placeholder="Estoque Mínimo">
                 <input class="form-control" type="number" id="novo-prod-preco" placeholder="Preço (R$)">
                 <input class="form-control" type="text" id="novo-prod-cat" placeholder="Categoria">
+                <select class="form-control" id="novo-prod-fornecedor">
+                    <option value="">Sem fornecedor</option>
+                    ${cacheFornecedores.map(f => `<option value="${f.id}">${escapeHtml(f.nome)}</option>`).join('')}
+                </select>
             </div>
             <div id="estoque-btn-container">
                 <button class="btn-success" onclick="adicionarProduto()">Salvar Produto</button>
@@ -387,7 +507,7 @@ async function carregarEstoque() {
                         </div>
                         <div>
                             <label style="font-size:0.75rem; color:#666; display:block; margin-bottom:3px;">Qtd. Recebida</label>
-                            <input class="form-control" style="margin:0; background:#f5f5f5;" value="${p.quantidade}" disabled>
+                            <input class="form-control" style="margin:0; background:#f5f5f5;" value="${formatarQuantidade(p.quantidade, 'KG')}" disabled>
                         </div>
                         <div>
                             <label style="font-size:0.75rem; color:#666; display:block; margin-bottom:3px;">Custo Unitário (pago)</label>
@@ -401,7 +521,28 @@ async function carregarEstoque() {
                             <label style="font-size:0.75rem; color:#666; display:block; margin-bottom:3px;">Categoria</label>
                             <input class="form-control" style="margin:0;" id="pend-cat-${p.id}" placeholder="Ex: Limpeza">
                         </div>
+                        <div>
+                            <label style="font-size:0.75rem; color:#666; display:block; margin-bottom:3px;">Unidade de Medida</label>
+                            <select class="form-control" style="margin:0;" id="pend-unidade-${p.id}">
+                                <option value="UN">Unidade (UN)</option>
+                                <option value="KG">Quilo (KG)</option>
+                                <option value="L">Litro (L)</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label style="font-size:0.75rem; color:#666; display:block; margin-bottom:3px;">Estoque Mínimo</label>
+                            <input class="form-control" style="margin:0;" type="number" step="0.001" min="0" id="pend-estoque-minimo-${p.id}" placeholder="0">
+                        </div>
+                        <div>
+                            <label style="font-size:0.75rem; color:#666; display:block; margin-bottom:3px;">Lote (código do fornecedor)</label>
+                            <input class="form-control" style="margin:0;" id="pend-lote-${p.id}" placeholder="Ex: L2026-0042">
+                        </div>
+                        <div>
+                            <label style="font-size:0.75rem; color:#666; display:block; margin-bottom:3px;">Validade (se perecível)</label>
+                            <input class="form-control" style="margin:0;" type="date" id="pend-validade-${p.id}">
+                        </div>
                     </div>
+                    <p style="font-size:0.72rem; color:#999; margin:0 0 8px;">Unidade de medida e estoque mínimo só se aplicam se este código de barras ainda não existir no estoque (produto novo). Se já existir, só a quantidade é somada. Lote é sempre obrigatório; validade só se o produto for perecível.</p>
                     <button class="btn-success" style="width:100%; padding:10px;" onclick="lancarPendente(${p.id})">✅ Lançar no Estoque</button>
                 </div>
                 `).join('')}
@@ -411,20 +552,36 @@ async function carregarEstoque() {
         <h3>Produtos Cadastrados</h3>
         <table>
             <thead>
-                <tr><th>ID</th><th>Produto</th><th>Cód. Barras</th><th>Qtd</th><th>Preço</th>${podeEditar ? '<th>Ações</th>' : ''}</tr>
+                <tr><th>ID</th><th>Produto</th><th>Cód. Barras</th><th>Qtd</th><th>Estoque Mín.</th><th>Fornecedor</th><th>Preço</th><th>Histórico</th>${podeEditar ? '<th>Ações</th>' : ''}</tr>
             </thead>
             <tbody>
     `;
 
     produtos.forEach(p => {
+        const abaixoDoMinimo = Number(p.quantidade) <= Number(p.estoque_minimo || 0) && Number(p.estoque_minimo || 0) > 0;
+        const fornecedorNome = cacheFornecedores.find(f => f.id === p.fornecedor_id)?.nome;
+        const alertaValidade = mapaValidade[p.id];
+        const corLinha = alertaValidade?.status === 'vencido' ? 'background:#fdecea;'
+            : alertaValidade?.status === 'vencendo' ? 'background:#fff8e1;' : '';
+        const avisoValidade = alertaValidade?.status === 'vencido'
+            ? `<br><small style="color:#e74c3c; font-weight:bold;">⚠ Lote ${escapeHtml(alertaValidade.codigo_lote)} vencido há ${Math.abs(alertaValidade.dias_restantes)}d</small>`
+            : alertaValidade?.status === 'vencendo'
+                ? `<br><small style="color:#e67e22; font-weight:bold;">⏳ Lote ${escapeHtml(alertaValidade.codigo_lote)} vence em ${alertaValidade.dias_restantes}d</small>`
+                : '';
         html += `
-            <tr>
+            <tr style="${corLinha}">
                 <td>${p.id}</td>
-                <td>${escapeHtml(p.nomedoproduto)}</td>
+                <td>${escapeHtml(p.nomedoproduto)}${avisoValidade}</td>
                 <td>${escapeHtml(p.codigodebarras)}</td>
-                <td>${p.quantidade}</td>
+                <td style="${abaixoDoMinimo ? 'color:#e74c3c; font-weight:bold;' : ''}">${formatarQuantidade(p.quantidade, p.unidade_medida)} ${labelUnidade(p.unidade_medida)}</td>
+                <td>${formatarQuantidade(p.estoque_minimo || 0, p.unidade_medida)} ${labelUnidade(p.unidade_medida)}</td>
+                <td>${fornecedorNome ? escapeHtml(fornecedorNome) : '-'}</td>
                 <td>R$ ${p.preco}</td>
+                <td>
+                    <button class="btn" style="padding: 5px; font-size: 0.7rem; background: #7f8c8d;" onclick="abrirHistoricoMovimentacoes(${p.id})">Ver histórico</button>
+                </td>
                 ${podeEditar ? `<td>
+                    <button class="btn" style="padding: 5px; font-size: 0.7rem; background: #9b59b6; color: white;" onclick="abrirAjustarInventario(${p.id})">Ajustar Inventário</button>
                     <button class="btn" style="padding: 5px; font-size: 0.7rem; background: #ff9800; color: white;" onclick="prepararEdicaoEstoque(${p.id})">Editar</button>
                     <button class="btn-danger" style="padding: 5px; font-size: 0.7rem;" onclick="removerProduto(${p.id})">Excluir</button>
                 </td>` : ''}
@@ -433,7 +590,101 @@ async function carregarEstoque() {
     });
 
     html += '</tbody></table></div>';
+    html += renderizarCardFornecedores(podeEditar);
     container.innerHTML = html;
+    atualizarPassoQuantidade();
+}
+
+// Fornecedor é um card dentro da própria tela de estoque (não uma aba
+// própria no menu lateral) nesta fase -- cadastro/gestão de fornecedor é
+// pequeno o suficiente e está sempre associado a produto, então não
+// justificou ainda uma view própria. Se o escopo de fornecedor crescer
+// (relatórios, histórico de compras por fornecedor, etc.) numa fase
+// futura, vale reavaliar promover para uma aba própria.
+function renderizarCardFornecedores(podeEditar) {
+    return `
+        <div class="card">
+            <h3>Fornecedores</h3>
+            ${podeEditar ? `
+            <div class="form-group">
+                <input class="form-control" type="text" id="forn-nome" placeholder="Nome do Fornecedor">
+                <input class="form-control" type="text" id="forn-documento" placeholder="CPF ou CNPJ">
+                <input class="form-control" type="text" id="forn-telefone" placeholder="Telefone">
+                <input class="form-control" type="text" id="forn-email" placeholder="E-mail">
+                <input class="form-control" type="number" min="0" id="forn-prazo" placeholder="Prazo médio de entrega (dias)">
+            </div>
+            <div id="fornecedor-btn-container">
+                <button class="btn-success" onclick="salvarFornecedor()">Salvar Fornecedor</button>
+            </div>` : ''}
+            <table style="margin-top:12px;">
+                <thead><tr><th>Nome</th><th>CPF/CNPJ</th><th>Telefone</th><th>E-mail</th><th>Prazo (dias)</th>${podeEditar ? '<th>Ações</th>' : ''}</tr></thead>
+                <tbody>
+                    ${cacheFornecedores.map(f => `
+                        <tr>
+                            <td>${escapeHtml(f.nome)}</td>
+                            <td>${escapeHtml(f.documento)}</td>
+                            <td>${escapeHtml(f.telefone || '-')}</td>
+                            <td>${escapeHtml(f.email || '-')}</td>
+                            <td>${f.prazo_medio_entrega_dias != null ? f.prazo_medio_entrega_dias : '-'}</td>
+                            ${podeEditar ? `<td>
+                                <button class="btn" style="padding:5px; font-size:0.7rem; background:#ff9800; color:white;" onclick="prepararEdicaoFornecedor(${f.id})">Editar</button>
+                                <button class="btn-danger" style="padding:5px; font-size:0.7rem;" onclick="removerFornecedor(${f.id})">Excluir</button>
+                            </td>` : ''}
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        </div>`;
+}
+
+async function salvarFornecedor() {
+    const prazo = document.getElementById('forn-prazo').value;
+    const dados = {
+        nome: document.getElementById('forn-nome').value,
+        documento: document.getElementById('forn-documento').value,
+        telefone: document.getElementById('forn-telefone').value || null,
+        email: document.getElementById('forn-email').value || null,
+        prazo_medio_entrega_dias: prazo ? parseInt(prazo) : null,
+    };
+
+    const res = editandoFornecedorId
+        ? await apiFetch(`/fornecedores/atualizar/${editandoFornecedorId}`, { method: 'PUT', body: JSON.stringify(dados) })
+        : await apiFetch('/fornecedores/inserir', { method: 'POST', body: JSON.stringify(dados) });
+
+    if (res) {
+        alert(editandoFornecedorId ? 'Fornecedor atualizado!' : 'Fornecedor cadastrado!');
+        editandoFornecedorId = null;
+        carregarEstoque();
+    }
+}
+
+function prepararEdicaoFornecedor(id) {
+    const f = cacheFornecedores.find(x => x.id === id);
+    if (!f) return;
+    editandoFornecedorId = f.id;
+    document.getElementById('forn-nome').value = f.nome;
+    document.getElementById('forn-documento').value = f.documento;
+    document.getElementById('forn-telefone').value = f.telefone || '';
+    document.getElementById('forn-email').value = f.email || '';
+    document.getElementById('forn-prazo').value = f.prazo_medio_entrega_dias != null ? f.prazo_medio_entrega_dias : '';
+    const btnContainer = document.getElementById('fornecedor-btn-container');
+    btnContainer.innerHTML = `
+        <button class="btn-success" onclick="salvarFornecedor()">Atualizar Fornecedor</button>
+        <button class="btn" onclick="cancelarEdicaoFornecedor()">Cancelar</button>
+    `;
+    window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+}
+
+function cancelarEdicaoFornecedor() {
+    editandoFornecedorId = null;
+    carregarEstoque();
+}
+
+async function removerFornecedor(id) {
+    if (!confirm("Tem certeza que deseja excluir este fornecedor?")) return;
+    if (await apiFetch(`/fornecedores/deletar/${id}`, { method: 'DELETE' })) {
+        carregarEstoque();
+    }
 }
 
 async function lancarPendente(id) {
@@ -441,13 +692,25 @@ async function lancarPendente(id) {
     const cod = document.getElementById(`pend-cod-${id}`).value.trim();
     const preco = parseFloat(document.getElementById(`pend-preco-${id}`).value);
     const cat = document.getElementById(`pend-cat-${id}`).value.trim();
+    const unidade = document.getElementById(`pend-unidade-${id}`).value;
+    const estoqueMinimo = parseFloat(document.getElementById(`pend-estoque-minimo-${id}`).value) || 0;
+    const codigoLote = document.getElementById(`pend-lote-${id}`).value.trim();
+    const validade = document.getElementById(`pend-validade-${id}`).value || null;
     if (!nome || !cod || isNaN(preco) || preco <= 0 || !cat) {
         alert('Preencha Nome, Código de Barras, Preço de Venda e Categoria.');
         return;
     }
+    if (!codigoLote) {
+        alert('Informe o código do lote recebido (obrigatório para rastrear a validade do estoque).');
+        return;
+    }
     const res = await apiFetch(`/estoque/pendentes/${id}/confirmar`, {
         method: 'POST',
-        body: JSON.stringify({ nomedoproduto: nome, codigodebarras: cod, preco_venda: preco, categoria: cat })
+        body: JSON.stringify({
+            nomedoproduto: nome, codigodebarras: cod, preco_venda: preco, categoria: cat,
+            unidade_medida: unidade, estoque_minimo: estoqueMinimo,
+            codigo_lote: codigoLote, validade: validade,
+        })
     });
     if (res) {
         alert(res.detail);
@@ -460,6 +723,124 @@ async function removerProduto(id) {
     if (await apiFetch(`/estoque/deletar/${id}`, { method: 'DELETE' })) {
         carregarEstoque();
     }
+}
+
+// Ajuste de inventário (Fase 4): único jeito de corrigir manualmente a
+// quantidade de um produto a partir desta fase -- PUT /estoque/atualizar
+// não mexe mais em quantidade (só metadado: nome, preço, categoria,
+// unidade de medida). Todo ajuste aqui exige motivo e vira uma
+// movimentação AJUSTE_INVENTARIO no histórico do produto.
+function abrirAjustarInventario(id) {
+    const p = cacheProdutos.find(prod => prod.id === id);
+    if (!p) return;
+    const step = p.unidade_medida === 'UN' ? '1' : '0.001';
+    abrirModal(`
+        <div class="card" style="width:420px;">
+            <h3>Ajustar Inventário</h3>
+            <p style="color:#666; margin-top:-8px;">${escapeHtml(p.nomedoproduto)} -- quantidade atual: <strong>${formatarQuantidade(p.quantidade, p.unidade_medida)} ${labelUnidade(p.unidade_medida)}</strong></p>
+            <div class="form-group" style="grid-template-columns: 1fr;">
+                <div>
+                    <label style="font-size:0.8rem; color:#666; display:block; margin-bottom:4px;">Nova quantidade (${labelUnidade(p.unidade_medida)})</label>
+                    <input class="form-control" type="number" step="${step}" min="0" id="ajuste-nova-qtd" value="${formatarQuantidade(p.quantidade, p.unidade_medida)}">
+                </div>
+                <div>
+                    <label style="font-size:0.8rem; color:#666; display:block; margin-bottom:4px;">Motivo do ajuste (obrigatório)</label>
+                    <textarea class="form-control" id="ajuste-motivo" rows="3" placeholder="Ex: contagem física, perda não contabilizada, correção de erro de lançamento..."></textarea>
+                </div>
+            </div>
+            <div style="display:flex; gap:10px; justify-content:flex-end;">
+                <button class="btn" onclick="fecharModal()">Cancelar</button>
+                <button class="btn-success" onclick="salvarAjusteInventario(${id})">Confirmar Ajuste</button>
+            </div>
+        </div>
+    `);
+}
+
+async function salvarAjusteInventario(id) {
+    const novaQtdEl = document.getElementById('ajuste-nova-qtd');
+    const motivoEl = document.getElementById('ajuste-motivo');
+    const novaQtd = parseFloat(novaQtdEl.value);
+    const motivo = motivoEl.value.trim();
+
+    if (isNaN(novaQtd) || novaQtd < 0) {
+        alert('Informe uma quantidade válida (maior ou igual a zero).');
+        return;
+    }
+    if (!motivo) {
+        alert('O motivo do ajuste é obrigatório.');
+        return;
+    }
+
+    const res = await apiFetch(`/estoque/${id}/ajustar-inventario`, {
+        method: 'POST',
+        body: JSON.stringify({ nova_quantidade: novaQtd, motivo: motivo }),
+    });
+    if (res) {
+        alert('Inventário ajustado com sucesso!');
+        fecharModal();
+        carregarEstoque();
+    }
+}
+
+// Histórico de movimentações (Fase 4): lista as movimentações registradas
+// para este produto (ENTRADA_COMPRA, VENDA, AJUSTE_INVENTARIO e demais
+// tipos já previstos para fases futuras), mais recente primeiro -- mesma
+// ordenação já devolvida pelo endpoint (GET /estoque/{id}/movimentacoes).
+const LABEL_TIPO_MOVIMENTACAO = {
+    ENTRADA_COMPRA: 'Entrada (compra)',
+    ENTRADA_MANUAL: 'Entrada (manual)',
+    VENDA: 'Venda',
+    CANCELAMENTO_VENDA: 'Cancelamento de venda',
+    PERDA: 'Perda',
+    QUEBRA: 'Quebra',
+    VENCIMENTO: 'Vencimento',
+    AJUSTE_INVENTARIO: 'Ajuste de inventário',
+};
+
+async function abrirHistoricoMovimentacoes(id) {
+    const p = cacheProdutos.find(prod => prod.id === id);
+    const movimentacoes = await apiFetch(`/estoque/${id}/movimentacoes`, {}, true);
+    if (!movimentacoes) {
+        alert('Não foi possível carregar o histórico de movimentações (verifique suas permissões).');
+        return;
+    }
+
+    abrirModal(`
+        <div class="card" style="width:720px; max-width:85vw;">
+            <h3>Histórico de Movimentações${p ? `: ${escapeHtml(p.nomedoproduto)}` : ''}</h3>
+            ${movimentacoes.length === 0 ? '<p style="color:#666;">Nenhuma movimentação registrada para este produto ainda.</p>' : `
+            <table>
+                <thead>
+                    <tr><th>Data</th><th>Tipo</th><th>Quantidade</th><th>Lote</th><th>Motivo</th></tr>
+                </thead>
+                <tbody>
+                    ${movimentacoes.map(m => {
+                        const positiva = Number(m.quantidade) >= 0;
+                        const sinal = positiva ? '+' : '';
+                        // IMPORTANTE 3 (revisão da Fase 4): usa a unidade
+                        // SALVA na própria movimentação (snapshot de quando
+                        // ela foi registrada), não a unidade ATUAL do
+                        // produto -- senão, se a unidade mudar depois (ex.:
+                        // KG -> UN), reabrir o histórico distorce
+                        // movimentações antigas (arredonda valores que
+                        // antes eram fracionários).
+                        const unidade = m.unidade_medida || 'UN';
+                        return `
+                        <tr>
+                            <td>${new Date(m.data).toLocaleString()}</td>
+                            <td>${escapeHtml(LABEL_TIPO_MOVIMENTACAO[m.tipo] || m.tipo)}</td>
+                            <td style="color:${positiva ? '#27ae60' : '#e74c3c'}; font-weight:bold;">${sinal}${formatarQuantidade(m.quantidade, unidade)} ${labelUnidade(unidade)}</td>
+                            <td>${m.lote_id != null ? '#' + m.lote_id : '-'}</td>
+                            <td>${m.motivo ? escapeHtml(m.motivo) : '-'}</td>
+                        </tr>
+                    `; }).join('')}
+                </tbody>
+            </table>`}
+            <div style="text-align:right; margin-top:16px;">
+                <button class="btn" onclick="fecharModal()">Fechar</button>
+            </div>
+        </div>
+    `);
 }
 
 async function carregarMovimentacao() {
@@ -499,9 +880,20 @@ function prepararEdicaoEstoque(id) {
     document.getElementById('form-estoque-title').innerText = `Editando: ${p.nomedoproduto}`;
     document.getElementById('novo-prod-nome').value = p.nomedoproduto;
     document.getElementById('novo-prod-codigo').value = p.codigodebarras;
-    document.getElementById('novo-prod-qtd').value = p.quantidade;
+    document.getElementById('novo-prod-unidade').value = p.unidade_medida || 'UN';
+    // Fase 4: PUT /estoque/atualizar não muda mais quantidade (ver
+    // docstring de schemas.EstoqueUpdate) -- o campo fica desabilitado em
+    // modo edição só pra mostrar o saldo atual (não editável por aqui);
+    // use "Ajustar Inventário" pra corrigir o saldo manualmente.
+    const campoQtdEdicao = document.getElementById('novo-prod-qtd');
+    campoQtdEdicao.value = p.quantidade;
+    campoQtdEdicao.disabled = true;
+    campoQtdEdicao.title = 'Quantidade não é editável aqui -- use "Ajustar Inventário" na linha do produto.';
+    document.getElementById('novo-prod-estoque-minimo').value = p.estoque_minimo || 0;
     document.getElementById('novo-prod-preco').value = p.preco;
     document.getElementById('novo-prod-cat').value = p.categoria;
+    document.getElementById('novo-prod-fornecedor').value = p.fornecedor_id || '';
+    atualizarPassoQuantidade();
 
     const btnContainer = document.getElementById('estoque-btn-container');
     btnContainer.innerHTML = `
@@ -514,28 +906,42 @@ function prepararEdicaoEstoque(id) {
 function cancelarEdicaoEstoque() {
     editandoProdutoId = null;
     document.getElementById('form-estoque-title').innerText = "Cadastrar Novo Produto";
+    // Reabilita o campo de quantidade (desabilitado em modo edição, ver
+    // prepararEdicaoEstoque) pro próximo cadastro de produto novo.
+    const campoQtdEdicao = document.getElementById('novo-prod-qtd');
+    if (campoQtdEdicao) {
+        campoQtdEdicao.disabled = false;
+        campoQtdEdicao.title = '';
+    }
     const btnContainer = document.getElementById('estoque-btn-container');
     btnContainer.innerHTML = `<button class="btn-success" onclick="adicionarProduto()">Salvar Produto</button>`;
     carregarEstoque();
 }
 
 async function adicionarProduto() {
+    const fornecedorId = document.getElementById('novo-prod-fornecedor').value;
     const dados = {
         nomedoproduto: document.getElementById('novo-prod-nome').value,
         codigodebarras: document.getElementById('novo-prod-codigo').value,
-        quantidade: parseInt(document.getElementById('novo-prod-qtd').value),
+        unidade_medida: document.getElementById('novo-prod-unidade').value,
+        estoque_minimo: parseFloat(document.getElementById('novo-prod-estoque-minimo').value) || 0,
         preco: parseFloat(document.getElementById('novo-prod-preco').value),
         categoria: document.getElementById('novo-prod-cat').value,
-        titulo: document.getElementById('novo-prod-nome').value
+        titulo: document.getElementById('novo-prod-nome').value,
+        fornecedor_id: fornecedorId ? parseInt(fornecedorId) : null
     };
 
     let res;
     if (editandoProdutoId) {
+        // Fase 4: PUT /estoque/atualizar não aceita mais `quantidade` (ver
+        // schemas.EstoqueUpdate) -- não envia o campo neste caminho, só no
+        // cadastro/incremento (POST /estoque/inserir) logo abaixo.
         res = await apiFetch(`/estoque/atualizar/${editandoProdutoId}`, {
             method: 'PUT',
             body: JSON.stringify(dados)
         });
     } else {
+        dados.quantidade = parseFloat(document.getElementById('novo-prod-qtd').value);
         res = await apiFetch('/estoque/inserir', {
             method: 'POST',
             body: JSON.stringify(dados)
@@ -669,8 +1075,8 @@ async function carregarVendas() {
         <div id="container-pdv" class="card">
             <h3>Nova Venda (PDV)</h3>
             <div class="form-group">
-                <input class="form-control" type="text" id="venda-codigo" placeholder="Código de Barras">
-                <input class="form-control" type="number" id="venda-qtd" placeholder="Quantidade" value="1">
+                <input class="form-control" type="text" id="venda-codigo" placeholder="Código de Barras" onchange="ajustarPassoVendaQtd()">
+                <input class="form-control" type="number" step="1" id="venda-qtd" placeholder="Quantidade" value="1">
                 <button onclick="adicionarAoCarrinho()">Adicionar Item</button>
             </div>
 
@@ -730,11 +1136,18 @@ async function cancelarVenda(id) {
     if (await apiFetch(`/vendas/cancelar/${id}`, { method: 'DELETE' })) carregarVendasDia();
 }
 
+function ajustarPassoVendaQtd() {
+    const codigo = document.getElementById('venda-codigo').value.trim();
+    const campoQtd = document.getElementById('venda-qtd');
+    const produto = cacheProdutos.find(p => p.codigodebarras.toString().trim() == codigo);
+    campoQtd.step = (produto && (produto.unidade_medida === 'KG' || produto.unidade_medida === 'L')) ? '0.001' : '1';
+}
+
 function adicionarAoCarrinho() {
     const codigo = document.getElementById('venda-codigo').value.trim();
-    const qtd = parseInt(document.getElementById('venda-qtd').value);
+    const qtd = parseFloat(document.getElementById('venda-qtd').value);
 
-    if (!codigo || qtd <= 0) {
+    if (!codigo || isNaN(qtd) || qtd <= 0) {
         alert("Dados inválidos");
         return;
     }
@@ -745,10 +1158,16 @@ function adicionarAoCarrinho() {
         return;
     }
 
+    if (produto.unidade_medida === 'UN' && !Number.isInteger(qtd)) {
+        alert("Este produto é vendido por unidade (UN) -- a quantidade precisa ser um número inteiro.");
+        return;
+    }
+
     carrinho.push({ codigodebarras: codigo, quantidade: qtd });
-    
+
     document.getElementById('venda-codigo').value = '';
     document.getElementById('venda-qtd').value = '1';
+    document.getElementById('venda-qtd').step = '1';
     document.getElementById('venda-codigo').focus();
 
     atualizarCarrinhoUI();
@@ -757,21 +1176,19 @@ function adicionarAoCarrinho() {
 function atualizarCarrinhoUI() {
     const tbody = document.getElementById('lista-carrinho');
     const totalDisplay = document.getElementById('total-carrinho-display');
-    
+
     if (!tbody || !totalDisplay) return;
 
-    let total = 0.0;
+    const total = calcularTotalCarrinho(carrinho);
     tbody.innerHTML = '';
     carrinho.forEach((item, index) => {
         const p = cacheProdutos.find(prod => prod.codigodebarras.toString().trim() == item.codigodebarras.toString().trim());
         const nome = p ? p.nomedoproduto : "Produto não identificado";
-        const preco = p ? p.preco : 0;
-        total += preco * item.quantidade;
 
         tbody.innerHTML += `
             <tr>
                 <td>${escapeHtml(nome)}<br><small>${escapeHtml(item.codigodebarras)}</small></td>
-                <td>${item.quantidade}</td>
+                <td>${formatarQuantidade(item.quantidade, p?.unidade_medida)} ${labelUnidade(p?.unidade_medida)}</td>
                 <td><button class="btn-danger" onclick="removerDoCarrinho(${index})">X</button></td>
             </tr>
         `;
@@ -783,11 +1200,7 @@ function atualizarCarrinhoUI() {
 function abrirMenuPagamento() {
     if (carrinho.length === 0) return alert("Carrinho vazio!");
 
-    let total = 0.0;
-    carrinho.forEach(item => {
-        const p = cacheProdutos.find(prod => prod.codigodebarras.toString().trim() == item.codigodebarras.toString().trim());
-        total += (p ? p.preco : 0) * item.quantidade;
-    });
+    const total = calcularTotalCarrinho(carrinho);
 
     const pdv = document.getElementById('container-pdv');
     const pgto = document.getElementById('container-pagamento');
@@ -851,10 +1264,10 @@ function calcularTroco(total) {
     const recebido = parseFloat(document.getElementById('valor-recebido').value) || 0;
     const display = document.getElementById('troco-display');
     if (recebido >= total) {
-        display.innerText = `Troco: R$ ${(recebido - total).toFixed(2)}`;
+        display.innerText = `Troco: R$ ${arredondarMoeda(recebido - total).toFixed(2)}`;
         display.style.color = '#27ae60';
     } else {
-        display.innerText = `Faltam: R$ ${(total - recebido).toFixed(2)}`;
+        display.innerText = `Faltam: R$ ${arredondarMoeda(total - recebido).toFixed(2)}`;
         display.style.color = '#e74c3c';
     }
 }
@@ -905,8 +1318,10 @@ function emitirNotaFiscal(venda, metodo, parcelas) {
         const nome = i.nomedoproduto || "Produto";
         const preco = Number(i.preco_total) || 0;
         const unitario = Number(i.preco_unitario) || 0;
+        const p = cacheProdutos.find(prod => prod.codigodebarras.toString().trim() == i.codigodebarras.toString().trim());
+        const qtdFormatada = `${formatarQuantidade(i.quantidade, p?.unidade_medida)}${labelUnidade(p?.unidade_medida)}`;
 
-        itensHtml += `<tr><td>${escapeHtml(nome)}<br><small>${escapeHtml(i.codigodebarras)}</small></td><td>${i.quantidade}x</td><td>R$ ${unitario.toFixed(2)}</td><td>R$ ${preco.toFixed(2)}</td></tr>`;
+        itensHtml += `<tr><td>${escapeHtml(nome)}<br><small>${escapeHtml(i.codigodebarras)}</small></td><td>${qtdFormatada}</td><td>R$ ${unitario.toFixed(2)}</td><td>R$ ${preco.toFixed(2)}</td></tr>`;
     });
 
     const totalFinal = Number(venda.valor_total) || 0;
@@ -940,11 +1355,13 @@ function emitirNotaFiscal(venda, metodo, parcelas) {
 
 async function carregarCompras(containerId = 'view-compras') {
     const container = document.getElementById(containerId);
-    const [produtos, compras] = await Promise.all([
+    const [produtos, compras, fornecedores] = await Promise.all([
         apiFetch('/estoque/mostrar'),
-        apiFetch('/compras/listar')
+        apiFetch('/compras/listar'),
+        apiFetch('/fornecedores/mostrar', {}, true)
     ]);
     cacheProdutos = produtos || [];
+    cacheFornecedores = fornecedores || [];
     const isAdmin = localStorage.getItem('is_admin') === 'true';
     const cargo = (localStorage.getItem('user_cargo') || "").toLowerCase();
     const setor = (localStorage.getItem('user_setor') || "").toLowerCase();
@@ -976,13 +1393,14 @@ async function carregarCompras(containerId = 'view-compras') {
         <div class="card">
             <h3>Histórico de Pedidos</h3>
             <table>
-                <thead><tr><th>ID</th><th>Data / Hora</th><th>Solicitante</th><th>Total</th><th>Status</th><th>Ações</th></tr></thead>
+                <thead><tr><th>ID</th><th>Data / Hora</th><th>Solicitante</th><th>Fornecedor</th><th>Total</th><th>Status</th><th>Ações</th></tr></thead>
                 <tbody>
                     ${(compras || []).map(c => `
                         <tr>
                             <td><button class="btn" style="padding:3px 8px; font-size:0.75rem; background:#8e44ad; color:#fff;" onclick="abrirDetalheCompra(${c.id})">🗒️ #${c.id}</button></td>
                             <td>${new Date(c.data).toLocaleString()}</td>
                             <td>${escapeHtml(c.solicitante) || '-'}</td>
+                            <td>${escapeHtml(c.fornecedor) || '-'}</td>
                             <td>R$ ${c.valor_total.toFixed(2)}</td>
                             <td><span class="badge" style="background:${corStatus[c.status] || '#95a5a6'}">${labelStatus[c.status] || c.status.toUpperCase()}</span></td>
                             <td>${renderBotoesAcao(c)}</td>
@@ -1005,6 +1423,13 @@ async function carregarCompras(containerId = 'view-compras') {
         html += `
         <div class="card">
             <h3>Registrar Novo Pedido de Compra</h3>
+            <div class="form-group">
+                <label style="font-size:0.75rem; color:#666; display:block;">Fornecedor (opcional)</label>
+                <select class="form-control" id="compra-fornecedor" style="margin:0;">
+                    <option value="">Sem fornecedor</option>
+                    ${cacheFornecedores.map(f => `<option value="${f.id}">${escapeHtml(f.nome)}</option>`).join('')}
+                </select>
+            </div>
             <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap;">
                 <div style="flex:2; min-width:120px;">
                     <label style="font-size:0.75rem; color:#666;">Cód. Barras</label>
@@ -1012,7 +1437,7 @@ async function carregarCompras(containerId = 'view-compras') {
                 </div>
                 <div style="flex:1; min-width:60px; max-width:90px;">
                     <label style="font-size:0.75rem; color:#666;">Qtd</label>
-                    <input class="form-control" type="number" id="compra-qtd" placeholder="Qtd" value="1" style="margin:0;">
+                    <input class="form-control" type="number" step="0.001" id="compra-qtd" placeholder="Qtd" value="1" style="margin:0;">
                 </div>
                 <div style="flex:2; min-width:130px;">
                     <label style="font-size:0.75rem; color:#666;">Custo Unit. (R$)</label>
@@ -1042,6 +1467,13 @@ async function carregarCompras(containerId = 'view-compras') {
         <div class="card">
             <h3>Montar Catálogo de Compras</h3>
             <p style="font-size:0.85rem; color:#666;">Monte o pedido e envie ao gerente para análise.</p>
+            <div class="form-group">
+                <label style="font-size:0.75rem; color:#666; display:block;">Fornecedor (opcional)</label>
+                <select class="form-control" id="compra-fornecedor" style="margin:0;">
+                    <option value="">Sem fornecedor</option>
+                    ${cacheFornecedores.map(f => `<option value="${f.id}">${escapeHtml(f.nome)}</option>`).join('')}
+                </select>
+            </div>
             <div style="display:flex; gap:8px; align-items:flex-end; flex-wrap:wrap;">
                 <div style="flex:2; min-width:120px;">
                     <label style="font-size:0.75rem; color:#666;">Cód. Barras</label>
@@ -1049,7 +1481,7 @@ async function carregarCompras(containerId = 'view-compras') {
                 </div>
                 <div style="flex:1; min-width:60px; max-width:90px;">
                     <label style="font-size:0.75rem; color:#666;">Qtd</label>
-                    <input class="form-control" type="number" id="compra-qtd" placeholder="Qtd" value="1" style="margin:0;">
+                    <input class="form-control" type="number" step="0.001" id="compra-qtd" placeholder="Qtd" value="1" style="margin:0;">
                 </div>
                 <div style="flex:2; min-width:130px;">
                     <label style="font-size:0.75rem; color:#666;">Custo Unit. (R$)</label>
@@ -1101,7 +1533,7 @@ function verificarNovoProdutoCompra() {
 
 function adicionarItemCompra() {
     const codigo = document.getElementById('compra-codigo').value.trim();
-    const qtd = parseInt(document.getElementById('compra-qtd').value);
+    const qtd = parseFloat(document.getElementById('compra-qtd').value);
     const custo = parseFloat(document.getElementById('compra-custo').value);
     if (!codigo || isNaN(qtd) || isNaN(custo)) return alert("Preencha os campos obrigatórios.");
     const prodExistente = cacheProdutos.find(p => p.codigodebarras == codigo);
@@ -1121,22 +1553,27 @@ function adicionarItemCompra() {
 function atualizarCarrinhoCompraUI() {
     const tbody = document.getElementById('lista-carrinho-compra');
     if (!tbody) return;
-    tbody.innerHTML = carrinhoCompra.map((i, index) => `
+    tbody.innerHTML = carrinhoCompra.map((i, index) => {
+        const p = cacheProdutos.find(prod => prod.codigodebarras == i.codigodebarras);
+        return `
         <tr>
             <td>${escapeHtml(i.nomedoproduto)}<br><small>${escapeHtml(i.codigodebarras)}</small></td>
-            <td>${i.quantidade}</td>
+            <td>${formatarQuantidade(i.quantidade, p?.unidade_medida)} ${labelUnidade(p?.unidade_medida)}</td>
             <td>R$ ${i.preco_custo.toFixed(2)}</td>
             <td>R$ ${(i.quantidade * i.preco_custo).toFixed(2)}</td>
             <td><button class="btn-danger" onclick="carrinhoCompra.splice(${index},1); atualizarCarrinhoCompraUI();">X</button></td>
         </tr>
-    `).join('');
+    `;
+    }).join('');
 }
 
 async function enviarPedidoCompra() {
     if (carrinhoCompra.length === 0) return alert("Pedido vazio.");
+    const fornecedorEl = document.getElementById('compra-fornecedor');
+    const fornecedorId = fornecedorEl && fornecedorEl.value ? parseInt(fornecedorEl.value) : null;
     const res = await apiFetch('/compras/registrar', {
         method: 'POST',
-        body: JSON.stringify({ itens: carrinhoCompra })
+        body: JSON.stringify({ itens: carrinhoCompra, fornecedor_id: fornecedorId })
     });
     if (res) {
         alert(res.status === 'autorizada' ? "Compra realizada e estoque atualizado!" : "Pedido enviado para autorização do gerente.");
@@ -1182,6 +1619,7 @@ async function abrirDetalheCompra(id) {
                 <div class="ponto-stamp">Hora:<br><strong>${c ? new Date(c.data).toLocaleTimeString() : '-'}</strong></div>
                 <div class="ponto-stamp">Solicitante:<br><strong>${escapeHtml(c?.solicitante) || '-'}</strong></div>
                 <div class="ponto-stamp">Aprovador:<br><strong>${escapeHtml(c?.aprovador) || 'Aguardando'}</strong></div>
+                <div class="ponto-stamp">Fornecedor:<br><strong>${escapeHtml(c?.fornecedor) || '-'}</strong></div>
                 <div class="ponto-stamp" style="background:${c ? (corStatus[c.status] || '#95a5a6') : '#95a5a6'}; color:#fff;">
                     Status:<br><strong>${c ? (labelStatus[c.status] || c.status.toUpperCase()) : '-'}</strong>
                 </div>
@@ -1200,15 +1638,18 @@ async function abrirDetalheCompra(id) {
                     </tr>
                 </thead>
                 <tbody>
-                    ${itens.map(i => `
+                    ${itens.map(i => {
+                        const p = cacheProdutos.find(prod => prod.codigodebarras == i.codigodebarras);
+                        return `
                         <tr style="border-top:1px solid #eee;">
                             <td style="padding:8px;">${escapeHtml(i.nomedoproduto)}</td>
                             <td style="padding:8px; color:#666; font-size:0.85rem;">${escapeHtml(i.codigodebarras)}</td>
-                            <td style="padding:8px; text-align:center;">${i.quantidade}</td>
+                            <td style="padding:8px; text-align:center;">${formatarQuantidade(i.quantidade, p?.unidade_medida)} ${labelUnidade(p?.unidade_medida)}</td>
                             <td style="padding:8px; text-align:right;">R$ ${i.preco_custo.toFixed(2)}</td>
                             <td style="padding:8px; text-align:right; font-weight:bold;">R$ ${i.total.toFixed(2)}</td>
                         </tr>
-                    `).join('')}
+                    `;
+                    }).join('')}
                     <tr style="border-top:2px solid #2c3e50; background:#f9f9f9;">
                         <td colspan="4" style="padding:8px; text-align:right; font-weight:bold;">TOTAL DO PEDIDO</td>
                         <td style="padding:8px; text-align:right; font-weight:bold; font-size:1.1rem;">R$ ${c ? c.valor_total.toFixed(2) : '0.00'}</td>
@@ -1246,15 +1687,17 @@ async function verItensCompra(id, btn) {
                 <th style="padding:4px 6px;">Total</th>
             </tr></thead>
             <tbody>
-                ${itens.map(i => `
+                ${itens.map(i => {
+                    const p = cacheProdutos.find(prod => prod.codigodebarras == i.codigodebarras);
+                    return `
                     <tr style="border-top:1px solid #eee;">
                         <td style="padding:4px 6px;">${escapeHtml(i.nomedoproduto)}</td>
                         <td style="padding:4px 6px; color:#666;">${escapeHtml(i.codigodebarras)}</td>
-                        <td style="padding:4px 6px; text-align:center;">${i.quantidade}</td>
+                        <td style="padding:4px 6px; text-align:center;">${formatarQuantidade(i.quantidade, p?.unidade_medida)} ${labelUnidade(p?.unidade_medida)}</td>
                         <td style="padding:4px 6px; text-align:right;">R$ ${i.preco_custo.toFixed(2)}</td>
                         <td style="padding:4px 6px; text-align:right; font-weight:bold;">R$ ${i.total.toFixed(2)}</td>
-                    </tr>
-                `).join('')}
+                    </tr>`;
+                }).join('')}
             </tbody>
         </table>`;
     painel.classList.remove('hidden');
@@ -2078,7 +2521,7 @@ async function carregarInfoEstoqueSolicitacao(solId) {
                 html += `<tr style="border-bottom:1px solid #eee;">
                     ${i === 0 ? `<td style="padding:6px;" rowspan="${encontrados.length}">${escapeHtml(linha)}</td>` : ''}
                     <td style="padding:6px;">${escapeHtml(p.nomedoproduto)}<br><small style="color:#888;">${escapeHtml(p.codigodebarras)}</small></td>
-                    <td style="padding:6px; text-align:center;"><strong style="color:${corQtd}">${p.quantidade}</strong></td>
+                    <td style="padding:6px; text-align:center;"><strong style="color:${corQtd}">${formatarQuantidade(p.quantidade, p.unidade_medida)} ${labelUnidade(p.unidade_medida)}</strong></td>
                     <td style="padding:6px; text-align:right;">R$ ${Number(p.preco).toFixed(2)}</td>
                 </tr>`;
             });

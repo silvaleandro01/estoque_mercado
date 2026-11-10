@@ -1,8 +1,12 @@
+from decimal import Decimal
 from datetime import datetime, timezone
 from fastapi import HTTPException
 from sqlmodel import Session, select
 
-from utils.database import Compra, ItemCompra, Funcionario, engine
+from utils.database import Compra, ItemCompra, Estoque, Funcionario, Fornecedor, engine
+from utils.money import arredondar
+from utils.quantidade import validar_quantidade_inteira_se_unidade
+from utils.timezone import hoje_brasil, limites_do_dia_brasil
 from logs.logs import criar_log
 from schemas.schemas import CompraInput
 
@@ -14,21 +18,55 @@ def _nome_completo(session: Session, funcionario_id: int) -> str:
 
 def registrar_compra(dados: CompraInput, funcionario_id: int):
     with Session(engine) as session:
-        valor_total = sum(item.preco_custo * item.quantidade for item in dados.itens)
-        compra = Compra(solicitante_id=funcionario_id, valor_total=round(valor_total, 2), status="pendente")
+        # Mesmo raciocínio de _validar_fornecedor em repository/estoque.py:
+        # erro 404 claro em vez de um erro cru do banco/FK se o
+        # fornecedor_id informado não existir. fornecedor_id é opcional
+        # (compras sem fornecedor definido continuam funcionando).
+        if dados.fornecedor_id is not None and not session.get(Fornecedor, dados.fornecedor_id):
+            raise HTTPException(status_code=404, detail="Fornecedor não encontrado")
+
+        # Validação "UN só aceita quantidade inteira" (ver docstring de
+        # validar_quantidade_inteira_se_unidade): só dá pra aplicar aqui
+        # quando o código de barras já corresponde a um produto cadastrado
+        # no estoque -- a unidade de medida é a fonte da verdade. Se o
+        # produto ainda não existir (vai virar pendente, unidade decidida só
+        # na confirmação em estoque.py::confirmar_pendente), não há o que
+        # validar nesta etapa.
+        for item in dados.itens:
+            produto_existente = session.exec(
+                select(Estoque).where(Estoque.codigodebarras == item.codigodebarras)
+            ).first()
+            if produto_existente:
+                validar_quantidade_inteira_se_unidade(item.quantidade, produto_existente.unidade_medida, item.nomedoproduto)
+
+        # Arredonda cada preço unitário (entrada do cliente pode vir com mais
+        # de 2 casas) antes de multiplicar, para que o total do item e o
+        # total do pedido usem sempre o mesmo valor unitário "de verdade"
+        # que será gravado no banco.
+        itens_calculados = [
+            (item, arredondar(item.preco_custo), arredondar(item.preco_venda) if item.preco_venda is not None else None)
+            for item in dados.itens
+        ]
+        valor_total = arredondar(
+            sum((arredondar(preco_custo * item.quantidade) for item, preco_custo, _ in itens_calculados), Decimal("0.00"))
+        )
+        compra = Compra(
+            solicitante_id=funcionario_id, valor_total=valor_total, status="pendente",
+            fornecedor_id=dados.fornecedor_id,
+        )
         try:
             session.add(compra)
             session.flush()
-            for item in dados.itens:
+            for item, preco_custo, preco_venda in itens_calculados:
                 session.add(ItemCompra(
                     compra_id=compra.id,
                     codigodebarras=item.codigodebarras,
                     nomedoproduto=item.nomedoproduto,
                     categoria=item.categoria,
-                    preco_venda=item.preco_venda,
+                    preco_venda=preco_venda,
                     quantidade=item.quantidade,
-                    preco_custo_unitario=item.preco_custo,
-                    preco_custo_total=round(item.preco_custo * item.quantidade, 2),
+                    preco_custo_unitario=preco_custo,
+                    preco_custo_total=arredondar(preco_custo * item.quantidade),
                 ))
             session.commit()
             session.refresh(compra)
@@ -50,6 +88,7 @@ def listar_compras():
                 "aprovador": _nome_completo(session, c.aprovador_id) if c.aprovador_id else None,
                 "valor_total": c.valor_total,
                 "status": c.status,
+                "fornecedor": session.get(Fornecedor, c.fornecedor_id).nome if c.fornecedor_id else None,
             }
             for c in compras
         ]
@@ -140,12 +179,14 @@ def autorizar_compra(compra_id: int, funcionario_id: int):
 
 def compras_do_dia():
     with Session(engine) as session:
-        hoje = datetime.now(timezone.utc).date()
+        dia = hoje_brasil()
+        inicio_utc, fim_utc = limites_do_dia_brasil(dia)
         compras = session.exec(
             select(Compra).where(
                 Compra.status == "autorizada",
-                Compra.data >= datetime(hoje.year, hoje.month, hoje.day, tzinfo=timezone.utc),
+                Compra.data >= inicio_utc,
+                Compra.data < fim_utc,
             )
         ).all()
-        total = round(sum(c.valor_total for c in compras), 2)
-        return {"data": hoje, "total": total}
+        total = arredondar(sum((c.valor_total for c in compras), Decimal("0.00")))
+        return {"data": dia, "total": total}

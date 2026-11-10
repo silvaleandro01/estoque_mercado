@@ -35,10 +35,29 @@ iniciar.bat                # Windows
 cd src && uvicorn main:app --reload  # Linux/Mac
 ```
 
+> **Produção:** defina `AMBIENTE=producao` no `.env` para desativar `/docs`, `/redoc` e `/openapi.json`. Essas rotas ficam abertas sem autenticação e expõem toda a estrutura da API; em desenvolvimento (padrão) elas continuam disponíveis.
+
+## Testes
+
+A suíte usa `pytest` com SQLite em memória (não precisa de MySQL rodando
+nem de `.env` configurado).
+
+```bash
+# com o venv já ativado (ver Instalação acima)
+pip install -r requirements-dev.txt
+
+pytest
+```
+
+`requirements-dev.txt` inclui `requirements.txt` (dependências de produção)
+mais `pytest` e `httpx` (usado pelo `TestClient` do FastAPI nos testes).
+
 ## Funcionalidades
 
 - Cadastro e gestão de funcionários com controle de acesso por cargo
 - Controle de estoque com entrada e saída de produtos
+- Cadastro de produto com unidade de medida (unidade, quilo ou litro), venda por peso com quantidade decimal e estoque mínimo configurável
+- Cadastro de fornecedores, com vínculo opcional a produtos e pedidos de compra
 - Registro e aprovação de pedidos de compra
 - Lançamento de vendas com diferentes métodos de pagamento
 - Registro de ponto e fechamento de folha mensal

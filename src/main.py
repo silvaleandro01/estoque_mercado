@@ -12,6 +12,7 @@ from routes.logs import router as logs_router
 from routes.compras import router as compras_router
 from routes.despesas import router as despesas_router
 from routes.comunicados import router as comunicados_router
+from routes.fornecedores import router as fornecedores_router
 
 _DEFAULT_ORIGINS = "http://127.0.0.1:5500,http://localhost:5500,http://127.0.0.1:8080,http://localhost:8080"
 ALLOWED_ORIGINS = [
@@ -20,6 +21,12 @@ ALLOWED_ORIGINS = [
     if origem.strip()
 ]
 
+# Em desenvolvimento (padrão) /docs, /redoc e /openapi.json ficam disponíveis.
+# Em produção (AMBIENTE=producao) essas rotas são desativadas, pois expõem sem
+# autenticação toda a estrutura da API, incluindo schemas de rotas sensíveis.
+AMBIENTE = os.getenv("AMBIENTE", "desenvolvimento").strip().lower()
+_PRODUCAO = AMBIENTE == "producao"
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -27,7 +34,12 @@ async def lifespan(app: FastAPI):
     yield  # pragma: no cover
 
 
-app = FastAPI(lifespan=lifespan)
+app = FastAPI(
+    lifespan=lifespan,
+    docs_url=None if _PRODUCAO else "/docs",
+    redoc_url=None if _PRODUCAO else "/redoc",
+    openapi_url=None if _PRODUCAO else "/openapi.json",
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -45,3 +57,4 @@ app.include_router(logs_router)
 app.include_router(compras_router)
 app.include_router(despesas_router)
 app.include_router(comunicados_router)
+app.include_router(fornecedores_router)

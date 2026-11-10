@@ -17,7 +17,41 @@ if not SECRET_KEY:
 ALGORITHM = "HS256"
 TOKEN_EXPIRA_HORAS = int(os.getenv("TOKEN_EXPIRA_HORAS", "8"))
 
+# Lockout de login (fix/login-rate-limiting) -- ver
+# repository/funcionarios.py::autenticar_funcionario. Quantas tentativas de
+# senha errada seguidas uma conta aguenta antes de ser bloqueada
+# temporariamente, e por quantos minutos o bloqueio dura.
+LOGIN_MAX_TENTATIVAS = int(os.getenv("LOGIN_MAX_TENTATIVAS", "5"))
+LOGIN_BLOQUEIO_MINUTOS = int(os.getenv("LOGIN_BLOQUEIO_MINUTOS", "15"))
+
 _pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# Hash bcrypt fixo, DUMMY -- não corresponde a nenhuma senha real de nenhum
+# funcionário (gerado uma única vez com
+# `_pwd_context.hash("dummy-tempo-constante-estoque-mercado-nao-e-senha-real")`
+# e colado aqui como literal). Usado por autenticar_funcionario para rodar
+# verificar_senha() mesmo quando o usuário não existe ou não tem senha
+# definida, só para gastar um tempo de CPU parecido com o caso "usuário
+# existe, senha errada".
+#
+# Por quê: bcrypt é propositalmente lento (dezenas a centenas de ms por
+# verificação). Sem essa chamada "de mentira", os dois casos abaixo teriam
+# tempo de resposta bem diferente, mesmo com a mensagem de erro já
+# unificada -- e essa diferença de tempo, medida de fora, vazaria de volta
+# a mesma informação (quais usernames existem) que a unificação da
+# mensagem tenta esconder.
+#
+# Por que precisa ser um literal FIXO (hardcoded) em vez de gerado em
+# runtime (ex.: `_pwd_context.hash(secrets.token_hex())` a cada chamada):
+# gerar o hash na hora custaria exatamente o mesmo tempo de CPU do bcrypt
+# que a própria verificação (hash e verify são a mesma operação de custo,
+# bcrypt só compara reaplicando o hash) -- ou seja, pagaria o custo do
+# bcrypt DUAS vezes (gerar + verificar) em vez de uma só, tornando a
+# resposta de todo login mais lenta à toa, sem nenhum ganho de segurança:
+# o valor em si não precisa ser secreto nem imprevisível (não protege
+# nenhuma senha real), só precisa ser um hash bcrypt válido para
+# verificar_senha() gastar o tempo de CPU equivalente.
+HASH_DUMMY_LOGIN = "$2b$12$CsmM0OyPNva84/ltbP4ej.4eUGhqFfk2NP5G4iBUwkgudt23aShQO"
 
 
 def hash_senha(senha: str) -> str:

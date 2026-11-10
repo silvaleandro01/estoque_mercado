@@ -197,6 +197,36 @@ button:hover {
 .feedback-error { background-color: #f8d7da; color: #721c24; display: block; }
 .feedback-success { background-color: #d4edda; color: #155724; display: block; }
 
+/* Modal genérico (Fase 4 -- ajuste de inventário / histórico de
+   movimentações): reaproveitado por qualquer tela que precise de um
+   formulário/visualização sobreposta, sem introduzir nenhum framework
+   novo -- só CSS simples + toggle da classe .hidden, mesmo padrão já usado
+   em todo o resto do app. */
+.modal-overlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    padding: 20px;
+}
+
+.modal-box {
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.25);
+    max-width: 90vw;
+    max-height: 90vh;
+    overflow-y: auto;
+}
+
+.modal-box .card {
+    box-shadow: none;
+    margin-bottom: 0;
+}
+
 .ponto-stamp {
     background-color: #f8f9fa;
     padding: 15px;
