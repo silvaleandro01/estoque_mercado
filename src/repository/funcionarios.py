@@ -92,14 +92,29 @@ def autenticar_funcionario(dados: LoginRequest):
         #      `LOWER(col) LIKE LOWER(%s)` (a forma antiga) não usa um
         #      índice funcional mesmo quando ele existe e cobre a expressão;
         #      só `LOWER(col) = LOWER(%s)` usa.
-        funcionario = session.exec(
-            select(Funcionario)
-            .where(
-                func.lower(Funcionario.nome) == nome.lower(),
-                func.lower(Funcionario.sobrenome) == sobrenome.lower(),
-            )
-            .with_for_update()
-        ).first()
+        #
+        # CORRIGIDO (CRÍTICO 2 da revisão desta trava): este SELECT ... FOR
+        # UPDATE em si não tinha nenhum tratamento de OperationalError --
+        # só os commits mais abaixo tinham. Reproduzido ao vivo contra MySQL
+        # real (innodb_lock_wait_timeout reduzido só para o teste): um
+        # lock-wait-timeout de verdade (código 1205 -- outra transação
+        # segurando a MESMA linha por tempo suficiente) escapava cru daqui
+        # como um 500, em vez do 409 "tente novamente" que o resto do
+        # sistema já usa para contenção transitória de lock. `erros_banco.py`
+        # foi estendido para tratar 1205 igual a 1213 (deadlock) -- do ponto
+        # de vista do cliente são o mesmo tipo de falha transitória.
+        try:
+            funcionario = session.exec(
+                select(Funcionario)
+                .where(
+                    func.lower(Funcionario.nome) == nome.lower(),
+                    func.lower(Funcionario.sobrenome) == sobrenome.lower(),
+                )
+                .with_for_update()
+            ).first()
+        except OperationalError as exc:
+            session.rollback()
+            tratar_operational_error(exc, "Não foi possível processar o login, tente novamente")
 
         agora = datetime.now(timezone.utc)
 

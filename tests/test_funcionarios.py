@@ -403,6 +403,44 @@ def test_login_outro_operational_error_nao_vira_409(engine, session, monkeypatch
         autenticar_funcionario(LoginRequest(username="outro.erro", senha="Test@123"))
 
 
+def test_login_select_lock_wait_timeout_vira_409_nao_500(engine, session, monkeypatch):
+    """
+    CRÍTICO 2 da revisão de fix/login-rate-limiting: o SELECT ... FOR UPDATE
+    do login (que busca o funcionário e trava a linha) não tinha nenhum
+    tratamento de OperationalError -- só os commits tinham. Reproduzido ao
+    vivo contra MySQL real (innodb_lock_wait_timeout reduzido só para o
+    teste, igual o painel de revisão fez): um lock-wait-timeout de verdade
+    (código 1205 -- outra transação segurando a mesma linha por tempo
+    suficiente) escapava cru como um 500. Agora o SELECT também está
+    protegido, e `utils/erros_banco.py` trata 1205 com a mesma resposta 409
+    já usada para 1213 (deadlock) -- do ponto de vista do cliente são o
+    mesmo tipo de falha transitória de concorrência.
+    """
+    import sqlmodel as sqlmodel_mod
+    from sqlalchemy.exc import OperationalError
+
+    setor = make_setor(session, tipo="lock_wait_login1")
+    make_funcionario(session, "trava", "espera", setor.id)
+
+    class FakeOrigLockWaitTimeout(Exception):
+        args = (1205, "Lock wait timeout exceeded; try restarting transaction")
+
+    chamadas = {"n": 0}
+
+    def exec_que_falha_com_lock_wait_timeout(self, statement, *args, **kwargs):
+        chamadas["n"] += 1
+        raise OperationalError("SELECT", {}, FakeOrigLockWaitTimeout())
+
+    monkeypatch.setattr(sqlmodel_mod.Session, "exec", exec_que_falha_com_lock_wait_timeout)
+
+    with pytest.raises(HTTPException) as exc:
+        autenticar_funcionario(LoginRequest(username="trava.espera", senha="Test@123"))
+
+    assert exc.value.status_code == 409
+    assert "tente novamente" in exc.value.detail.lower()
+    assert chamadas["n"] == 1
+
+
 # ── criar_funcionario ─────────────────────────────────────────────────────────
 
 def test_criar_funcionario_sucesso(engine, session):
