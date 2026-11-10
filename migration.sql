@@ -637,3 +637,118 @@ DROP PROCEDURE IF EXISTS `_add_column_if_not_exists`;
 -- repository/estoque.py::deletar_estoque (CRÍTICO 1a acima). Nenhuma mudança
 -- de schema (ON DELETE CASCADE) é necessária para esta correção.
 -- ============================================================================
+
+-- ============================================================================
+-- Migração aditiva (fix/login-rate-limiting) -- ver utils.database.Funcionario
+-- e repository/funcionarios.py::autenticar_funcionario para o contexto
+-- completo. Mesmo padrão das migrações anteriores: aditiva, idempotente
+-- (IF NOT EXISTS), nenhum DROP/TRUNCATE.
+--
+-- Correção de uma varredura de segurança que confirmou ao vivo, contra o
+-- servidor real, dois problemas no login (POST /funcionarios/login):
+--   1) Mensagens de erro distintas revelavam quais usernames existem no
+--      sistema -- corrigido só na aplicação (mensagem genérica única +
+--      mitigação de timing-attack), sem precisar de mudança de schema.
+--   2) Zero rate-limiting/lockout -- 20 tentativas de login seguidas contra
+--      a mesma conta em ~4 segundos eram todas processadas normalmente, sem
+--      nenhum bloqueio. É o que este bloco resolve.
+--
+-- `funcionario` ganha:
+--   - tentativas_login_falhas: contador de tentativas de senha errada
+--     consecutivas (zera a cada login bem-sucedido).
+--   - bloqueado_ate: até quando a conta fica temporariamente bloqueada
+--     depois de atingir o limite de tentativas (NULL = não bloqueada).
+-- ============================================================================
+
+DELIMITER $$
+DROP PROCEDURE IF EXISTS `_add_column_if_not_exists`$$
+CREATE PROCEDURE `_add_column_if_not_exists`(
+    IN p_table VARCHAR(64), IN p_column VARCHAR(64), IN p_definition TEXT
+)
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = DATABASE() AND table_name = p_table AND column_name = p_column
+    ) THEN
+        SET @ddl = CONCAT('ALTER TABLE `', p_table, '` ADD COLUMN `', p_column, '` ', p_definition);
+        PREPARE stmt FROM @ddl;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+    END IF;
+END$$
+DELIMITER ;
+
+CALL `_add_column_if_not_exists`('funcionario', 'tentativas_login_falhas', 'INT NOT NULL DEFAULT 0');
+CALL `_add_column_if_not_exists`('funcionario', 'bloqueado_ate', 'DATETIME NULL');
+
+DROP PROCEDURE IF EXISTS `_add_column_if_not_exists`;
+
+-- ============================================================================
+-- Migração aditiva (fix/login-rate-limiting -- CRÍTICO 1 da revisão da trava
+-- de login) -- ver repository/funcionarios.py::autenticar_funcionario para o
+-- contexto completo. Mesmo padrão das migrações anteriores: aditiva,
+-- idempotente, nenhum DROP/TRUNCATE.
+--
+-- ACHADO (painel de revisão, confirmado ao vivo contra MySQL real via
+-- EXPLAIN, performance_schema.data_locks e um teste de concorrência com
+-- threads reais): a consulta de login (SELECT ... FOR UPDATE, introduzida
+-- pelo lockout acima) filtrava `nome`/`sobrenome` sem NENHUM índice
+-- utilizável -- EXPLAIN mostrava type=ALL (full table scan). Sob
+-- REPEATABLE READ (padrão do InnoDB), uma leitura de bloqueio que faz table
+-- scan trava a tabela `funcionario` INTEIRA durante a transação, não só a
+-- linha procurada: medido ao vivo, 10 contas DIFERENTES logando
+-- simultaneamente levaram ~9x mais tempo que uma chamada isolada -- deveriam
+-- ser independentes entre si. A própria correção de segurança (lockout)
+-- tinha introduzido um problema de disponibilidade pior do que o resolvido.
+--
+-- POR QUE ÍNDICE FUNCIONAL (não um índice comum em nome/sobrenome): a
+-- consulta compara via `func.lower(nome) == valor.lower()` (ver código),
+-- então a expressão realmente filtrada é LOWER(nome)/LOWER(sobrenome), não
+-- as colunas em si -- um índice comum não é utilizável para uma expressão
+-- assim (não-sargable para um B-tree normal). Índice funcional (MySQL
+-- 8.0.13+, disponível na versão já usada por este projeto -- 8.0.46)
+-- definido sobre a MESMA expressão -- confirmado com EXPLAIN real que passa
+-- a eliminar o type=ALL (vira type=ref, usando este índice).
+--
+-- POR QUE NÃO-ÚNICO: `nome.sobrenome` é o formato do username de login, mas
+-- nada no código (criar_funcionario/atualizar_funcionario) impede dois
+-- funcionários com o mesmo nome+sobrenome -- só CPF e email são verificados
+-- como únicos hoje. Não há como inspecionar dados reais de produção a partir
+-- deste ambiente de correção para confirmar ausência de duplicatas, então
+-- não é seguro assumir unicidade. Declarar UNIQUE aqui arriscaria falhar a
+-- migração (se já existir duplicata) ou bloquear cadastros futuros
+-- legítimos (nomes comuns reais, ex. dois funcionários "Maria Silva" num
+-- supermercado) -- um custo de disponibilidade desnecessário para resolver
+-- o problema desta correção. Fechar essa lacuna de integridade (impedir
+-- duplicatas de nome+sobrenome na aplicação) é uma mudança de escopo maior,
+-- deixada para uma correção futura dedicada caso se confirme necessária.
+--
+-- MySQL não entende `ADD INDEX IF NOT EXISTS`, mesmo problema do ADD COLUMN/
+-- ADD CONSTRAINT acima -- mesma solução (stored procedure temporária
+-- consultando information_schema, desta vez information_schema.statistics).
+-- ============================================================================
+
+DELIMITER $$
+DROP PROCEDURE IF EXISTS `_add_index_if_not_exists`$$
+CREATE PROCEDURE `_add_index_if_not_exists`(
+    IN p_table VARCHAR(64), IN p_index VARCHAR(64), IN p_definition TEXT
+)
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.statistics
+        WHERE table_schema = DATABASE() AND table_name = p_table AND index_name = p_index
+    ) THEN
+        SET @ddl = CONCAT('ALTER TABLE `', p_table, '` ADD INDEX `', p_index, '` ', p_definition);
+        PREPARE stmt FROM @ddl;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+    END IF;
+END$$
+DELIMITER ;
+
+CALL `_add_index_if_not_exists`(
+    'funcionario', 'idx_funcionario_login_nome_sobrenome',
+    '((LOWER(nome)), (LOWER(sobrenome)))'
+);
+
+DROP PROCEDURE IF EXISTS `_add_index_if_not_exists`;

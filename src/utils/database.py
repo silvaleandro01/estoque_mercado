@@ -45,6 +45,12 @@ class Funcionario(SQLModel, table=True):
     senha_atualizada_em: Optional[datetime] = Field(default=None)
     senha_temporaria: bool = Field(default=False)
     token: Optional[str] = Field(default=None, index=True)
+    # Lockout de login (fix/login-rate-limiting) -- ver
+    # repository/funcionarios.py::autenticar_funcionario. Contagem de
+    # tentativas de senha errada consecutivas e, se o limite configurável for
+    # atingido, até quando a conta fica temporariamente bloqueada.
+    tentativas_login_falhas: int = Field(default=0)
+    bloqueado_ate: Optional[datetime] = Field(default=None)
 
 
 class HistoricoSenha(SQLModel, table=True):
