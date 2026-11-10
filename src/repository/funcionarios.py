@@ -49,6 +49,25 @@ def _esta_bloqueado(funcionario: Funcionario, agora: datetime) -> bool:
     return bloqueado_ate > agora
 
 
+def _resetar_lockout(funcionario: Funcionario) -> None:
+    """
+    Zera tentativas_login_falhas/bloqueado_ate -- chamado por todo ponto que
+    define um novo password_hash com sucesso (trocar_senha, recuperar_senha,
+    atualizar_funcionario) e pelo login bem-sucedido em autenticar_funcionario.
+
+    CORRIGIDO (IMPORTANTE 1 da revisão de fix/login-rate-limiting): antes
+    desta correção, nenhum dos três fluxos de troca de senha tocava nesses
+    campos -- só mudavam password_hash. Resultado: mesmo com a senha já
+    corrigida (pela própria vítima via "esqueci minha senha", ou por um
+    admin/RH via reset manual no cadastro), a vítima de um lockout
+    malicioso (alguém martelando senha errada contra a conta dela)
+    continuava travada pelos minutos inteiros do bloqueio -- a nova senha
+    não adiantava nada até o tempo passar sozinho.
+    """
+    funcionario.tentativas_login_falhas = 0
+    funcionario.bloqueado_ate = None
+
+
 def autenticar_funcionario(dados: LoginRequest):
     with Session(engine) as session:
         partes = dados.username.strip().split(".", 1)
@@ -151,8 +170,7 @@ def autenticar_funcionario(dados: LoginRequest):
         # este mesmo fluxo (sem round-trip extra ao banco).
         bloqueio_expirado = bool(funcionario and funcionario.bloqueado_ate is not None and not bloqueado)
         if bloqueio_expirado:
-            funcionario.tentativas_login_falhas = 0
-            funcionario.bloqueado_ate = None
+            _resetar_lockout(funcionario)
 
         # Lockout (fix/login-rate-limiting) -- decisões de escopo:
         #   - usuário inexistente: não existe linha/conta pra incrementar ou
@@ -176,6 +194,30 @@ def autenticar_funcionario(dados: LoginRequest):
         )
 
         if tentativa_de_senha_errada:
+            # AVALIADO (IMPORTANTE 3 da revisão desta trava): só este ramo
+            # ("conta existe, desbloqueada, senha errada") faz um commit
+            # extra aqui (pra persistir o incremento do contador) -- os
+            # outros ramos que levam ao mesmo 401 genérico (usuário
+            # inexistente, sem senha definida, já bloqueada) não passam por
+            # aqui, então respondem sem esse round-trip de escrita extra.
+            # Isso cria uma pequena descontinuidade de tempo que, em teoria,
+            # poderia ajudar a distinguir de fora o momento em que uma conta
+            # passa a existir/estar desbloqueada vs os outros estados.
+            # DECISÃO: aceito como risco baixo, sem equalizar, porque (1) o
+            # custo DOMINANTE do tempo de resposta já é o bcrypt de
+            # verificar_senha() -- dezenas a centenas de ms -- e esse custo
+            # já é igual em TODOS os ramos (HASH_DUMMY_LOGIN garante que
+            # verificar_senha() roda sempre, ver mais acima); o commit extra
+            # aqui é uma única escrita numa linha já localizada pelo índice
+            # (CRÍTICO 1), ordens de grandeza mais rápido que o bcrypt, então
+            # uma fração pequena do tempo total; (2) distinguir essa
+            # diferença de fora exigiria medir muitas requisições com
+            # precisão maior que o jitter normal de rede -- fora do modelo
+            # de ameaça realista para este projeto acadêmico/pessoal.
+            # Equalizar de verdade (ex.: forçar algum round-trip de escrita
+            # equivalente nos outros 3 ramos) adicionaria complexidade/risco
+            # de bug novo pra fechar uma brecha residual de baixíssimo
+            # impacto prático -- não foi considerado valer a pena.
             funcionario.tentativas_login_falhas += 1
             if funcionario.tentativas_login_falhas >= LOGIN_MAX_TENTATIVAS:
                 funcionario.bloqueado_ate = agora + timedelta(minutes=LOGIN_BLOQUEIO_MINUTOS)
@@ -197,8 +239,7 @@ def autenticar_funcionario(dados: LoginRequest):
             raise HTTPException(status_code=401, detail=MSG_LOGIN_INVALIDO)
 
         # Login bem-sucedido: zera o contador e qualquer bloqueio residual.
-        funcionario.tentativas_login_falhas = 0
-        funcionario.bloqueado_ate = None
+        _resetar_lockout(funcionario)
         token = criar_token(funcionario.id, funcionario.is_admin)
         funcionario.token = token
         session.add(funcionario)
@@ -325,6 +366,11 @@ def atualizar_funcionario(funcionario_id: int, dados: FuncionarioCreate):
             funcionario.password_hash = hash_senha(dados.senha)
             funcionario.senha_atualizada_em = datetime.now(timezone.utc)
             _registrar_historico(session, funcionario_id, funcionario.password_hash)
+            # IMPORTANTE 1 da revisão de fix/login-rate-limiting -- ver
+            # docstring de _resetar_lockout: reset manual de senha via RH/
+            # admin também precisa liberar um lockout em andamento, senão a
+            # vítima continua travada mesmo com a senha já corrigida.
+            _resetar_lockout(funcionario)
 
         try:
             session.commit()
@@ -400,7 +446,63 @@ def trocar_senha(funcionario_id: int, dados: TrocarSenhaRequest):
         if not funcionario:
             raise HTTPException(status_code=404, detail="Funcionário não encontrado")
 
-        if not funcionario.password_hash or not verificar_senha(dados.senha_atual, funcionario.password_hash):
+        agora = datetime.now(timezone.utc)
+
+        # CORRIGIDO (IMPORTANTE 2 da revisão de fix/login-rate-limiting):
+        # este endpoint verificava a senha ATUAL sem nenhum limite de
+        # tentativas -- alguém com um token roubado (mas sem saber a senha
+        # atual) podia tentar adivinhar indefinidamente, sem nenhum
+        # throttle; o mesmo tipo de força bruta que o lockout do login
+        # mitiga. DECISÃO: reaproveita a MESMA infraestrutura
+        # (tentativas_login_falhas/bloqueado_ate) em vez de um mecanismo
+        # separado -- é o MESMO funcionário/conta, e um atacante adivinhando
+        # a senha atual aqui é funcionalmente o mesmo ataque. Diferente do
+        # login, este endpoint já exige um token válido para ESTE
+        # funcionário_id específico (não há username pra descobrir por
+        # enumeração), então não precisa da mitigação de timing/mensagem
+        # genérica do login -- só do limite de tentativas em si.
+        #
+        # ASSIMETRIA INTENCIONAL vs login: aqui, uma senha_atual CORRETA
+        # sempre passa, MESMO com a conta `bloqueado_ate` ativo (diferente
+        # de autenticar_funcionario, que rejeita até senha certa durante o
+        # bloqueio). Isso é necessário pro próprio IMPORTANTE 1 funcionar
+        # neste endpoint: sem isso, a vítima de um lockout malicioso
+        # (alguém martelando senha errada contra ela via /login OU via este
+        # mesmo endpoint) nunca conseguiria chegar até o ponto que reseta o
+        # lockout (_resetar_lockout mais abaixo) enquanto o bloqueio
+        # estivesse ativo -- o IMPORTANTE 1 ficaria inalcançável aqui.
+        # Aceitável porque este endpoint já exige uma prova de identidade
+        # mais forte que o login sozinho: um JWT válido para ESTE
+        # funcionário_id específico (que só existe se alguém já fez login
+        # com sucesso antes, dentro da validade do token) -- diferente do
+        # login, que é público e não exige nenhuma prova prévia.
+        bloqueado = _esta_bloqueado(funcionario, agora)
+
+        # Mesmo reset de CRÍTICO 3: se o bloqueio já expirou só pelo tempo
+        # (sem uma troca de senha bem-sucedida depois), zera o contador
+        # antigo antes de processar esta tentativa.
+        if funcionario.bloqueado_ate is not None and not bloqueado:
+            _resetar_lockout(funcionario)
+
+        senha_atual_confere = bool(
+            funcionario.password_hash and verificar_senha(dados.senha_atual, funcionario.password_hash)
+        )
+
+        if not senha_atual_confere:
+            # Mesma decisão do login: tentativas adicionais durante uma
+            # janela de bloqueio já ativa não reiniciam a contagem nem
+            # estendem `bloqueado_ate` (evita manter a conta bloqueada
+            # indefinidamente só martelando tentativas erradas contra ela).
+            if not bloqueado:
+                funcionario.tentativas_login_falhas += 1
+                if funcionario.tentativas_login_falhas >= LOGIN_MAX_TENTATIVAS:
+                    funcionario.bloqueado_ate = agora + timedelta(minutes=LOGIN_BLOQUEIO_MINUTOS)
+                session.add(funcionario)
+                try:
+                    session.commit()
+                except OperationalError as exc:
+                    session.rollback()
+                    tratar_operational_error(exc, "Não foi possível processar a solicitação, tente novamente")
             raise HTTPException(status_code=401, detail="Senha atual incorreta")
 
         if _senha_ja_usada(session, funcionario_id, dados.nova_senha):
@@ -414,10 +516,15 @@ def trocar_senha(funcionario_id: int, dados: TrocarSenhaRequest):
         funcionario.senha_atualizada_em = datetime.now(timezone.utc)
         funcionario.senha_temporaria = False
         _registrar_historico(session, funcionario_id, novo_hash)
+        # IMPORTANTE 1 -- ver docstring de _resetar_lockout.
+        _resetar_lockout(funcionario)
 
         try:
             session.commit()
             return {"msg": "Senha alterada com sucesso"}
+        except OperationalError as exc:
+            session.rollback()
+            tratar_operational_error(exc, "Não foi possível processar a solicitação, tente novamente")
         except Exception:
             session.rollback()
             raise HTTPException(status_code=500, detail="Erro ao alterar senha")
@@ -443,6 +550,11 @@ def recuperar_senha(dados: RecuperarSenhaRequest):
         funcionario.senha_atualizada_em = datetime.now(timezone.utc)
         funcionario.senha_temporaria = True
         _registrar_historico(session, funcionario.id, novo_hash)
+        # IMPORTANTE 1 da revisão de fix/login-rate-limiting -- ver
+        # docstring de _resetar_lockout: recuperação de senha por e-mail
+        # também precisa liberar um lockout em andamento, senão a vítima
+        # continua travada mesmo com a senha nova já na caixa de entrada.
+        _resetar_lockout(funcionario)
 
         try:
             session.commit()

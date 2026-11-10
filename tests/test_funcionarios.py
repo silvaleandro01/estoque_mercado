@@ -601,6 +601,34 @@ def test_atualizar_com_nova_senha(engine, session):
     assert "token" in res
 
 
+def test_atualizar_com_nova_senha_reseta_lockout(engine, session):
+    """
+    IMPORTANTE 1 da revisão de fix/login-rate-limiting: reset manual de
+    senha via RH/admin (atualizar_funcionario) também precisa liberar um
+    lockout em andamento -- senão a vítima de um lockout malicioso
+    continua travada mesmo com a senha já corrigida pelo RH.
+    """
+    setor = make_setor(session, tipo="upd_lockout")
+    f = make_funcionario(session, setor_id=setor.id, cpf="52998224725", email="rhreset@test.com")
+    with Session(engine) as s:
+        func = s.get(Funcionario, f.id)
+        func.tentativas_login_falhas = LOGIN_MAX_TENTATIVAS
+        func.bloqueado_ate = datetime.now(timezone.utc) + timedelta(minutes=LOGIN_BLOQUEIO_MINUTOS)
+        s.add(func)
+        s.commit()
+
+    dados = _dados_create(setor.id, cpf="52998224725", email="rhreset@test.com", senha="NovaSenhaRH@999")
+    atualizar_funcionario(f.id, dados)
+
+    with Session(engine) as s:
+        func = s.get(Funcionario, f.id)
+    assert func.tentativas_login_falhas == 0
+    assert func.bloqueado_ate is None
+
+    res = autenticar_funcionario(LoginRequest(username="joao.silva", senha="NovaSenhaRH@999"))
+    assert "token" in res
+
+
 def test_atualizar_funcionario_inexistente(engine, session):
     setor = make_setor(session, tipo="upd4")
     dados = _dados_create(setor.id)
@@ -787,6 +815,116 @@ def test_trocar_senha_erro_interno(engine, session):
         assert exc.value.status_code == 500
 
 
+# ── trocar_senha -- lockout (IMPORTANTE 1 e 2 da revisão de fix/login-rate-limiting) ──
+
+def test_trocar_senha_sucesso_reseta_lockout(engine, session):
+    """
+    IMPORTANTE 1: trocar_senha muda o password_hash mas, antes desta
+    correção, não tocava em tentativas_login_falhas/bloqueado_ate -- mesmo
+    com a senha corrigida, a vítima de um lockout malicioso (via /login)
+    continuava travada os minutos inteiros. Com a senha_atual CORRETA, a
+    troca bem-sucedida agora zera o lockout, mesmo que ele estivesse ATIVO
+    no momento (ver decisão de assimetria documentada em trocar_senha).
+    """
+    setor = make_setor(session, tipo="troca_lockout1")
+    f = make_funcionario(session, setor_id=setor.id)
+    with Session(engine) as s:
+        func = s.get(Funcionario, f.id)
+        func.tentativas_login_falhas = LOGIN_MAX_TENTATIVAS
+        func.bloqueado_ate = datetime.now(timezone.utc) + timedelta(minutes=LOGIN_BLOQUEIO_MINUTOS)
+        s.add(func)
+        s.commit()
+
+    resultado = trocar_senha(f.id, TrocarSenhaRequest(senha_atual="Test@123", nova_senha="NovaSenha@999"))
+    assert "sucesso" in resultado["msg"]
+
+    with Session(engine) as s:
+        func = s.get(Funcionario, f.id)
+    assert func.tentativas_login_falhas == 0
+    assert func.bloqueado_ate is None
+
+
+def test_trocar_senha_errada_repetida_bloqueia_conta(engine, session):
+    """
+    IMPORTANTE 2: trocar-senha verificava a senha ATUAL sem nenhum limite
+    de tentativas -- alguém com um token roubado (mas sem saber a senha
+    atual) podia tentar adivinhar indefinidamente. Depois de
+    LOGIN_MAX_TENTATIVAS tentativas erradas seguidas AQUI, a conta fica
+    bloqueada -- reaproveitando a mesma infraestrutura do lockout do login.
+    """
+    setor = make_setor(session, tipo="troca_lockout2")
+    f = make_funcionario(session, setor_id=setor.id)
+
+    for _ in range(LOGIN_MAX_TENTATIVAS):
+        with pytest.raises(HTTPException) as exc:
+            trocar_senha(f.id, TrocarSenhaRequest(senha_atual="SenhaErrada@1", nova_senha="Nova@99999"))
+        assert exc.value.status_code == 401
+
+    with Session(engine) as s:
+        func = s.get(Funcionario, f.id)
+    assert func.tentativas_login_falhas == LOGIN_MAX_TENTATIVAS
+    assert func.bloqueado_ate is not None
+    assert func.bloqueado_ate.replace(tzinfo=timezone.utc) > datetime.now(timezone.utc)
+
+    # Mesma decisão do login: martelar mais tentativas erradas durante o
+    # bloqueio não estende bloqueado_ate nem incrementa mais o contador.
+    bloqueado_ate_original = func.bloqueado_ate
+    with pytest.raises(HTTPException):
+        trocar_senha(f.id, TrocarSenhaRequest(senha_atual="OutraErrada@1", nova_senha="Nova@99999"))
+    with Session(engine) as s:
+        func = s.get(Funcionario, f.id)
+    assert func.tentativas_login_falhas == LOGIN_MAX_TENTATIVAS
+    assert func.bloqueado_ate == bloqueado_ate_original
+
+
+def test_trocar_senha_bloqueio_tambem_afeta_login(engine, session):
+    """
+    Confirma a decisão de reaproveitar a MESMA infraestrutura: um lockout
+    disparado via trocar-senha (senha atual errada repetida) também
+    bloqueia o /login dessa conta, e vice-versa -- é o mesmo
+    funcionário/conta, os mesmos campos.
+    """
+    setor = make_setor(session, tipo="troca_lockout3")
+    f = make_funcionario(session, "bloqueio", "cruzado", setor.id)
+
+    for _ in range(LOGIN_MAX_TENTATIVAS):
+        with pytest.raises(HTTPException):
+            trocar_senha(f.id, TrocarSenhaRequest(senha_atual="SenhaErrada@1", nova_senha="Nova@99999"))
+
+    with pytest.raises(HTTPException) as exc:
+        autenticar_funcionario(LoginRequest(username="bloqueio.cruzado", senha="Test@123"))
+    assert exc.value.status_code == 401
+    assert exc.value.detail == MSG_LOGIN_INVALIDO
+
+
+def test_trocar_senha_correta_funciona_mesmo_com_conta_bloqueada_por_login(engine, session):
+    """
+    Assimetria intencional vs login (documentada em trocar_senha): uma
+    conta bloqueada por força bruta no /login ainda aceita trocar_senha com
+    a senha_atual CORRETA -- senão a vítima de um lockout malicioso nunca
+    conseguiria usar este endpoint pra se recuperar enquanto o bloqueio
+    estivesse ativo, e o IMPORTANTE 1 ficaria inalcançável aqui.
+    """
+    setor = make_setor(session, tipo="troca_lockout4")
+    f = make_funcionario(session, "bloqueado", "porlogin", setor.id)
+
+    for _ in range(LOGIN_MAX_TENTATIVAS):
+        with pytest.raises(HTTPException):
+            autenticar_funcionario(LoginRequest(username="bloqueado.porlogin", senha="SenhaErrada@1"))
+
+    with Session(engine) as s:
+        func = s.get(Funcionario, f.id)
+    assert func.bloqueado_ate is not None
+
+    resultado = trocar_senha(f.id, TrocarSenhaRequest(senha_atual="Test@123", nova_senha="NovaSenha@999"))
+    assert "sucesso" in resultado["msg"]
+
+    with Session(engine) as s:
+        func = s.get(Funcionario, f.id)
+    assert func.tentativas_login_falhas == 0
+    assert func.bloqueado_ate is None
+
+
 # ── recuperar_senha ───────────────────────────────────────────────────────────
 
 def test_recuperar_senha_sucesso(engine, session):
@@ -807,6 +945,31 @@ def test_recuperar_senha_marca_temporaria(engine, session):
     with Session(engine) as s:
         func = s.get(type(f), f.id)
     assert func.senha_temporaria is True
+
+
+def test_recuperar_senha_reseta_lockout(engine, session):
+    """
+    IMPORTANTE 1 da revisão de fix/login-rate-limiting: recuperação de
+    senha por e-mail também precisa liberar um lockout em andamento --
+    senão a vítima continua travada mesmo com a senha nova já na caixa de
+    entrada.
+    """
+    setor = make_setor(session, tipo="rec_lockout")
+    f = make_funcionario(session, setor_id=setor.id, cpf="52998224725", email="reclock@test.com")
+    with Session(engine) as s:
+        func = s.get(Funcionario, f.id)
+        func.tentativas_login_falhas = LOGIN_MAX_TENTATIVAS
+        func.bloqueado_ate = datetime.now(timezone.utc) + timedelta(minutes=LOGIN_BLOQUEIO_MINUTOS)
+        s.add(func)
+        s.commit()
+
+    with patch("repository.funcionarios.enviar_email"):
+        recuperar_senha(RecuperarSenhaRequest(cpf="52998224725"))
+
+    with Session(engine) as s:
+        func = s.get(Funcionario, f.id)
+    assert func.tentativas_login_falhas == 0
+    assert func.bloqueado_ate is None
 
 
 def test_recuperar_senha_funcionario_inexistente(engine, session):
