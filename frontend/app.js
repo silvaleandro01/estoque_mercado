@@ -270,6 +270,12 @@ function checkAuth() {
                 if (!isAdmin && !inRH && !isDiretor && !inGerencia) visivel = false;
             } else if (acao.includes("'estoque'")) {
                 if (!isAdmin && !inEstoque && !isDiretor && !inGerencia) visivel = false;
+            } else if (acao.includes("'fornecedores'")) {
+                // Mesmo gate de 'estoque' -- o backend só libera admin ou
+                // setor "estoque" (verificar_permissao em
+                // src/routes/fornecedores.py), então a visibilidade do menu
+                // precisa espelhar isso, não uma blocklist à parte.
+                if (!isAdmin && !inEstoque && !isDiretor && !inGerencia) visivel = false;
             } else if (acao.includes("'compras-dia'")) {
                 const isGerenteCompras = inCompras && cargo.includes('gerente');
                 if (!isAdmin && !inGerencia && !isDiretor && !isGerenteCompras) visivel = false;
@@ -357,14 +363,14 @@ function navegar(viewId) {
     }
 
     if (setor === 'rh' && !isAdmin && !isDiretor) {
-        if (['vendas', 'vendas-dia', 'estoque', 'movimentacao'].includes(viewId)) {
+        if (['vendas', 'vendas-dia', 'estoque', 'fornecedores', 'movimentacao'].includes(viewId)) {
             alert("Acesso restrito: Funcionários do RH só podem acessar o módulo de gestão de pessoal.");
             return;
         }
     }
 
     if (setor === 'compras' && !isAdmin) {
-        if (['vendas', 'vendas-dia', 'estoque', 'rh', 'movimentacao'].includes(viewId)) {
+        if (['vendas', 'vendas-dia', 'estoque', 'fornecedores', 'rh', 'movimentacao'].includes(viewId)) {
             alert("Acesso restrito: Setor de compras não possui permissão para este módulo.");
             return;
         }
@@ -382,6 +388,7 @@ function navegar(viewId) {
 
 function carregarDadosView(viewId) {
     if (viewId === 'estoque') carregarEstoque();
+    if (viewId === 'fornecedores') carregarFornecedores();
     if (viewId === 'vendas') carregarVendas();
     if (viewId === 'vendas-dia') carregarVendasDia();
     if (viewId === 'funcionarios') carregarFuncionarios();
@@ -590,22 +597,44 @@ async function carregarEstoque() {
     });
 
     html += '</tbody></table></div>';
-    html += renderizarCardFornecedores(podeEditar);
     container.innerHTML = html;
     atualizarPassoQuantidade();
 }
 
-// Fornecedor é um card dentro da própria tela de estoque (não uma aba
-// própria no menu lateral) nesta fase -- cadastro/gestão de fornecedor é
-// pequeno o suficiente e está sempre associado a produto, então não
-// justificou ainda uma view própria. Se o escopo de fornecedor crescer
-// (relatórios, histórico de compras por fornecedor, etc.) numa fase
-// futura, vale reavaliar promover para uma aba própria.
-function renderizarCardFornecedores(podeEditar) {
+// Promovido de card dentro de Estoque para página própria no menu lateral
+// -- mesma visibilidade de 'estoque' (ver checkAuth/navegar), já que a
+// autorização real de fundo é idêntica (admin ou setor "estoque").
+async function carregarFornecedores() {
+    const container = document.getElementById('view-fornecedores');
+    container.innerHTML = '<h3>Carregando...</h3>';
+
+    const fornecedores = await apiFetch('/fornecedores/mostrar', {}, true);
+    if (!fornecedores) {
+        container.innerHTML = '<h3>Erro ao carregar fornecedores. Verifique suas permissões.</h3>';
+        return;
+    }
+    cacheFornecedores = fornecedores;
+
+    const isAdmin = localStorage.getItem('is_admin') === 'true';
+    const cargo = (localStorage.getItem('user_cargo') || "").toLowerCase().trim();
+    const setor = (localStorage.getItem('user_setor') || "").toLowerCase().trim();
+    const isSetorEstoque = setor === 'estoque';
+    const isGerenteEstoque = isSetorEstoque && cargo.includes('gerente');
+    // Mesma separação de carregarEstoque: o backend libera POST
+    // /fornecedores/inserir pra qualquer funcionário do setor estoque (não
+    // só gerente) -- então podeCadastrar (formulário) fica mais aberto que
+    // podeEditar (editar/excluir um fornecedor já existente).
+    const podeCadastrar = isAdmin || isSetorEstoque;
+    const podeEditar = isAdmin || isGerenteEstoque;
+
+    container.innerHTML = '<h2>Fornecedores</h2>' + renderizarCardFornecedores(podeCadastrar, podeEditar);
+}
+
+function renderizarCardFornecedores(podeCadastrar, podeEditar) {
     return `
         <div class="card">
-            <h3>Fornecedores</h3>
-            ${podeEditar ? `
+            <h3>Fornecedores Cadastrados</h3>
+            ${podeCadastrar ? `
             <div class="form-group">
                 <input class="form-control" type="text" id="forn-nome" placeholder="Nome do Fornecedor">
                 <input class="form-control" type="text" id="forn-documento" placeholder="CPF ou CNPJ">
@@ -654,7 +683,7 @@ async function salvarFornecedor() {
     if (res) {
         alert(editandoFornecedorId ? 'Fornecedor atualizado!' : 'Fornecedor cadastrado!');
         editandoFornecedorId = null;
-        carregarEstoque();
+        carregarFornecedores();
     }
 }
 
@@ -677,13 +706,13 @@ function prepararEdicaoFornecedor(id) {
 
 function cancelarEdicaoFornecedor() {
     editandoFornecedorId = null;
-    carregarEstoque();
+    carregarFornecedores();
 }
 
 async function removerFornecedor(id) {
     if (!confirm("Tem certeza que deseja excluir este fornecedor?")) return;
     if (await apiFetch(`/fornecedores/deletar/${id}`, { method: 'DELETE' })) {
-        carregarEstoque();
+        carregarFornecedores();
     }
 }
 
