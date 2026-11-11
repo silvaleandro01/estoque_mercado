@@ -27,6 +27,8 @@ from repository import comunicados as com_repo
 from repository import fornecedores as forn_repo
 from repository import lotes as lotes_repo
 from repository import movimentacoes as mov_repo
+from repository import pontos as pontos_repo
+from repository import folha as folha_repo
 from services import auth as auth_mod
 from main import app
 
@@ -50,7 +52,7 @@ def engine(monkeypatch):
     eng = create_engine(TEST_DB, connect_args={"check_same_thread": False}, poolclass=StaticPool)
     SQLModel.metadata.create_all(eng)
 
-    for mod in (db_mod, logs_mod, func_repo, est_repo, vend_repo, set_repo, compras_repo, despesas_repo, com_repo, forn_repo, lotes_repo, mov_repo, auth_mod):
+    for mod in (db_mod, logs_mod, func_repo, est_repo, vend_repo, set_repo, compras_repo, despesas_repo, com_repo, forn_repo, lotes_repo, mov_repo, pontos_repo, folha_repo, auth_mod):
         monkeypatch.setattr(mod, "engine", eng)
 
     yield eng

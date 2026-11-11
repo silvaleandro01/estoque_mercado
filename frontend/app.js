@@ -2306,11 +2306,17 @@ async function carregarPontos() {
     const agora = new Date();
     const mes = agora.getMonth() + 1;
     const ano = agora.getFullYear();
+    // Achado do painel de revisão: a folha normalmente fecha o mês que já
+    // TERMINOU, não o mês em andamento -- buscar o holerite com o mesmo
+    // mes/ano do relatório de ponto corrente fazia esse card nunca achar o
+    // holerite já fechado do mês anterior pelo fluxo natural da tela.
+    const mesAnterior = mes === 1 ? 12 : mes - 1;
+    const anoMesAnterior = mes === 1 ? ano - 1 : ano;
 
     const [status, relatorio, holerite] = await Promise.all([
         apiFetch('/pontos/status'),
         apiFetch(`/pontos/meu-relatorio?mes=${mes}&ano=${ano}`),
-        apiFetch(`/folha/meu-holerite?mes=${mes}&ano=${ano}`, {}, true)
+        apiFetch(`/folha/meu-holerite?mes=${mesAnterior}&ano=${anoMesAnterior}`, {}, true)
     ]);
     
     const isAdmin = localStorage.getItem('is_admin') === 'true';
