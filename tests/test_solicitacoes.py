@@ -121,8 +121,8 @@ def test_criar_dois_funcionarios_cpf_diferentes(engine, session):
         genero="F", possui_filhos=False, setor_id=setor.id,
         senha="Test@123", cpf="11144477735", email="b@test.com", **ENDERECO,
     )
-    f1 = criar_funcionario(dados1)
-    f2 = criar_funcionario(dados2)
+    f1 = criar_funcionario(dados1, 0)
+    f2 = criar_funcionario(dados2, 0)
     assert f1.cpf != f2.cpf
 
 

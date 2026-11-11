@@ -67,6 +67,13 @@ CREATE TABLE IF NOT EXISTS `log` (
     FOREIGN KEY (funcionario_id) REFERENCES funcionario(id)
 ) ENGINE=InnoDB;
 
+-- `ponto`, `salario`, `salariohistorico` e `holerite` (abaixo) existem
+-- desde a criação original deste arquivo, mas ficaram órfãs por muito
+-- tempo -- nenhum backend Python (SQLModel/repository/routes) as usava até
+-- a mudança que introduziu src/repository/pontos.py e
+-- src/repository/folha.py. Diferente de `senhahistorico` logo abaixo
+-- (que continua órfã de propósito), estas quatro agora têm backend de
+-- verdade -- não são mais órfãs.
 CREATE TABLE IF NOT EXISTS `ponto` (
     id INT AUTO_INCREMENT PRIMARY KEY,
     funcionario_id INT NOT NULL,
@@ -751,4 +758,49 @@ CALL `_add_index_if_not_exists`(
     '((LOWER(nome)), (LOWER(sobrenome)))'
 );
 
+-- `ponto.data` tinha `index=True` só no SQLModel (utils/database.py) --
+-- nunca existiu aqui, então o schema real de produção sempre fez full
+-- table scan em `relatorio_geral` (filtra só por intervalo de data, sem
+-- funcionario_id). Achado do painel de revisão; cresce com o tempo de vida
+-- do sistema (a tabela só acumula, nunca é limpa), não urgente hoje mas
+-- barato de fechar agora.
+CALL `_add_index_if_not_exists`('ponto', 'idx_ponto_data', '(data)');
+
 DROP PROCEDURE IF EXISTS `_add_index_if_not_exists`;
+
+-- ============================================================================
+-- Fecha duas condições de corrida reais, achadas pelo painel de revisão
+-- (ponto eletrônico/folha de pagamento): bater_ponto() e fechar_folha()
+-- verificavam "já existe uma linha?" com um SELECT comum, sem lock, antes
+-- de decidir se inseriam uma linha nova -- duas requisições quase
+-- simultâneas (duplo clique no botão de bater ponto; RH fechando a folha
+-- duas vezes) passavam as duas pelo "não existe" e inseriam duas linhas
+-- duplicadas (ver docstrings de Ponto/Holerite em utils/database.py).
+-- with_for_update() não fecha essa brecha sozinho -- a corrida é sobre
+-- CRIAR uma linha nova, não sobre ler uma já existente -- por isso a
+-- correção aqui é uma UNIQUE KEY, não um índice comum; os dois repositories
+-- tratam o IntegrityError resultante como 409 "tente novamente".
+-- ============================================================================
+
+DELIMITER $$
+DROP PROCEDURE IF EXISTS `_add_unique_index_if_not_exists`$$
+CREATE PROCEDURE `_add_unique_index_if_not_exists`(
+    IN p_table VARCHAR(64), IN p_index VARCHAR(64), IN p_definition TEXT
+)
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.statistics
+        WHERE table_schema = DATABASE() AND table_name = p_table AND index_name = p_index
+    ) THEN
+        SET @ddl = CONCAT('ALTER TABLE `', p_table, '` ADD UNIQUE INDEX `', p_index, '` ', p_definition);
+        PREPARE stmt FROM @ddl;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+    END IF;
+END$$
+DELIMITER ;
+
+CALL `_add_unique_index_if_not_exists`('ponto', 'uq_ponto_funcionario_data', '(funcionario_id, data)');
+CALL `_add_unique_index_if_not_exists`('holerite', 'uq_holerite_funcionario_mes_ano', '(funcionario_id, mes, ano)');
+
+DROP PROCEDURE IF EXISTS `_add_unique_index_if_not_exists`;

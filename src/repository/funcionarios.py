@@ -1,18 +1,26 @@
 import secrets
 import string
+from decimal import Decimal
 from datetime import datetime, timezone, timedelta
 from fastapi import HTTPException
 from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, select, delete, func
 
-from utils.database import Funcionario, HistoricoSenha, Setor, engine
+from utils.database import Funcionario, HistoricoSenha, Setor, Salario, SalarioHistorico, engine
 from utils.security import (
     criar_token, hash_senha, verificar_senha, HASH_DUMMY_LOGIN,
     LOGIN_MAX_TENTATIVAS, LOGIN_BLOQUEIO_MINUTOS,
 )
 from utils.email import enviar_email
 from utils.erros_banco import tratar_operational_error
+from utils.money import arredondar
+from logs.logs import criar_log
 from schemas.schemas import FuncionarioCreate, LoginRequest, TrocarSenhaRequest, RecuperarSenhaRequest
+
+# Divisor legal (CLT) para converter salário mensal em valor/hora: jornada
+# de 44h semanais equivale a 220h/mês -- mesmo divisor usado em
+# repository/folha.py para o cálculo de hora extra.
+_DIVISOR_HORAS_MES = Decimal("220")
 
 # Mensagem de erro ÚNICA para TODO caso de login inválido -- usuário não
 # encontrado, usuário existe mas nunca teve senha definida, senha errada, e
@@ -313,13 +321,15 @@ def autenticar_funcionario(dados: LoginRequest):
             "token": token,
             "is_admin": funcionario.is_admin,
             "setor": setor.tipo if setor else None,
+            "cargo": funcionario.cargo,
+            "bate_ponto": funcionario.bate_ponto,
             "nome_completo": f"{funcionario.nome} {funcionario.sobrenome}",
             "lembrete_senha": lembrete_senha,
             "senha_temporaria": funcionario.senha_temporaria,
         }
 
 
-def criar_funcionario(dados: FuncionarioCreate):
+def criar_funcionario(dados: FuncionarioCreate, funcionario_id_solicitante: int):
     if not dados.senha:
         raise HTTPException(status_code=400, detail="Senha é obrigatória para novo funcionário")
 
@@ -350,6 +360,10 @@ def criar_funcionario(dados: FuncionarioCreate):
             password_hash=password_hash,
             senha_atualizada_em=datetime.now(timezone.utc),
             senha_temporaria=True,
+            bate_ponto=dados.bate_ponto,
+            # Sempre derivado do cargo -- nunca aceito como input do
+            # cliente (ver schemas.FuncionarioCreate).
+            cargo_confianca=(dados.cargo == "diretoria"),
         )
         try:
             session.add(funcionario)
@@ -357,10 +371,21 @@ def criar_funcionario(dados: FuncionarioCreate):
             _registrar_historico(session, funcionario.id, password_hash)
             session.commit()
             session.refresh(funcionario)
-            return funcionario
         except Exception:
             session.rollback()
             raise HTTPException(status_code=500, detail="Erro ao criar funcionário")
+
+    # Achado do painel de revisão: o frontend já manda `valor_mensal` no
+    # cadastro de funcionário, mas até esta correção o schema não tinha
+    # esse campo -- o Pydantic descartava em silêncio, RH achava que tinha
+    # salvo o salário e nada era persistido. Fora da transação acima (igual
+    # ao padrão já usado para log em outros pontos): se isto falhar, o
+    # funcionário já foi criado com sucesso, só o salário fica pendente de
+    # definir manualmente depois.
+    if dados.valor_mensal is not None:
+        definir_salario(funcionario.id, dados.valor_mensal, funcionario_id_solicitante)
+
+    return funcionario
 
 
 def listar_funcionarios():
@@ -376,7 +401,7 @@ def buscar_funcionario(funcionario_id: int):
         return funcionario
 
 
-def atualizar_funcionario(funcionario_id: int, dados: FuncionarioCreate):
+def atualizar_funcionario(funcionario_id: int, dados: FuncionarioCreate, funcionario_id_solicitante: int):
     with Session(engine) as session:
         mensagem_erro_transitorio = "Não foi possível processar a solicitação, tente novamente"
 
@@ -411,6 +436,8 @@ def atualizar_funcionario(funcionario_id: int, dados: FuncionarioCreate):
         funcionario.bairro = dados.bairro
         funcionario.rua = dados.rua
         funcionario.numero = dados.numero
+        funcionario.bate_ponto = dados.bate_ponto
+        funcionario.cargo_confianca = (dados.cargo == "diretoria")
 
         if dados.senha:
             if _senha_ja_usada(session, funcionario_id, dados.senha, mensagem_erro_transitorio):
@@ -429,7 +456,6 @@ def atualizar_funcionario(funcionario_id: int, dados: FuncionarioCreate):
         try:
             _com_tratamento_operational_error(session, session.commit, mensagem_erro_transitorio)
             session.refresh(funcionario)
-            return funcionario
         except HTTPException:
             raise
         except OperationalError:
@@ -437,6 +463,14 @@ def atualizar_funcionario(funcionario_id: int, dados: FuncionarioCreate):
         except Exception:
             session.rollback()
             raise HTTPException(status_code=500, detail="Erro ao atualizar funcionário")
+
+    # Ver mesmo comentário em criar_funcionario: o frontend já manda
+    # valor_mensal na edição de funcionário também, mesmo gap de dado
+    # perdido em silêncio.
+    if dados.valor_mensal is not None:
+        definir_salario(funcionario_id, dados.valor_mensal, funcionario_id_solicitante)
+
+    return funcionario
 
 
 def deletar_funcionario(funcionario_id: int):
@@ -695,3 +729,46 @@ def recuperar_senha(dados: RecuperarSenhaRequest):
             )
 
         return {"msg": "Nova senha enviada para o email cadastrado"}
+
+
+def definir_salario(funcionario_id: int, valor: Decimal, funcionario_id_solicitante: int):
+    with Session(engine) as session:
+        funcionario = session.get(Funcionario, funcionario_id)
+        if not funcionario:
+            raise HTTPException(status_code=404, detail="Funcionário não encontrado")
+
+        nome_completo = f"{funcionario.nome} {funcionario.sobrenome}"
+        valor = arredondar(valor)
+        valor_hora = arredondar(valor / _DIVISOR_HORAS_MES)
+        salario = session.exec(select(Salario).where(Salario.funcionario_id == funcionario_id)).first()
+
+        try:
+            if not salario:
+                session.add(Salario(funcionario_id=funcionario_id, valor_mensal=valor, valor_hora=valor_hora))
+            elif salario.valor_mensal != valor:
+                session.add(
+                    SalarioHistorico(
+                        funcionario_id=funcionario_id,
+                        valor_antigo=salario.valor_mensal,
+                        valor_novo=valor,
+                    )
+                )
+                salario.valor_mensal = valor
+                salario.valor_hora = valor_hora
+                session.add(salario)
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise HTTPException(status_code=500, detail="Erro ao definir salário")
+
+    criar_log(funcionario_id_solicitante, f"Salário de {nome_completo} definido para R$ {valor:.2f}")
+    return {"detail": "Salário atualizado com sucesso"}
+
+
+def salario_historico(funcionario_id: int):
+    with Session(engine) as session:
+        return session.exec(
+            select(SalarioHistorico)
+            .where(SalarioHistorico.funcionario_id == funcionario_id)
+            .order_by(SalarioHistorico.data_alteracao.desc())
+        ).all()

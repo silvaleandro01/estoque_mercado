@@ -1,8 +1,9 @@
 import pytest
 from datetime import date, datetime, timezone, timedelta
+from decimal import Decimal
 from fastapi import HTTPException
 from unittest.mock import patch
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from repository.funcionarios import (
     autenticar_funcionario, criar_funcionario, listar_funcionarios,
@@ -13,7 +14,7 @@ from repository.funcionarios import (
 from schemas.schemas import (
     LoginRequest, FuncionarioCreate, TrocarSenhaRequest, RecuperarSenhaRequest,
 )
-from utils.database import Funcionario, HistoricoSenha
+from utils.database import Funcionario, HistoricoSenha, Salario
 from utils.security import LOGIN_MAX_TENTATIVAS, LOGIN_BLOQUEIO_MINUTOS
 from conftest import make_setor, make_funcionario, pwd
 
@@ -570,17 +571,42 @@ def test_login_select_lock_wait_timeout_vira_409_nao_500(engine, session, monkey
 def test_criar_funcionario_sucesso(engine, session):
     setor = make_setor(session, tipo="est")
     dados = _dados_create(setor.id)
-    f = criar_funcionario(dados)
+    f = criar_funcionario(dados, 0)
     assert f.id is not None
     assert f.cpf == "52998224725"
     assert f.email == "joao@test.com"
+
+
+def test_criar_funcionario_com_valor_mensal_cria_salario(engine, session):
+    """Achado do painel de revisão: o frontend já manda valor_mensal no
+    cadastro de funcionário, mas o schema não tinha esse campo até esta
+    correção -- era descartado em silêncio, sem Salario nenhum criado."""
+    setor = make_setor(session, tipo="est_sal")
+    dados = _dados_create(setor.id)
+    dados.valor_mensal = Decimal("3000.00")
+    f = criar_funcionario(dados, 0)
+
+    with Session(engine) as s:
+        salario = s.exec(select(Salario).where(Salario.funcionario_id == f.id)).first()
+    assert salario is not None
+    assert salario.valor_mensal == Decimal("3000.00")
+
+
+def test_criar_funcionario_sem_valor_mensal_nao_cria_salario(engine, session):
+    setor = make_setor(session, tipo="est_sal2")
+    dados = _dados_create(setor.id)
+    f = criar_funcionario(dados, 0)
+
+    with Session(engine) as s:
+        salario = s.exec(select(Salario).where(Salario.funcionario_id == f.id)).first()
+    assert salario is None
 
 
 def test_criar_funcionario_sem_senha(engine, session):
     setor = make_setor(session, tipo="est2")
     dados = _dados_create(setor.id, senha=None)
     with pytest.raises(HTTPException) as exc:
-        criar_funcionario(dados)
+        criar_funcionario(dados, 0)
     assert exc.value.status_code == 400
     assert "Senha" in exc.value.detail
 
@@ -590,7 +616,7 @@ def test_criar_funcionario_cpf_duplicado(engine, session):
     make_funcionario(session, cpf="52998224725", email="a@test.com", setor_id=setor.id)
     dados = _dados_create(setor.id, cpf="52998224725", email="b@test.com")
     with pytest.raises(HTTPException) as exc:
-        criar_funcionario(dados)
+        criar_funcionario(dados, 0)
     assert exc.value.status_code == 400
     assert "CPF" in exc.value.detail
 
@@ -600,7 +626,7 @@ def test_criar_funcionario_email_duplicado(engine, session):
     make_funcionario(session, cpf="11144477735", email="dup@test.com", setor_id=setor.id)
     dados = _dados_create(setor.id, cpf="52998224725", email="dup@test.com")
     with pytest.raises(HTTPException) as exc:
-        criar_funcionario(dados)
+        criar_funcionario(dados, 0)
     assert exc.value.status_code == 400
     assert "Email" in exc.value.detail
 
@@ -608,7 +634,7 @@ def test_criar_funcionario_email_duplicado(engine, session):
 def test_criar_funcionario_registra_historico(engine, session):
     setor = make_setor(session, tipo="est5")
     dados = _dados_create(setor.id, cpf="52998224725", email="hist@test.com")
-    f = criar_funcionario(dados)
+    f = criar_funcionario(dados, 0)
     with Session(engine) as s:
         hist = s.exec(
             __import__("sqlmodel").select(HistoricoSenha).where(HistoricoSenha.funcionario_id == f.id)
@@ -621,7 +647,7 @@ def test_criar_funcionario_erro_interno(engine, session):
     dados = _dados_create(setor.id, cpf="52998224725", email="err@test.com")
     with patch.object(Session, "commit", side_effect=Exception("DB Error")):
         with pytest.raises(HTTPException) as exc:
-            criar_funcionario(dados)
+            criar_funcionario(dados, 0)
         assert exc.value.status_code == 500
 
 
@@ -663,7 +689,7 @@ def test_atualizar_funcionario_sucesso(engine, session):
         setor_id=setor.id, senha=None,
         cpf="52998224725", email="new@test.com", **ENDERECO,
     )
-    resultado = atualizar_funcionario(f.id, dados)
+    resultado = atualizar_funcionario(f.id, dados, 0)
     assert resultado.nome == "Novo"
     assert resultado.email == "new@test.com"
 
@@ -673,7 +699,7 @@ def test_atualizar_sem_senha_mantem_hash(engine, session):
     f = make_funcionario(session, setor_id=setor.id, cpf="52998224725", email="keep@test.com")
     hash_original = f.password_hash
     dados = _dados_create(setor.id, cpf="52998224725", email="keep@test.com", senha=None)
-    atualizar_funcionario(f.id, dados)
+    atualizar_funcionario(f.id, dados, 0)
     with Session(engine) as s:
         func = s.get(type(f), f.id)
     assert func.password_hash == hash_original
@@ -683,7 +709,7 @@ def test_atualizar_com_nova_senha(engine, session):
     setor = make_setor(session, tipo="upd3")
     f = make_funcionario(session, setor_id=setor.id, cpf="52998224725", email="chg@test.com")
     dados = _dados_create(setor.id, cpf="52998224725", email="chg@test.com", senha="Nova@123456")
-    atualizar_funcionario(f.id, dados)
+    atualizar_funcionario(f.id, dados, 0)
     res = autenticar_funcionario(LoginRequest(username="joao.silva", senha="Nova@123456"))
     assert "token" in res
 
@@ -705,7 +731,7 @@ def test_atualizar_com_nova_senha_reseta_lockout(engine, session):
         s.commit()
 
     dados = _dados_create(setor.id, cpf="52998224725", email="rhreset@test.com", senha="NovaSenhaRH@999")
-    atualizar_funcionario(f.id, dados)
+    atualizar_funcionario(f.id, dados, 0)
 
     with Session(engine) as s:
         func = s.get(Funcionario, f.id)
@@ -720,7 +746,7 @@ def test_atualizar_funcionario_inexistente(engine, session):
     setor = make_setor(session, tipo="upd4")
     dados = _dados_create(setor.id)
     with pytest.raises(HTTPException) as exc:
-        atualizar_funcionario(9999, dados)
+        atualizar_funcionario(9999, dados, 0)
     assert exc.value.status_code == 404
 
 
@@ -730,7 +756,7 @@ def test_atualizar_cpf_duplicado_outro_funcionario(engine, session):
     f2 = make_funcionario(session, setor_id=setor.id, cpf="11144477735", email="b@test.com")
     dados = _dados_create(setor.id, cpf="52998224725", email="b@test.com")
     with pytest.raises(HTTPException) as exc:
-        atualizar_funcionario(f2.id, dados)
+        atualizar_funcionario(f2.id, dados, 0)
     assert exc.value.status_code == 400
     assert "CPF" in exc.value.detail
 
@@ -741,7 +767,7 @@ def test_atualizar_email_duplicado_outro_funcionario(engine, session):
     f2 = make_funcionario(session, setor_id=setor.id, cpf="11144477735", email="b@test.com")
     dados = _dados_create(setor.id, cpf="11144477735", email="dup@test.com")
     with pytest.raises(HTTPException) as exc:
-        atualizar_funcionario(f2.id, dados)
+        atualizar_funcionario(f2.id, dados, 0)
     assert exc.value.status_code == 400
     assert "Email" in exc.value.detail
 
@@ -751,7 +777,7 @@ def test_atualizar_senha_historico_bloqueado(engine, session):
     f = make_funcionario(session, setor_id=setor.id, cpf="52998224725", email="hist2@test.com")
     dados = _dados_create(setor.id, cpf="52998224725", email="hist2@test.com", senha="Test@123")
     with pytest.raises(HTTPException) as exc:
-        atualizar_funcionario(f.id, dados)
+        atualizar_funcionario(f.id, dados, 0)
     assert exc.value.status_code == 400
     assert "últimas senhas" in exc.value.detail
 
@@ -768,7 +794,7 @@ def test_atualizar_erro_interno(engine, session):
     )
     with patch.object(Session, "commit", side_effect=Exception("DB Error")):
         with pytest.raises(HTTPException) as exc:
-            atualizar_funcionario(f.id, dados)
+            atualizar_funcionario(f.id, dados, 0)
         assert exc.value.status_code == 500
 
 

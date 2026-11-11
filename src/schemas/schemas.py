@@ -49,6 +49,9 @@ TipoMovimentacao = Literal[
 # de um 422 claro. `max_digits`/`decimal_places` do Pydantic mapeiam 1:1
 # para essa mesma restrição do DECIMAL(10, 2).
 DECIMAL_10_2 = {"max_digits": 10, "decimal_places": 2}
+# Mesma ideia, para as colunas de horas (ponto/folha) -- DECIMAL(5,2) no
+# banco, suficiente para até 999:59h sem estourar.
+DECIMAL_5_2 = {"max_digits": 5, "decimal_places": 2}
 
 # Mesma ideia de DECIMAL_10_2, mas para as colunas de quantidade (DECIMAL(10,
 # 3)): produtos vendidos por peso/volume (KG/L) podem ter até 3 casas
@@ -70,6 +73,19 @@ class FuncionarioCreate(BaseModel):
     setor_id: int
     cargo: Cargo = "operacional"
     senha: Optional[str] = None
+    # Decide se o funcionário usa o relógio de ponto e entra na
+    # consolidação automática de fechar_folha (ver repository/pontos.py,
+    # repository/folha.py). `cargo_confianca` não é aceito aqui -- é sempre
+    # derivado de `cargo == "diretoria"` no repository, nunca um input.
+    bate_ponto: bool = True
+    # Opcional -- achado do painel de revisão: o frontend já manda este
+    # campo no cadastro de funcionário (criarFuncionario() em
+    # frontend/app.js), mas o schema nunca teve esse campo, então o Pydantic
+    # descartava o valor em silêncio (RH preenchia "Salário Mensal", achava
+    # que tinha salvo, e nada era persistido). None = não definir salário
+    # agora (ex.: edição sem mexer no salário); valor > 0 = define/atualiza
+    # via repository.funcionarios.definir_salario.
+    valor_mensal: Optional[Decimal] = Field(default=None, gt=0, **DECIMAL_10_2)
     cpf: str
     email: str
     cep: str
@@ -112,6 +128,8 @@ class FuncionarioOut(BaseModel):
     setor_id: int
     cargo: Cargo
     is_admin: bool
+    bate_ponto: bool
+    cargo_confianca: bool
     cpf: Optional[str] = None
     email: Optional[str] = None
     cep: Optional[str] = None
@@ -403,3 +421,99 @@ class ComunicadoInput(BaseModel):
     conteudo: str
     para_todos: bool = True
     destinatarios: List[int] = []
+
+
+class PontoStatusOut(BaseModel):
+    entrada: Optional[datetime] = None
+    saida_almoco: Optional[datetime] = None
+    retorno_almoco: Optional[datetime] = None
+    saida: Optional[datetime] = None
+    horas_trabalhadas: DecimalMoeda = Field(default=Decimal("0.00"), **DECIMAL_5_2)
+    horas_extras: DecimalMoeda = Field(default=Decimal("0.00"), **DECIMAL_5_2)
+
+    model_config = {"from_attributes": True}
+
+
+class PontoDiaOut(BaseModel):
+    data: date
+    entrada: Optional[datetime] = None
+    saida_almoco: Optional[datetime] = None
+    retorno_almoco: Optional[datetime] = None
+    saida: Optional[datetime] = None
+    horas_extras: DecimalMoeda = Field(default=Decimal("0.00"), **DECIMAL_5_2)
+    horas_devidas: DecimalMoeda = Field(default=Decimal("0.00"), **DECIMAL_5_2)
+    # Quanto este dia específico representa em R$ (horas_trabalhadas +
+    # horas_extras*1.5, multiplicado por Salario.valor_hora do funcionário)
+    # -- ver repository/pontos.py.
+    valor_monetario: DecimalMoeda = Field(default=Decimal("0.00"), **DECIMAL_10_2)
+
+
+class PontoResumoOut(BaseModel):
+    total_trabalhado_mes: DecimalMoeda = Field(default=Decimal("0.00"), **DECIMAL_5_2)
+    total_extra_mes: DecimalMoeda = Field(default=Decimal("0.00"), **DECIMAL_5_2)
+    total_devido_mes: DecimalMoeda = Field(default=Decimal("0.00"), **DECIMAL_5_2)
+    saldo_mensal: DecimalMoeda = Field(default=Decimal("0.00"), **DECIMAL_5_2)
+    total_a_receber: DecimalMoeda = Field(default=Decimal("0.00"), **DECIMAL_10_2)
+
+
+class PontoRelatorioOut(BaseModel):
+    funcionario: str
+    resumo: PontoResumoOut
+    pontos: List[PontoDiaOut]
+
+
+class PontoGeralItemOut(BaseModel):
+    data: date
+    funcionario: str
+    entrada: Optional[datetime] = None
+    saida: Optional[datetime] = None
+    trabalhadas: DecimalMoeda = Field(default=Decimal("0.00"), **DECIMAL_5_2)
+    extras: DecimalMoeda = Field(default=Decimal("0.00"), **DECIMAL_5_2)
+    devidas: DecimalMoeda = Field(default=Decimal("0.00"), **DECIMAL_5_2)
+
+
+class FecharFolhaRequest(BaseModel):
+    mes: int = Field(..., ge=1, le=12)
+    ano: int = Field(..., ge=2000, le=2100)
+
+
+class HoleriteOut(BaseModel):
+    id: int
+    funcionario_id: int
+    mes: int
+    ano: int
+    data_competencia: date
+    valor_bruto: DecimalMoeda = Field(default=Decimal("0.00"), **DECIMAL_10_2)
+    valor_liquido: DecimalMoeda = Field(default=Decimal("0.00"), **DECIMAL_10_2)
+    salario_base: DecimalMoeda = Field(default=Decimal("0.00"), **DECIMAL_10_2)
+    inss: DecimalMoeda = Field(default=Decimal("0.00"), **DECIMAL_10_2)
+    irpf: DecimalMoeda = Field(default=Decimal("0.00"), **DECIMAL_10_2)
+    fgts: DecimalMoeda = Field(default=Decimal("0.00"), **DECIMAL_10_2)
+    vale_transporte: DecimalMoeda = Field(default=Decimal("0.00"), **DECIMAL_10_2)
+    vale_refeicao: DecimalMoeda = Field(default=Decimal("0.00"), **DECIMAL_10_2)
+    contribuicao_assistencial: DecimalMoeda = Field(default=Decimal("0.00"), **DECIMAL_10_2)
+    ajuda_custo: DecimalMoeda = Field(default=Decimal("0.00"), **DECIMAL_10_2)
+    adiantamento: DecimalMoeda = Field(default=Decimal("0.00"), **DECIMAL_10_2)
+    horas_extras_valor: DecimalMoeda = Field(default=Decimal("0.00"), **DECIMAL_10_2)
+    horas_trabalhadas: DecimalMoeda = Field(default=Decimal("0.00"), **DECIMAL_10_2)
+    dias_trabalhados: int = 30
+    horas_extras: DecimalMoeda = Field(default=Decimal("0.00"), **DECIMAL_10_2)
+    horas_devidas: DecimalMoeda = Field(default=Decimal("0.00"), **DECIMAL_10_2)
+    assinado: bool
+    data_assinatura: Optional[datetime] = None
+    data_emissao: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class DefinirSalarioRequest(BaseModel):
+    funcionario_id: int
+    valor: Decimal = Field(..., gt=0, **DECIMAL_10_2)
+
+
+class SalarioHistoricoOut(BaseModel):
+    data_alteracao: datetime
+    valor_antigo: DecimalMoeda = Field(**DECIMAL_10_2)
+    valor_novo: DecimalMoeda = Field(**DECIMAL_10_2)
+
+    model_config = {"from_attributes": True}

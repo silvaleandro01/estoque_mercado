@@ -4,7 +4,7 @@ import string
 from decimal import Decimal
 from typing import Optional
 from datetime import datetime, timezone, date
-from sqlmodel import Field, SQLModel, create_engine, Session, select
+from sqlmodel import Field, SQLModel, UniqueConstraint, create_engine, Session, select
 from dotenv import load_dotenv
 
 from utils.money import DecimalMoeda
@@ -51,6 +51,17 @@ class Funcionario(SQLModel, table=True):
     # atingido, até quando a conta fica temporariamente bloqueada.
     tentativas_login_falhas: int = Field(default=0)
     bloqueado_ate: Optional[datetime] = Field(default=None)
+    # Ponto eletrônico/folha de pagamento: `bate_ponto` decide se o
+    # funcionário usa o relógio de ponto (ver repository/pontos.py) e entra
+    # na consolidação automática de fechar_folha -- cargo de confiança
+    # (diretoria) tipicamente não bate ponto (CLT art. 62, II), mas fica
+    # configurável por funcionário, não travado só no cargo. `cargo_confianca`
+    # é só um rótulo informativo, sempre derivado de `cargo == "diretoria"`
+    # no backend (nunca aceito como input do cliente -- ver
+    # criar_funcionario/atualizar_funcionario) para não divergir do cargo
+    # real do funcionário.
+    bate_ponto: bool = Field(default=True)
+    cargo_confianca: bool = Field(default=False)
 
 
 class HistoricoSenha(SQLModel, table=True):
@@ -333,6 +344,107 @@ class ItemCompra(SQLModel, table=True):
     preco_custo_unitario: DecimalMoeda = Field(max_digits=10, decimal_places=2)
     preco_custo_total: DecimalMoeda = Field(max_digits=10, decimal_places=2)
     lancado_em: Optional[datetime] = Field(default=None)
+
+
+class Ponto(SQLModel, table=True):
+    """Registro diário de ponto eletrônico (um funcionário, um dia).
+
+    `entrada`/`saida_almoco`/`retorno_almoco`/`saida` são batidos em
+    sequência, nessa ordem (ver repository/pontos.py::bater_ponto) --
+    `horas_trabalhadas`/`horas_extras`/`horas_devidas` só são calculadas e
+    persistidas quando `saida` já foi batida; um dia ainda em aberto fica
+    com esses três zerados.
+
+    UniqueConstraint(funcionario_id, data) -- achado do painel de revisão:
+    bater_ponto() lê "existe Ponto hoje?" sem lock antes de decidir se cria
+    uma linha nova; duas requisições quase simultâneas (duplo clique no
+    botão de bater ponto) passavam as duas pelo "não existe" e criavam DUAS
+    linhas para o mesmo funcionário/dia, inflando horas somadas em
+    relatório/folha. with_for_update() não fecha essa brecha sozinho (a
+    corrida é sobre CRIAR uma linha nova, não sobre ler uma já existente) --
+    a constraint é a proteção real; repository/pontos.py::bater_ponto trata
+    o IntegrityError resultante como 409.
+    """
+    __table_args__ = (UniqueConstraint("funcionario_id", "data"),)
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    funcionario_id: int = Field(foreign_key="funcionario.id", index=True)
+    data: date = Field(index=True)
+    entrada: Optional[datetime] = Field(default=None)
+    saida_almoco: Optional[datetime] = Field(default=None)
+    retorno_almoco: Optional[datetime] = Field(default=None)
+    saida: Optional[datetime] = Field(default=None)
+    # DECIMAL(5,2) -- mesma estrutura de DecimalMoeda (2 casas), reaproveitada
+    # aqui para horas em vez de dinheiro (ver nota em utils/quantidade.py
+    # sobre DecimalQuantidade/DecimalMoeda serem estruturalmente idênticos).
+    horas_trabalhadas: DecimalMoeda = Field(default=Decimal("0.00"), max_digits=5, decimal_places=2)
+    horas_extras: DecimalMoeda = Field(default=Decimal("0.00"), max_digits=5, decimal_places=2)
+    horas_devidas: DecimalMoeda = Field(default=Decimal("0.00"), max_digits=5, decimal_places=2)
+
+
+class Salario(SQLModel, table=True):
+    """Salário atual do funcionário. `valor_hora` é sempre derivado de
+    `valor_mensal` (ver repository/funcionarios.py::definir_salario) --
+    nunca editado direto, só recalculado quando `valor_mensal` muda.
+    """
+    id: Optional[int] = Field(default=None, primary_key=True)
+    funcionario_id: int = Field(foreign_key="funcionario.id", unique=True, index=True)
+    valor_mensal: DecimalMoeda = Field(default=Decimal("0.00"), max_digits=10, decimal_places=2)
+    valor_hora: DecimalMoeda = Field(default=Decimal("0.00"), max_digits=10, decimal_places=2)
+
+
+class SalarioHistorico(SQLModel, table=True):
+    __tablename__ = "salariohistorico"
+    id: Optional[int] = Field(default=None, primary_key=True)
+    funcionario_id: int = Field(foreign_key="funcionario.id", index=True)
+    valor_antigo: DecimalMoeda = Field(max_digits=10, decimal_places=2)
+    valor_novo: DecimalMoeda = Field(max_digits=10, decimal_places=2)
+    data_alteracao: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class Holerite(SQLModel, table=True):
+    """Folha de pagamento consolidada de um funcionário num mês/ano (ver
+    repository/folha.py::fechar_folha). `ajuda_custo`, `adiantamento`,
+    `contribuicao_assistencial` e `vale_refeicao` existem no schema mas,
+    nesta primeira versão, não têm regra de cálculo definida -- sempre
+    gravados como 0.00 (decisão explícita, não um bug: ver plano da mudança
+    que introduziu este arquivo). `valor_liquido` já soma os quatro na
+    fórmula, então ficam prontos para quando ganharem uma regra real.
+
+    UniqueConstraint(funcionario_id, mes, ano) -- achado do painel de
+    revisão: fechar_folha() verifica "já existe holerite deste mês?" sem
+    lock antes de inserir; duas chamadas concorrentes (RH clicando duas
+    vezes, ou dois gerentes fechando ao mesmo tempo) passavam as duas pelo
+    "não existe" e geravam holerite duplicado pro mesmo funcionário/mês.
+    Mesma proteção que Ponto (ver docstring de Ponto) -- a constraint é
+    quem fecha a brecha, não um lock de leitura.
+    """
+    __table_args__ = (UniqueConstraint("funcionario_id", "mes", "ano"),)
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    funcionario_id: int = Field(foreign_key="funcionario.id", index=True)
+    mes: int
+    ano: int
+    data_competencia: date
+    valor_bruto: DecimalMoeda = Field(default=Decimal("0.00"), max_digits=10, decimal_places=2)
+    valor_liquido: DecimalMoeda = Field(default=Decimal("0.00"), max_digits=10, decimal_places=2)
+    salario_base: DecimalMoeda = Field(default=Decimal("0.00"), max_digits=10, decimal_places=2)
+    inss: DecimalMoeda = Field(default=Decimal("0.00"), max_digits=10, decimal_places=2)
+    irpf: DecimalMoeda = Field(default=Decimal("0.00"), max_digits=10, decimal_places=2)
+    fgts: DecimalMoeda = Field(default=Decimal("0.00"), max_digits=10, decimal_places=2)
+    vale_transporte: DecimalMoeda = Field(default=Decimal("0.00"), max_digits=10, decimal_places=2)
+    vale_refeicao: DecimalMoeda = Field(default=Decimal("0.00"), max_digits=10, decimal_places=2)
+    contribuicao_assistencial: DecimalMoeda = Field(default=Decimal("0.00"), max_digits=10, decimal_places=2)
+    ajuda_custo: DecimalMoeda = Field(default=Decimal("0.00"), max_digits=10, decimal_places=2)
+    adiantamento: DecimalMoeda = Field(default=Decimal("0.00"), max_digits=10, decimal_places=2)
+    horas_extras_valor: DecimalMoeda = Field(default=Decimal("0.00"), max_digits=10, decimal_places=2)
+    horas_trabalhadas: DecimalMoeda = Field(default=Decimal("0.00"), max_digits=10, decimal_places=2)
+    dias_trabalhados: int = Field(default=30)
+    horas_extras: DecimalMoeda = Field(default=Decimal("0.00"), max_digits=10, decimal_places=2)
+    horas_devidas: DecimalMoeda = Field(default=Decimal("0.00"), max_digits=10, decimal_places=2)
+    assinado: bool = Field(default=False)
+    data_assinatura: Optional[datetime] = Field(default=None)
+    data_emissao: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 engine = create_engine(DATABASE_URL, connect_args=_connect_args)

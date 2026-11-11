@@ -4,11 +4,13 @@ from fastapi import APIRouter, Depends
 
 from schemas.schemas import (
     FuncionarioCreate, FuncionarioOut, LoginRequest, TrocarSenhaRequest, RecuperarSenhaRequest,
+    DefinirSalarioRequest, SalarioHistoricoOut,
 )
 from services.auth import get_funcionario, verificar_permissao
 from repository.funcionarios import (
     autenticar_funcionario, criar_funcionario, listar_funcionarios, buscar_funcionario,
     atualizar_funcionario, deletar_funcionario, renovar_token, trocar_senha, recuperar_senha,
+    definir_salario, salario_historico,
 )
 
 router = APIRouter(prefix="/funcionarios", tags=["Funcionários"])
@@ -27,7 +29,7 @@ def recuperar(dados: RecuperarSenhaRequest):
 @router.post("/criar", response_model=FuncionarioOut)
 def criar(dados: FuncionarioCreate, funcionario=Depends(get_funcionario)):
     verificar_permissao(funcionario, "rh")
-    return criar_funcionario(dados)
+    return criar_funcionario(dados, funcionario.id)
 
 
 @router.get("/listar", response_model=List[FuncionarioOut])
@@ -45,7 +47,7 @@ def buscar(id: int, funcionario=Depends(get_funcionario)):
 @router.put("/atualizar/{id}", response_model=FuncionarioOut)
 def atualizar(id: int, dados: FuncionarioCreate, funcionario=Depends(get_funcionario)):
     verificar_permissao(funcionario, "rh")
-    return atualizar_funcionario(id, dados)
+    return atualizar_funcionario(id, dados, funcionario.id)
 
 
 @router.delete("/deletar/{id}")
@@ -57,6 +59,18 @@ def deletar(id: int, funcionario=Depends(get_funcionario)):
 @router.patch("/trocar-senha")
 def trocar(dados: TrocarSenhaRequest, funcionario=Depends(get_funcionario)):
     return trocar_senha(funcionario.id, dados)
+
+
+@router.post("/definir-salario")
+def definir_salario_rota(dados: DefinirSalarioRequest, funcionario=Depends(get_funcionario)):
+    verificar_permissao(funcionario, "rh")
+    return definir_salario(dados.funcionario_id, dados.valor, funcionario.id)
+
+
+@router.get("/salario-historico/{id}", response_model=List[SalarioHistoricoOut])
+def salario_historico_rota(id: int, funcionario=Depends(get_funcionario)):
+    verificar_permissao(funcionario, "rh")
+    return salario_historico(id)
 
 
 rh_router = APIRouter(prefix="/rh", tags=["RH"])
