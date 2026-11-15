@@ -1,15 +1,17 @@
 from decimal import Decimal
+from datetime import datetime, timezone
 from fastapi import HTTPException
 from sqlalchemy.exc import OperationalError
 from sqlmodel import Session, select
 
-from utils.database import engine, Estoque, Venda, ItemVenda
+from utils.database import engine, Estoque, Venda, ItemVenda, Compra, Despesa
 from utils.money import arredondar
 from utils.quantidade import arredondar_quantidade, validar_quantidade_inteira_se_unidade
-from utils.timezone import hoje_brasil, limites_do_dia_brasil
+from utils.timezone import hoje_brasil, limites_do_dia_brasil, limites_dos_ultimos_dias
 from utils.erros_banco import tratar_operational_error
-from repository.lotes import consumir_fefo
+from repository.lotes import consumir_fefo, reconciliar_lote_sem_validade
 from repository.movimentacoes import registrar_movimentacao
+from logs.logs import criar_log
 from schemas.schemas import VendaInput
 
 
@@ -118,12 +120,193 @@ def vendas_do_dia():
         dia = hoje_brasil()
         inicio_utc, fim_utc = limites_do_dia_brasil(dia)
         vendas = session.exec(
-            select(Venda).where(Venda.data >= inicio_utc, Venda.data < fim_utc)
+            select(Venda)
+            # Venda cancelada não é "vendida" de verdade -- não deveria
+            # entrar no total do caixa do dia nem na listagem de onde o
+            # próprio cancelamento é disparado (ver cancelar_venda).
+            .where(Venda.data >= inicio_utc, Venda.data < fim_utc, Venda.status == "concluida")
+            .order_by(Venda.data.desc())
         ).all()
         total = arredondar(sum((v.valor_total for v in vendas), Decimal("0.00")))
-        return {"data": dia, "total_vendido": total}
+        return {
+            "data": dia,
+            "total_vendido": total,
+            "lista": [{"id": v.id, "data": v.data, "valor_total": v.valor_total} for v in vendas],
+        }
 
 
 def listar_vendas():
     with Session(engine) as session:
         return session.exec(select(Venda)).all()
+
+
+def cancelar_venda(venda_id: int, funcionario_id: int):
+    """POST /vendas/cancelar/{id} (Fase 8 -- ver docstring de Venda e de
+    MovimentacaoEstoque, que já reservava CANCELAMENTO_VENDA no enum para
+    quando esta fase chegasse): devolve ao estoque os itens de uma venda e
+    marca a venda como cancelada (estado terminal, não é possível cancelar
+    de novo nem reverter).
+
+    DEVOLUÇÃO POR LOTE: diferente de `criar_venda` (que sabe exatamente de
+    qual lote FEFO cada item saiu, via `consumir_fefo`), não existe hoje
+    nenhum vínculo persistido entre uma venda e os lotes que ela consumiu --
+    `MovimentacaoEstoque` não tem `venda_id` (ver docstring do modelo). Sem
+    esse vínculo, não há como devolver cada item ao lote físico exato de
+    onde saiu. A devolução aqui usa o mesmo mecanismo já estabelecido para
+    todo ajuste de saldo sem lote físico conhecido (criar_estoque,
+    ajustar_inventario, confirmar_pendente): incrementa
+    `Estoque.quantidade` e reconcilia o "lote sem validade" (ver docstring
+    de `reconciliar_lote_sem_validade`) -- uma escolha razoável para um
+    estorno (a mercadoria devolvida volta ao MESMO estoque físico,
+    independente de qual lote tinha sido debitado), mas que não preserva a
+    validade original de cada unidade devolvida.
+
+    Mesmo padrão de lock/deadlock dos outros pontos de escrita de estoque
+    (with_for_update() + tratar_operational_error), e mesma ordenação por
+    codigodebarras de `criar_venda` -- duas transações que travam os mesmos
+    produtos (uma venda nova, um cancelamento) precisam adquirir os locks
+    sempre na mesma ordem para não haver deadlock entre elas.
+    """
+    with Session(engine) as session:
+        venda = session.exec(
+            select(Venda).where(Venda.id == venda_id).with_for_update()
+        ).first()
+        if not venda:
+            raise HTTPException(status_code=404, detail="Venda não encontrada")
+        if venda.status != "concluida":
+            raise HTTPException(status_code=400, detail="Venda já está cancelada")
+
+        itens = session.exec(select(ItemVenda).where(ItemVenda.venda_id == venda_id)).all()
+        itens_ordenados = sorted(itens, key=lambda item: item.codigodebarras)
+        # Achado do painel de revisão: produto excluído depois da venda faz
+        # a devolução daquele item específico ser pulada (ver abaixo) -- sem
+        # rastrear isso, a mensagem de retorno afirmava "estoque devolvido"
+        # mesmo quando a devolução foi só parcial, escondendo a
+        # inconsistência de quem cancelou a venda.
+        codigos_nao_devolvidos = []
+
+        try:
+            for item in itens_ordenados:
+                produto = session.exec(
+                    select(Estoque).where(Estoque.codigodebarras == item.codigodebarras).with_for_update()
+                ).first()
+                if not produto:
+                    # Produto excluído do estoque depois da venda -- não há
+                    # mais pra onde devolver esta linha específica (ver
+                    # repository/estoque.py::deletar_estoque). A venda ainda
+                    # é cancelada normalmente; só esta devolução de item é
+                    # pulada.
+                    codigos_nao_devolvidos.append(item.codigodebarras)
+                    continue
+
+                produto.quantidade = arredondar_quantidade(produto.quantidade + item.quantidade)
+                session.add(produto)
+
+                lote_residual, delta_residual = reconciliar_lote_sem_validade(session, produto.id)
+                if delta_residual != 0:
+                    registrar_movimentacao(
+                        session, produto.id, "CANCELAMENTO_VENDA", delta_residual, funcionario_id,
+                        lote_id=lote_residual.id if lote_residual else None,
+                    )
+
+            venda.status = "cancelada"
+            venda.cancelada_em = datetime.now(timezone.utc)
+            venda.cancelada_por_id = funcionario_id
+            session.add(venda)
+            session.commit()
+        except OperationalError as exc:
+            session.rollback()
+            tratar_operational_error(exc, "Não foi possível cancelar a venda, tente novamente")
+        except Exception:
+            session.rollback()
+            raise HTTPException(status_code=500, detail="Erro ao cancelar venda")
+
+        session.refresh(venda)
+
+    criar_log(funcionario_id, f"Venda cancelada: #{venda_id}")
+    if codigos_nao_devolvidos:
+        detalhe = ", ".join(codigos_nao_devolvidos)
+        return {
+            "msg": (
+                f"Venda #{venda_id} cancelada. Estoque devolvido parcialmente -- "
+                f"produto(s) excluído(s) do cadastro não puderam receber a devolução: {detalhe}"
+            ),
+        }
+    return {"msg": f"Venda #{venda_id} cancelada, estoque devolvido"}
+
+
+def _resumo_periodo(vendas, compras, despesas) -> dict:
+    faturamento = arredondar(sum((v.valor_total for v in vendas), Decimal("0.00")))
+    investimento = arredondar(sum((c.valor_total for c in compras), Decimal("0.00")))
+    total_despesas = arredondar(sum((d.valor for d in despesas), Decimal("0.00")))
+    lucro_liquido = arredondar(faturamento - investimento - total_despesas)
+    return {
+        "vendas_count": len(vendas),
+        "faturamento": faturamento,
+        "investimento": investimento,
+        "despesas": total_despesas,
+        "lucro_liquido": lucro_liquido,
+    }
+
+
+def dashboard_stats():
+    """Agrega vendas, compras autorizadas e despesas em janelas de período
+    (diário = dia civil em Brasília; as demais, rolantes a partir de agora --
+    ver limites_dos_ultimos_dias) para o Dashboard Executivo.
+
+    Achado do painel de revisão: calcular cada janela com sua própria query
+    custava 21 SELECTs (7 janelas x 3 tabelas), escalando com o número de
+    janelas em vez do volume de dados -- toda janela menor já é um
+    subconjunto da mais larga ("anual"). Busca cada tabela UMA ÚNICA VEZ na
+    união de todas as janelas (do início da mais antiga ao fim da mais
+    recente) e filtra/soma em Python por janela -- 3 SELECTs no total,
+    mesmo resultado.
+    """
+    with Session(engine) as session:
+        janelas = {
+            "diario": limites_do_dia_brasil(),
+            "semanal": limites_dos_ultimos_dias(7),
+            "mensal": limites_dos_ultimos_dias(30),
+            "bimestral": limites_dos_ultimos_dias(60),
+            "trimestral": limites_dos_ultimos_dias(90),
+            "semestral": limites_dos_ultimos_dias(180),
+            "anual": limites_dos_ultimos_dias(365),
+        }
+        inicio_mais_largo = min(inicio for inicio, _ in janelas.values())
+        fim_mais_largo = max(fim for _, fim in janelas.values())
+
+        # Venda cancelada não é faturamento real -- mesmo filtro de
+        # vendas_do_dia. Compra só conta como investimento se já autorizada
+        # -- mesmo filtro de compras_do_dia.
+        todas_vendas = session.exec(
+            select(Venda).where(
+                Venda.data >= inicio_mais_largo, Venda.data < fim_mais_largo,
+                Venda.status == "concluida",
+            )
+        ).all()
+        todas_compras = session.exec(
+            select(Compra).where(
+                Compra.status == "autorizada",
+                Compra.data >= inicio_mais_largo, Compra.data < fim_mais_largo,
+            )
+        ).all()
+        todas_despesas = session.exec(
+            select(Despesa).where(Despesa.data >= inicio_mais_largo, Despesa.data < fim_mais_largo)
+        ).all()
+
+        # SQLAlchemy/SQLite (e MySQL, sem DateTime(timezone=True)) perdem o
+        # tzinfo no vai-e-volta pelo banco -- `v.data`/`c.data`/`d.data` vêm
+        # NAIVE (sem fuso), embora sempre UTC por convenção (mesmo problema
+        # já documentado nas funções de fuso do frontend). `inicio`/`fim`
+        # são timezone-AWARE (UTC) -- comparar aware com naive direto
+        # levanta TypeError em Python (SQL não tem esse problema, só o
+        # filtro em memória abaixo). Remove o tzinfo pra comparar como o
+        # mesmo "relógio" naive-UTC que o banco devolve.
+        return {
+            chave: _resumo_periodo(
+                [v for v in todas_vendas if inicio.replace(tzinfo=None) <= v.data < fim.replace(tzinfo=None)],
+                [c for c in todas_compras if inicio.replace(tzinfo=None) <= c.data < fim.replace(tzinfo=None)],
+                [d for d in todas_despesas if inicio.replace(tzinfo=None) <= d.data < fim.replace(tzinfo=None)],
+            )
+            for chave, (inicio, fim) in janelas.items()
+        }

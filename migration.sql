@@ -803,4 +803,139 @@ DELIMITER ;
 CALL `_add_unique_index_if_not_exists`('ponto', 'uq_ponto_funcionario_data', '(funcionario_id, data)');
 CALL `_add_unique_index_if_not_exists`('holerite', 'uq_holerite_funcionario_mes_ano', '(funcionario_id, mes, ano)');
 
+-- ============================================================================
+-- Migração aditiva (cancelamento de venda -- Fase 8, ver utils.database.Venda
+-- e repository/vendas.py::cancelar_venda para o contexto completo). Mesma
+-- regra das migrações anteriores: tudo aditivo, nenhum DROP/TRUNCATE,
+-- idempotente (IF NOT EXISTS).
+--
+-- `venda` ganha:
+--   - status: 'concluida' (estado normal de toda venda já existente e de
+--     toda nova venda criada por criar_venda) ou 'cancelada' (terminal).
+--     Mesmo padrão já usado para `compra.status`/`funcionario.cargo`: valor
+--     fixo validado na camada da aplicação, coluna um VARCHAR simples, sem
+--     ENUM do MySQL.
+--   - cancelada_em / cancelada_por_id: quando e quem cancelou (NULL para
+--     toda venda nunca cancelada, inclusive as já existentes antes desta
+--     migração). `cancelada_por_id` usa ON DELETE SET NULL -- mesmo padrão
+--     de auditoria já usado em `movimentacao_estoque.funcionario_id` e
+--     `compra.aprovador_id`: preserva o registro do cancelamento mesmo que
+--     o funcionário que cancelou saia da empresa depois.
+--
+-- Dado existente: todo UPDATE abaixo é condicional (só roda se a coluna
+-- ainda não existir, mesma stored procedure das migrações anteriores) e o
+-- DEFAULT 'concluida' já cobre toda venda pré-existente sem precisar de
+-- nenhum UPDATE em massa.
+-- ============================================================================
+
+DELIMITER $$
+DROP PROCEDURE IF EXISTS `_add_column_if_not_exists`$$
+CREATE PROCEDURE `_add_column_if_not_exists`(
+    IN p_table VARCHAR(64), IN p_column VARCHAR(64), IN p_definition TEXT
+)
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = DATABASE() AND table_name = p_table AND column_name = p_column
+    ) THEN
+        SET @ddl = CONCAT('ALTER TABLE `', p_table, '` ADD COLUMN `', p_column, '` ', p_definition);
+        PREPARE stmt FROM @ddl;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+    END IF;
+END$$
+DELIMITER ;
+
+CALL `_add_column_if_not_exists`('venda', 'status', "VARCHAR(50) NOT NULL DEFAULT 'concluida'");
+CALL `_add_column_if_not_exists`('venda', 'cancelada_em', 'DATETIME NULL');
+CALL `_add_column_if_not_exists`('venda', 'cancelada_por_id', 'INT NULL');
+
+DROP PROCEDURE IF EXISTS `_add_column_if_not_exists`;
+
+DELIMITER $$
+DROP PROCEDURE IF EXISTS `_add_index_if_not_exists`$$
+CREATE PROCEDURE `_add_index_if_not_exists`(
+    IN p_table VARCHAR(64), IN p_index VARCHAR(64), IN p_definition TEXT
+)
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.statistics
+        WHERE table_schema = DATABASE() AND table_name = p_table AND index_name = p_index
+    ) THEN
+        SET @ddl = CONCAT('ALTER TABLE `', p_table, '` ADD INDEX `', p_index, '` ', p_definition);
+        PREPARE stmt FROM @ddl;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+    END IF;
+END$$
+DELIMITER ;
+
+CALL `_add_index_if_not_exists`('venda', 'idx_venda_status', '(status)');
+
+DROP PROCEDURE IF EXISTS `_add_index_if_not_exists`;
+
+-- `venda.cancelada_por_id -> funcionario.id` com ON DELETE SET NULL. MySQL
+-- não tem "ADD CONSTRAINT IF NOT EXISTS" (mesmo problema de ADD COLUMN/ADD
+-- INDEX acima) -- mesma solução, consultando information_schema desta vez
+-- por nome de constraint.
+DELIMITER $$
+DROP PROCEDURE IF EXISTS `_add_fk_if_not_exists`$$
+CREATE PROCEDURE `_add_fk_if_not_exists`(
+    IN p_table VARCHAR(64), IN p_constraint VARCHAR(64), IN p_definition TEXT
+)
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.table_constraints
+        WHERE table_schema = DATABASE() AND table_name = p_table AND constraint_name = p_constraint
+    ) THEN
+        SET @ddl = CONCAT('ALTER TABLE `', p_table, '` ADD CONSTRAINT `', p_constraint, '` ', p_definition);
+        PREPARE stmt FROM @ddl;
+        EXECUTE stmt;
+        DEALLOCATE PREPARE stmt;
+    END IF;
+END$$
+DELIMITER ;
+
+CALL `_add_fk_if_not_exists`(
+    'venda', 'fk_venda_cancelada_por',
+    'FOREIGN KEY (cancelada_por_id) REFERENCES funcionario(id) ON DELETE SET NULL'
+);
+
+DROP PROCEDURE IF EXISTS `_add_fk_if_not_exists`;
+
 DROP PROCEDURE IF EXISTS `_add_unique_index_if_not_exists`;
+
+-- ============================================================================
+-- Migração aditiva (solicitações de compra) -- ver utils.database.Solicitacao
+-- e repository/solicitacoes.py para o contexto completo. Tabela nova (CREATE
+-- TABLE IF NOT EXISTS, mesmo padrão das migrações anteriores), sem DROP/
+-- TRUNCATE, idempotente.
+--
+-- DECISÃO DE ARQUITETURA: diferente de `compra`/`itemcompra` (pedido formal,
+-- itens estruturados ligados a produtos do estoque), uma Solicitação é só
+-- texto livre -- "preciso comprar X" -- sem nenhum vínculo com o cadastro de
+-- estoque. Não é uma segunda tabela de pedido de compra: é um canal de
+-- triagem anterior, que pode ou não virar uma `compra` de verdade depois
+-- (decisão tomada fora do sistema, por quem respondeu).
+-- ============================================================================
+
+CREATE TABLE IF NOT EXISTS `solicitacao` (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    titulo VARCHAR(255) NOT NULL,
+    descricao TEXT NOT NULL,
+    itens TEXT NOT NULL,
+    solicitante_id INT NOT NULL,
+    -- pendente | aprovada | recusada -- mesmo padrão já usado para
+    -- `venda.status`/`compra.status`: valor fixo validado na camada da
+    -- aplicação, coluna um VARCHAR simples, sem ENUM do MySQL.
+    status VARCHAR(50) NOT NULL DEFAULT 'pendente',
+    resposta TEXT NULL,
+    respondido_por_id INT NULL,
+    respondido_em DATETIME NULL,
+    data DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX (solicitante_id),
+    INDEX (status),
+    INDEX (data),
+    FOREIGN KEY (solicitante_id) REFERENCES funcionario(id),
+    CONSTRAINT `fk_solicitacao_respondido_por` FOREIGN KEY (respondido_por_id) REFERENCES funcionario(id) ON DELETE SET NULL
+) ENGINE=InnoDB;

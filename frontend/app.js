@@ -1,5 +1,51 @@
 const API_URL = "http://127.0.0.1:8000";
 
+// Fuso horário do mercado (Teresina-PI -- mesmo raciocínio documentado em
+// src/utils/timezone.py no backend). Todo instante gravado pelo backend é
+// UTC (datetime.now(timezone.utc)), mas o SQLAlchemy perde essa informação
+// no vai-e-volta pelo banco (SQLite e MySQL guardam DATETIME "ingênuo", sem
+// fuso) -- o JSON que chega aqui vem SEM sufixo de fuso (ex.:
+// "2026-11-14T21:27:53", não "...21:27:53Z"). Sem isso, o construtor nativo
+// `Date` do JavaScript interpreta uma string ISO de data-E-hora sem offset
+// como horário LOCAL do navegador, não UTC -- então só fixar `timeZone` no
+// `toLocaleX` não basta (o valor já foi interpretado errado no parse); é
+// preciso normalizar a string ANTES de criar o Date.
+const FUSO_BRASIL = 'America/Sao_Paulo';
+
+function _comoInstanteUtc(iso) {
+    if (!iso) return iso;
+    // Já tem offset explícito (Z, ou +HH:MM/-HH:MM) -- usa como está.
+    return /[zZ]$|[+-]\d{2}:\d{2}$/.test(iso) ? iso : `${iso}Z`;
+}
+
+// Campo só de DATA (ex.: "2026-11-14", sem hora -- vendas_do_dia/
+// compras_do_dia mandam assim) não representa um instante UTC, é só o dia
+// civil, sem fuso nenhum envolvido. Tratar isso como instante e converter
+// UTC->Brasília desloca pro dia ANTERIOR (meia-noite UTC = 21h do dia
+// anterior em UTC-3) -- achado real do /code-review nesta sessão. Formata
+// direto da string, sem criar Date nem mexer em fuso.
+function _formatarSoData(iso) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+    return m ? `${m[3]}/${m[2]}/${m[1]}` : null;
+}
+
+function formatarDataBrasil(iso) {
+    if (!iso) return '--';
+    return _formatarSoData(iso) || new Date(_comoInstanteUtc(iso)).toLocaleDateString('pt-BR', { timeZone: FUSO_BRASIL });
+}
+
+function formatarHoraBrasil(iso) {
+    if (!iso) return '--:--';
+    return new Date(_comoInstanteUtc(iso)).toLocaleTimeString('pt-BR', { timeZone: FUSO_BRASIL });
+}
+
+function formatarDataHoraBrasil(iso) {
+    if (!iso) return '--';
+    const soData = _formatarSoData(iso);
+    if (soData) return soData;
+    return new Date(_comoInstanteUtc(iso)).toLocaleString('pt-BR', { timeZone: FUSO_BRASIL });
+}
+
 function escapeHtml(valor) {
     if (valor === null || valor === undefined) return '';
     return String(valor)
@@ -9,6 +55,72 @@ function escapeHtml(valor) {
         .replace(/"/g, '&quot;')
         .replace(/'/g, '&#39;');
 }
+
+// Máscara de moeda (R$): formata em tempo real enquanto digita, reconhecendo
+// os últimos 2 dígitos como centavos e agrupando o resto de 3 em 3 (unidade,
+// milhar, milhão, ...). Ex.: digitar "150090" vira "R$ 1.500,90".
+function aplicarMascaraMoeda(id) {
+    const el = document.getElementById(id);
+    let digitos = el.value.replace(/\D/g, '');
+    digitos = digitos.replace(/^0+(?=\d)/, '');
+    if (!digitos) { el.value = ''; return; }
+    while (digitos.length < 3) digitos = '0' + digitos;
+    const centavos = digitos.slice(-2);
+    const inteiro = digitos.slice(0, -2).replace(/^0+(?=\d)/, '') || '0';
+    const inteiroFormatado = inteiro.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+    el.value = `R$ ${inteiroFormatado},${centavos}`;
+}
+
+// Lê o valor de um campo com aplicarMascaraMoeda() de volta como número
+// (ex.: "R$ 1.500,90" -> 1500.90) para mandar no payload da API.
+function valorMoedaParaNumero(id) {
+    const valor = document.getElementById(id).value || '';
+    const limpo = valor.replace(/[^\d,]/g, '').replace(',', '.');
+    return parseFloat(limpo) || 0;
+}
+
+// Máscara de CEP (00000-000).
+function aplicarMascaraCep(id) {
+    const el = document.getElementById(id);
+    const digitos = el.value.replace(/\D/g, '').slice(0, 8);
+    el.value = digitos.length > 5 ? `${digitos.slice(0, 5)}-${digitos.slice(5)}` : digitos;
+}
+
+// Máscara de CPF (000.000.000-00).
+function aplicarMascaraCpf(id) {
+    const el = document.getElementById(id);
+    let d = el.value.replace(/\D/g, '').slice(0, 11);
+    d = d.replace(/(\d{3})(\d)/, '$1.$2');
+    d = d.replace(/(\d{3})(\d)/, '$1.$2');
+    d = d.replace(/(\d{3})(\d{1,2})$/, '$1-$2');
+    el.value = d;
+}
+
+// Autopreenchimento de endereço via CEP (ViaCEP, serviço público gratuito
+// sem necessidade de chave de API). Dispara quando o CEP atinge 8 dígitos;
+// silencioso em caso de CEP inválido/inexistente ou falha de rede -- quem
+// digitou continua podendo preencher os campos de endereço manualmente.
+async function buscarEnderecoPorCep(cepId, estadoId, cidadeId, bairroId, ruaId) {
+    const cep = document.getElementById(cepId).value.replace(/\D/g, '');
+    if (cep.length !== 8) return;
+    try {
+        const resposta = await fetch(`https://viacep.com.br/ws/${cep}/json/`);
+        const dados = await resposta.json();
+        if (dados.erro) return;
+        if (estadoId && dados.uf) document.getElementById(estadoId).value = dados.uf;
+        if (cidadeId && dados.localidade) document.getElementById(cidadeId).value = dados.localidade;
+        if (bairroId && dados.bairro) document.getElementById(bairroId).value = dados.bairro;
+        if (ruaId && dados.logradouro) document.getElementById(ruaId).value = dados.logradouro;
+    } catch (erro) {
+        console.warn('Falha ao consultar CEP:', erro);
+    }
+}
+
+const UNIDADES_FEDERATIVAS = [
+    'AC', 'AL', 'AP', 'AM', 'BA', 'CE', 'DF', 'ES', 'GO', 'MA', 'MT', 'MS',
+    'MG', 'PA', 'PB', 'PR', 'PE', 'PI', 'RJ', 'RN', 'RS', 'RO', 'RR', 'SC',
+    'SP', 'SE', 'TO',
+];
 
 // Modal genérico (Fase 4 -- ajuste de inventário / histórico de
 // movimentações): injeta o HTML recebido dentro do container fixo
@@ -281,9 +393,6 @@ function checkAuth() {
                 if (!isAdmin && !inGerencia && !isDiretor && !isGerenteCompras) visivel = false;
             } else if (acao.includes("'compras'")) {
                 if (!isAdmin && !inGerencia && !isDiretor) visivel = false;
-            } else if (acao.includes("'solicitacoes'")) {
-                const isGerenteCompras = inCompras && cargo.includes('gerente');
-                if (!isAdmin && !isDiretor && !isGerenteCompras && !inCompras) visivel = false;
             } else if (acao.includes("'movimentacao'")) {
                 const isGerenteEstoque = inEstoque && cargo.includes('gerente');
                 if (!isAdmin && !isDiretor && !isGerenteEstoque && !inGerencia) visivel = false;
@@ -501,7 +610,7 @@ async function carregarEstoque() {
                 <div style="border:1px solid #fad7a0; border-radius:8px; padding:14px; background:#fffdf7;">
                     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; flex-wrap:wrap; gap:6px;">
                         <span style="font-weight:bold; color:#e67e22;">Pedido #${p.compra_id}</span>
-                        <span style="font-size:0.82rem; color:#888;">Entrada: ${new Date(p.data_entrada).toLocaleDateString()}</span>
+                        <span style="font-size:0.82rem; color:#888;">Entrada: ${formatarDataBrasil(p.data_entrada)}</span>
                     </div>
                     <div style="display:grid; grid-template-columns: 1fr 1fr; gap:10px; margin-bottom:12px;">
                         <div>
@@ -856,7 +965,7 @@ async function abrirHistoricoMovimentacoes(id) {
                         const unidade = m.unidade_medida || 'UN';
                         return `
                         <tr>
-                            <td>${new Date(m.data).toLocaleString()}</td>
+                            <td>${formatarDataHoraBrasil(m.data)}</td>
                             <td>${escapeHtml(LABEL_TIPO_MOVIMENTACAO[m.tipo] || m.tipo)}</td>
                             <td style="color:${positiva ? '#27ae60' : '#e74c3c'}; font-weight:bold;">${sinal}${formatarQuantidade(m.quantidade, unidade)} ${labelUnidade(unidade)}</td>
                             <td>${m.lote_id != null ? '#' + m.lote_id : '-'}</td>
@@ -890,7 +999,7 @@ async function carregarMovimentacao() {
                 <tbody>
                     ${logs.map(l => `
                         <tr>
-                            <td>${new Date(l.data_hora).toLocaleString()}</td>
+                            <td>${formatarDataHoraBrasil(l.data_hora)}</td>
                             <td>${l.funcionario_id}</td>
                             <td>${escapeHtml(l.tipo_movimentacao)}</td>
                         </tr>
@@ -1088,7 +1197,7 @@ async function carregarComprasDia() {
         <h2>Compras do Dia (Saídas)</h2>
         <div class="card" style="background: #fdfefe; border-left: 5px solid #34495e;">
             <h3>Resumo de Investimento</h3>
-            <p>Data: <strong>${new Date(res.data).toLocaleDateString()}</strong></p>
+            <p>Data: <strong>${formatarDataBrasil(res.data)}</strong></p>
             <p>Total Autorizado: <strong style="font-size: 1.5rem; color: #c0392b;">R$ ${res.total.toFixed(2)}</strong></p>
         </div>
     `;
@@ -1138,7 +1247,7 @@ async function carregarVendasDia() {
         <h2>Vendas do Dia</h2>
         <div class="card" style="background-color: #e8f8f5; border-left: 5px solid #2ecc71;">
             <h3>Resumo Financeiro</h3>
-            <p>Data: <strong>${new Date(vendasDia.data || vendasDia.dat).toLocaleDateString()}</strong></p>
+            <p>Data: <strong>${formatarDataBrasil(vendasDia.data || vendasDia.dat)}</strong></p>
             <p>Total Vendido: <strong style="font-size: 1.5rem; color: #27ae60;">R$ ${vendasDia.total_vendido.toFixed(2)}</strong></p>
         </div>
         <div class="card">
@@ -1149,7 +1258,7 @@ async function carregarVendasDia() {
                     ${vendasDia.lista.map(v => `
                         <tr>
                             <td>#${v.id}</td>
-                            <td>${new Date(v.data).toLocaleTimeString()}</td>
+                            <td>${formatarHoraBrasil(v.data)}</td>
                             <td>R$ ${v.valor_total.toFixed(2)}</td>
                             <td><button class="btn-danger" onclick="cancelarVenda(${v.id})">Cancelar Venda</button></td>
                         </tr>
@@ -1354,7 +1463,7 @@ function emitirNotaFiscal(venda, metodo, parcelas) {
     });
 
     const totalFinal = Number(venda.valor_total) || 0;
-    const dataVenda = venda.data ? new Date(venda.data).toLocaleString() : new Date().toLocaleString();
+    const dataVenda = venda.data ? formatarDataHoraBrasil(venda.data) : formatarDataHoraBrasil(new Date().toISOString());
 
     win.document.write(`
         <html>
@@ -1427,7 +1536,7 @@ async function carregarCompras(containerId = 'view-compras') {
                     ${(compras || []).map(c => `
                         <tr>
                             <td><button class="btn" style="padding:3px 8px; font-size:0.75rem; background:#8e44ad; color:#fff;" onclick="abrirDetalheCompra(${c.id})">🗒️ #${c.id}</button></td>
-                            <td>${new Date(c.data).toLocaleString()}</td>
+                            <td>${formatarDataHoraBrasil(c.data)}</td>
                             <td>${escapeHtml(c.solicitante) || '-'}</td>
                             <td>${escapeHtml(c.fornecedor) || '-'}</td>
                             <td>R$ ${c.valor_total.toFixed(2)}</td>
@@ -1644,8 +1753,8 @@ async function abrirDetalheCompra(id) {
             </div>
 
             <div style="display:flex; gap:20px; flex-wrap:wrap; margin-bottom:16px;">
-                <div class="ponto-stamp">Data:<br><strong>${c ? new Date(c.data).toLocaleDateString() : '-'}</strong></div>
-                <div class="ponto-stamp">Hora:<br><strong>${c ? new Date(c.data).toLocaleTimeString() : '-'}</strong></div>
+                <div class="ponto-stamp">Data:<br><strong>${c ? formatarDataBrasil(c.data) : '-'}</strong></div>
+                <div class="ponto-stamp">Hora:<br><strong>${c ? formatarHoraBrasil(c.data) : '-'}</strong></div>
                 <div class="ponto-stamp">Solicitante:<br><strong>${escapeHtml(c?.solicitante) || '-'}</strong></div>
                 <div class="ponto-stamp">Aprovador:<br><strong>${escapeHtml(c?.aprovador) || 'Aguardando'}</strong></div>
                 <div class="ponto-stamp">Fornecedor:<br><strong>${escapeHtml(c?.fornecedor) || '-'}</strong></div>
@@ -1917,7 +2026,28 @@ async function carregarFuncionarios() {
                     <input type="checkbox" id="func-bate-ponto" style="width: 20px; height: 20px;" checked>
                     <label for="func-bate-ponto" style="font-size: 0.9rem;">Bate Ponto</label>
                 </div>
-                <input class="form-control" type="number" id="func-salario" placeholder="Salário Mensal (R$)">
+
+                <label style="font-size:0.8rem; color: #666; display:block; margin-top:10px;">Documento e Contato:</label>
+                <input class="form-control" type="text" id="func-cpf" placeholder="CPF" maxlength="14" oninput="aplicarMascaraCpf('func-cpf')">
+                <input class="form-control" type="email" id="func-email" placeholder="Email">
+
+                <label style="font-size:0.8rem; color: #666; display:block; margin-top:10px;">Endereço:</label>
+                <input class="form-control" type="text" id="func-cep" placeholder="CEP" maxlength="9"
+                    oninput="aplicarMascaraCep('func-cep'); buscarEnderecoPorCep('func-cep','func-estado','func-cidade','func-bairro','func-rua')">
+                <select class="form-control" id="func-estado">
+                    <option value="">UF</option>
+                    ${UNIDADES_FEDERATIVAS.map(uf => `<option value="${uf}">${uf}</option>`).join('')}
+                </select>
+                <input class="form-control" type="text" id="func-cidade" placeholder="Cidade">
+                <input class="form-control" type="text" id="func-bairro" placeholder="Bairro">
+                <input class="form-control" type="text" id="func-rua" placeholder="Rua">
+                <input class="form-control" type="text" id="func-numero" placeholder="Número">
+
+                <label id="func-senha-label" style="font-size:0.8rem; color: #666; display:block; margin-top:10px;">Senha Inicial (temporária -- o funcionário troca no primeiro login):</label>
+                <input class="form-control" type="password" id="func-senha" placeholder="Senha inicial" autocomplete="new-password">
+
+                <label style="font-size:0.8rem; color: #666; display:block; margin-top:10px;">Remuneração:</label>
+                <input class="form-control" type="text" inputmode="numeric" id="func-salario" placeholder="Salário Mensal (R$)" oninput="aplicarMascaraMoeda('func-salario')">
             </div>
             <div id="func-btn-container">
                 <button class="btn-success" onclick="criarFuncionario()" id="btn-salvar-func">Cadastrar</button>
@@ -1967,8 +2097,8 @@ async function carregarFuncionarios() {
                         <tr>
                             <td>${formatarDataSimples(p.data)}</td>
                             <td>${escapeHtml(p.funcionario)}</td>
-                            <td>${p.entrada ? new Date(p.entrada).toLocaleTimeString() : '--'}</td>
-                            <td>${p.saida ? new Date(p.saida).toLocaleTimeString() : '--'}</td>
+                            <td>${formatarHoraBrasil(p.entrada)}</td>
+                            <td>${formatarHoraBrasil(p.saida)}</td>
                             <td>${formatarHorasRelogio(p.trabalhadas)}</td>
                             <td><span style="color: green">${p.extras > 0 ? '+' + formatarHorasRelogio(p.extras) : '00:00'}</span></td>
                             <td>
@@ -2003,8 +2133,21 @@ function prepararEdicaoFuncionario(id) {
     document.getElementById('func-admin').checked = f.is_admin;
     document.getElementById('func-bate-ponto').checked = f.bate_ponto;
 
+    document.getElementById('func-cpf').value = f.cpf || '';
+    document.getElementById('func-email').value = f.email || '';
+    document.getElementById('func-cep').value = f.cep || '';
+    document.getElementById('func-estado').value = f.estado || '';
+    document.getElementById('func-cidade').value = f.cidade || '';
+    document.getElementById('func-bairro').value = f.bairro || '';
+    document.getElementById('func-rua').value = f.rua || '';
+    document.getElementById('func-numero').value = f.numero || '';
+
     document.getElementById('func-salario').style.display = 'none';
-    
+    // Senha só é exigida na criação (ver repository.funcionarios.
+    // criar_funcionario) -- atualizar_funcionario nunca mexe nela.
+    document.getElementById('func-senha').style.display = 'none';
+    document.getElementById('func-senha-label').style.display = 'none';
+
     const btnContainer = document.getElementById('func-btn-container');
     btnContainer.innerHTML = `
         <button class="btn-success" onclick="criarFuncionario()">Salvar Alterações</button>
@@ -2023,8 +2166,19 @@ function cancelarEdicaoFuncionario() {
     document.getElementById('func-nasc').value = '';
     document.getElementById('func-salario').value = '';
     document.getElementById('func-salario').style.display = 'block';
+    document.getElementById('func-senha').value = '';
+    document.getElementById('func-senha').style.display = 'block';
+    document.getElementById('func-senha-label').style.display = 'block';
     document.getElementById('func-admin').checked = false;
-    
+    document.getElementById('func-cpf').value = '';
+    document.getElementById('func-email').value = '';
+    document.getElementById('func-cep').value = '';
+    document.getElementById('func-estado').value = '';
+    document.getElementById('func-cidade').value = '';
+    document.getElementById('func-bairro').value = '';
+    document.getElementById('func-rua').value = '';
+    document.getElementById('func-numero').value = '';
+
     const btnContainer = document.getElementById('func-btn-container');
     btnContainer.innerHTML = `<button class="btn-success" onclick="criarFuncionario()" id="btn-salvar-func">Cadastrar</button>`;
 }
@@ -2070,7 +2224,7 @@ async function abrirGerenciamentoSalario(id) {
             <div class="card" style="background: #f9f9f9; margin: 20px 0;">
                 <h4>Alterar Salário Atual</h4>
                 <div class="form-group" style="display: flex; gap: 10px;">
-                    <input type="number" id="novo-valor-salario" class="form-control" placeholder="Novo Salário Mensal (R$)">
+                    <input type="text" inputmode="numeric" id="novo-valor-salario" class="form-control" placeholder="Novo Salário Mensal (R$)" oninput="aplicarMascaraMoeda('novo-valor-salario')">
                     <button class="btn-success" onclick="confirmarAlteracaoSalario(${id})">Atualizar Salário</button>
                 </div>
             </div>
@@ -2083,7 +2237,7 @@ async function abrirGerenciamentoSalario(id) {
                 <tbody>
                     ${historico.length > 0 ? historico.map(h => `
                         <tr>
-                            <td>${new Date(h.data_alteracao).toLocaleString()}</td>
+                            <td>${formatarDataHoraBrasil(h.data_alteracao)}</td>
                             <td>R$ ${h.valor_antigo.toFixed(2)}</td>
                             <td><strong>R$ ${h.valor_novo.toFixed(2)}</strong></td>
                         </tr>
@@ -2096,14 +2250,14 @@ async function abrirGerenciamentoSalario(id) {
 
 async function confirmarAlteracaoSalario(id) {
     const nome = nomeFuncionarioCache(id);
-    const valor = document.getElementById('novo-valor-salario').value;
+    const valor = valorMoedaParaNumero('novo-valor-salario');
     if (!valor || valor <= 0) return alert("Insira um valor válido.");
 
-    if (!confirm(`Confirma a alteração do salário de ${nome} para R$ ${parseFloat(valor).toFixed(2)}?`)) return;
+    if (!confirm(`Confirma a alteração do salário de ${nome} para R$ ${valor.toFixed(2)}?`)) return;
 
     const res = await apiFetch('/funcionarios/definir-salario', {
         method: 'POST',
-        body: JSON.stringify({ funcionario_id: id, valor: parseFloat(valor) })
+        body: JSON.stringify({ funcionario_id: id, valor: valor })
     });
     if (res) {
         alert("Salário atualizado com sucesso!");
@@ -2126,8 +2280,6 @@ async function verRelatorioPontoIndividual(id) {
     const relatorio = await apiFetch(`/pontos/rh/funcionario/${id}?mes=${mes}&ano=${ano}`);
     
     if (!relatorio) return;
-
-    const formatarHora = (iso) => iso ? new Date(iso).toLocaleTimeString() : '--:--';
 
     let html = `
         <div class="card" style="border-top: 5px solid #3498db; animation: fadeIn 0.5s;">
@@ -2154,10 +2306,10 @@ async function verRelatorioPontoIndividual(id) {
                     ${(relatorio.pontos || []).map(p => `
                         <tr>
                             <td>${formatarDataSimples(p.data)}</td>
-                            <td>${formatarHora(p.entrada)}</td>
-                            <td>${formatarHora(p.saida_almoco)}</td>
-                            <td>${formatarHora(p.retorno_almoco)}</td>
-                            <td>${formatarHora(p.saida)}</td>
+                            <td>${formatarHoraBrasil(p.entrada)}</td>
+                            <td>${formatarHoraBrasil(p.saida_almoco)}</td>
+                            <td>${formatarHoraBrasil(p.retorno_almoco)}</td>
+                            <td>${formatarHoraBrasil(p.saida)}</td>
                             <td style="color: green">${p.horas_extras > 0 ? '+' + formatarHorasRelogio(p.horas_extras) : '00:00'}</td>
                             <td style="color: red">${p.horas_devidas > 0 ? '-' + formatarHorasRelogio(p.horas_devidas) : '00:00'}</td>
                             <td><strong>R$ ${p.valor_monetario.toFixed(2)}</strong></td>
@@ -2255,6 +2407,14 @@ async function criarFuncionario() {
         return;
     }
 
+    // Lido pelo VALOR numérico, não pela string crua -- "0" digitado vira
+    // a string mascarada "R$ 0,00" (truthy!), então checar a string em vez
+    // do número fazia valor_mensal=0 ser mandado pro backend, que rejeita
+    // (exige > 0 quando informado). Achado real do painel de revisão.
+    const salarioValor = document.getElementById('func-salario').value.trim()
+        ? valorMoedaParaNumero('func-salario')
+        : 0;
+
     const dados = {
         nome: document.getElementById('func-nome').value,
         sobrenome: document.getElementById('func-sobrenome').value,
@@ -2266,7 +2426,20 @@ async function criarFuncionario() {
         is_admin: document.getElementById('func-admin').checked,
         bate_ponto: document.getElementById('func-bate-ponto').checked,
         cargo_confianca: document.getElementById('func-cargo').value.includes('direto'),
-        valor_mensal: parseFloat(document.getElementById('func-salario').value) || 0
+        // null (não 0) quando o campo fica vazio OU o valor digitado é 0 --
+        // a API rejeita 0 como salário (valor_mensal exige > 0 quando
+        // informado; ver schemas.FuncionarioCreate), null é "não definir
+        // salário agora".
+        valor_mensal: salarioValor > 0 ? salarioValor : null,
+        cpf: document.getElementById('func-cpf').value,
+        email: document.getElementById('func-email').value,
+        cep: document.getElementById('func-cep').value,
+        estado: document.getElementById('func-estado').value,
+        cidade: document.getElementById('func-cidade').value,
+        bairro: document.getElementById('func-bairro').value,
+        rua: document.getElementById('func-rua').value,
+        numero: document.getElementById('func-numero').value,
+        senha: document.getElementById('func-senha').value,
     };
 
     let res;
@@ -2276,6 +2449,10 @@ async function criarFuncionario() {
             body: JSON.stringify(dados)
         });
     } else {
+        if (!dados.senha) {
+            alert("Defina uma senha inicial para o novo funcionário.");
+            return;
+        }
         res = await apiFetch('/funcionarios/criar', {
             method: 'POST',
             body: JSON.stringify(dados)
@@ -2323,23 +2500,21 @@ async function carregarPontos() {
     const userCargo = (localStorage.getItem('user_cargo') || "").toLowerCase();
     const isDiretoria = userCargo.includes('direto');
     const podeBaterPonto = !isDiretoria && !isAdmin;
-    const hojeStr = agora.toLocaleDateString();
+    const hojeStr = formatarDataBrasil(agora.toISOString());
 
     if (relatorio && relatorio.funcionario) {
         document.getElementById('sidebar-user-name').innerText = `Mercado 24h - ${relatorio.funcionario}`;
     }
 
-    const fH = (iso) => iso ? new Date(iso).toLocaleTimeString() : '--:--';
-
     let holeriteHtml = '<p>Nenhum holerite fechado para o mês anterior.</p>';
     if (holerite && holerite.id) {
         window._ultimoHolerite = holerite;
-        
+
         let btnAssinar = '';
         if (!holerite.assinado) {
             btnAssinar = `<button class="btn-success" onclick="assinarHolerite(${holerite.id})">Assinar Agora</button>`;
         } else {
-            const dA = new Date(holerite.data_assinatura).toLocaleDateString();
+            const dA = formatarDataBrasil(holerite.data_assinatura);
             btnAssinar = `<span style="color: #27ae60; font-weight: bold;">✓ Assinado em ${dA}</span>`;
         }
 
@@ -2366,10 +2541,10 @@ async function carregarPontos() {
         <h2>Ponto Eletrônico - ${escapeHtml(relatorio?.funcionario) || 'Carregando...'} - ${hojeStr}</h2>
         <div class="card" style="text-align: center;">
             <div class="form-group" style="display: flex; justify-content: center; gap: 20px; margin-bottom: 20px;">
-                <div class="ponto-stamp">Entrada:<br><strong>${fH(status?.entrada)}</strong></div>
-                <div class="ponto-stamp">Almoço:<br><strong>${fH(status?.saida_almoco)}</strong></div>
-                <div class="ponto-stamp">Retorno:<br><strong>${fH(status?.retorno_almoco)}</strong></div>
-                <div class="ponto-stamp">Saída:<br><strong>${fH(status?.saida)}</strong></div>
+                <div class="ponto-stamp">Entrada:<br><strong>${formatarHoraBrasil(status?.entrada)}</strong></div>
+                <div class="ponto-stamp">Almoço:<br><strong>${formatarHoraBrasil(status?.saida_almoco)}</strong></div>
+                <div class="ponto-stamp">Retorno:<br><strong>${formatarHoraBrasil(status?.retorno_almoco)}</strong></div>
+                <div class="ponto-stamp">Saída:<br><strong>${formatarHoraBrasil(status?.saida)}</strong></div>
             </div>
             
             <div style="margin: 20px 0;">
@@ -2394,10 +2569,10 @@ async function carregarPontos() {
                     ${(relatorio?.pontos || []).map(p => `
                     <tr>
                         <td>${formatarDataSimples(p.data)}</td>
-                        <td>${fH(p.entrada)}</td>
-                        <td>${fH(p.saida_almoco)}</td>
-                        <td>${fH(p.retorno_almoco)}</td>
-                        <td>${fH(p.saida)}</td>
+                        <td>${formatarHoraBrasil(p.entrada)}</td>
+                        <td>${formatarHoraBrasil(p.saida_almoco)}</td>
+                        <td>${formatarHoraBrasil(p.retorno_almoco)}</td>
+                        <td>${formatarHoraBrasil(p.saida)}</td>
                         <td style="color: green">${p.horas_extras > 0 ? '+' + formatarHorasRelogio(p.horas_extras) : '00:00'}</td>
                         <td style="color: red">${p.horas_devidas > 0 ? '-' + formatarHorasRelogio(p.horas_devidas) : '00:00'}</td>
                     </tr>`).join('')}
@@ -2473,7 +2648,7 @@ function gerarPDFHolerite(h) {
             </table>
             <h3 style="text-align: right;">VALOR LÍQUIDO: R$ ${h.valor_liquido.toFixed(2)}</h3>
             <div style="margin-top: 50px; border-top: 1px solid #000; text-align: center;">
-                <p>Emissão: ${new Date(h.data_emissao).toLocaleString()}</p>
+                <p>Emissão: ${formatarDataHoraBrasil(h.data_emissao)}</p>
                 ${h.assinado ? `<p style="color: green; font-weight: bold;">DOCUMENTO ASSINADO DIGITALMENTE PELO FUNCIONÁRIO</p>` : `<p style="color: red;">AGUARDANDO ASSINATURA</p>`}
             </div>
         </body>
@@ -2493,7 +2668,88 @@ async function baterPonto() {
 }
 
 async function carregarSolicitacoes() {
-    await carregarCompras('view-solicitacoes');
+    const container = document.getElementById('view-solicitacoes');
+    container.innerHTML = '<h3>Carregando...</h3>';
+
+    const lista = await apiFetch('/solicitacoes/listar');
+    if (!lista) return;
+
+    const isAdmin = localStorage.getItem('is_admin') === 'true';
+    const cargo = (localStorage.getItem('user_cargo') || '').toLowerCase();
+    const setor = (localStorage.getItem('user_setor') || '').toLowerCase();
+    const isDiretor = cargo.includes('direto');
+    const isGerenteCompras = setor.includes('compras') && cargo.includes('gerente');
+    const podeResponder = isAdmin || isDiretor || isGerenteCompras;
+
+    const corStatus = { pendente: '#f39c12', aprovada: '#27ae60', recusada: '#e74c3c' };
+    const labelStatus = { pendente: 'PENDENTE', aprovada: 'APROVADA', recusada: 'RECUSADA' };
+
+    window._solItens = {};
+    lista.forEach(s => { window._solItens[s.id] = s.itens; });
+
+    let html = '<h2>Solicitações de Compra</h2>';
+
+    html += `
+        <div class="card">
+            <h3>Nova Solicitação</h3>
+            <div class="form-group">
+                <label style="font-size:0.75rem; color:#666; display:block;">Título</label>
+                <input class="form-control" type="text" id="sol-titulo" placeholder="Ex: Material de limpeza">
+            </div>
+            <div class="form-group">
+                <label style="font-size:0.75rem; color:#666; display:block;">Descrição</label>
+                <textarea class="form-control" id="sol-descricao" placeholder="Explique o motivo do pedido"></textarea>
+            </div>
+            <div class="form-group">
+                <label style="font-size:0.75rem; color:#666; display:block;">Itens (um por linha)</label>
+                <textarea class="form-control" id="sol-itens" placeholder="- Detergente&#10;- Papel toalha"></textarea>
+            </div>
+            <button class="btn-success" onclick="enviarSolicitacao()">Enviar Solicitação</button>
+        </div>`;
+
+    html += `
+        <div class="card">
+            <h3>${podeResponder ? 'Todas as Solicitações' : 'Minhas Solicitações'}</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>ID</th><th>Data</th><th>Título</th><th>Solicitante</th>
+                        <th>Status</th><th>Resposta</th>${podeResponder ? '<th>Ações</th>' : ''}
+                    </tr>
+                </thead>
+                <tbody>
+                    ${lista.length === 0 ? `<tr><td colspan="${podeResponder ? 7 : 6}">Nenhuma solicitação encontrada.</td></tr>` : lista.map(s => `
+                        <tr>
+                            <td>#${s.id}</td>
+                            <td>${formatarDataHoraBrasil(s.data)}</td>
+                            <td>${escapeHtml(s.titulo)}</td>
+                            <td>${escapeHtml(s.solicitante)}</td>
+                            <td><span class="badge" style="background:${corStatus[s.status]}">${labelStatus[s.status]}</span></td>
+                            <td>${s.resposta ? escapeHtml(s.resposta) : '-'}</td>
+                            ${podeResponder ? `<td>${s.status === 'pendente' ? `
+                                <button class="btn" style="padding:3px 8px; font-size:0.75rem;" onclick="carregarInfoEstoqueSolicitacao(${s.id})">🔍 Estoque</button>
+                                <button class="btn-success" style="padding:3px 8px; font-size:0.75rem;" onclick="abrirRespostaSolicitacao(${s.id})">Responder</button>
+                            ` : '-'}</td>` : ''}
+                        </tr>
+                        <tr id="form-resposta-${s.id}" class="hidden">
+                            <td colspan="${podeResponder ? 7 : 6}">
+                                <div id="estoque-info-${s.id}" style="margin-bottom:8px;"></div>
+                                <p style="font-size:0.85rem; color:#666; white-space:pre-wrap;">${escapeHtml(s.descricao)}\n\n${escapeHtml(s.itens)}</p>
+                                <select class="form-control" id="sol-status-${s.id}" style="max-width:200px;">
+                                    <option value="aprovada">Aprovar</option>
+                                    <option value="recusada">Recusar</option>
+                                </select>
+                                <textarea class="form-control" id="sol-resposta-${s.id}" placeholder="Comentário da resposta"></textarea>
+                                <button class="btn-success" onclick="confirmarResposta(${s.id})">Confirmar</button>
+                                <button class="btn" onclick="fecharRespostaSolicitacao(${s.id})">Cancelar</button>
+                            </td>
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        </div>`;
+
+    container.innerHTML = html;
 }
 
 async function enviarSolicitacao() {
@@ -2661,7 +2917,7 @@ async function carregarComunicados() {
             <div style="display:flex; justify-content:space-between; align-items:flex-start;">
                 <div style="flex:1;">
                     <h4 style="margin:0 0 5px;">${escapeHtml(c.titulo)}</h4>
-                    <small style="color:#888;">De: <strong>${escapeHtml(c.autor)}</strong> &nbsp;|&nbsp; ${new Date(c.data_criacao).toLocaleString()} &nbsp;|&nbsp; ${c.para_todos ? 'Para todos' : 'Destinatário específico'}</small>
+                    <small style="color:#888;">De: <strong>${escapeHtml(c.autor)}</strong> &nbsp;|&nbsp; ${formatarDataHoraBrasil(c.data_criacao)} &nbsp;|&nbsp; ${c.para_todos ? 'Para todos' : 'Destinatário específico'}</small>
                     <p style="margin:12px 0 0; white-space:pre-wrap;">${escapeHtml(c.conteudo)}</p>
                 </div>
                 <div style="margin-left:15px; flex-shrink:0;">

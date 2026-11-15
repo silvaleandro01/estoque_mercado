@@ -257,6 +257,42 @@ class VendaInput(BaseModel):
     itens: List[ItemVendaSchema] = Field(..., min_length=1)
 
 
+# Status terminal de uma Solicitacao (ver utils.database.Solicitacao) -- só
+# os dois valores que `responder_solicitacao` de fato aceita como decisão;
+# "pendente" é só o estado inicial, nunca um valor de entrada válido aqui.
+StatusRespostaSolicitacao = Literal["aprovada", "recusada"]
+
+
+class SolicitacaoInput(BaseModel):
+    # max_length aqui segue o mesmo padrão já usado em
+    # AjusteInventarioInput.motivo -- achado do painel de revisão: eram
+    # campos de texto livre sem nenhum limite.
+    titulo: str = Field(..., max_length=255)
+    descricao: str = Field(..., max_length=2000)
+    itens: str = Field(..., max_length=2000)
+
+    @field_validator("titulo", "descricao", "itens")
+    @classmethod
+    def _campo_nao_vazio(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Campo obrigatório")
+        return v
+
+
+class SolicitacaoResposta(BaseModel):
+    status: StatusRespostaSolicitacao
+    resposta: str = Field(..., max_length=2000)
+
+    @field_validator("resposta")
+    @classmethod
+    def _resposta_nao_vazia(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Comentário da resposta é obrigatório")
+        return v
+
+
 class TrocarSenhaRequest(BaseModel):
     senha_atual: str
     nova_senha: str
