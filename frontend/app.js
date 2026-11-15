@@ -18,9 +18,20 @@ function _comoInstanteUtc(iso) {
     return /[zZ]$|[+-]\d{2}:\d{2}$/.test(iso) ? iso : `${iso}Z`;
 }
 
+// Campo só de DATA (ex.: "2026-11-14", sem hora -- vendas_do_dia/
+// compras_do_dia mandam assim) não representa um instante UTC, é só o dia
+// civil, sem fuso nenhum envolvido. Tratar isso como instante e converter
+// UTC->Brasília desloca pro dia ANTERIOR (meia-noite UTC = 21h do dia
+// anterior em UTC-3) -- achado real do /code-review nesta sessão. Formata
+// direto da string, sem criar Date nem mexer em fuso.
+function _formatarSoData(iso) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+    return m ? `${m[3]}/${m[2]}/${m[1]}` : null;
+}
+
 function formatarDataBrasil(iso) {
     if (!iso) return '--';
-    return new Date(_comoInstanteUtc(iso)).toLocaleDateString('pt-BR', { timeZone: FUSO_BRASIL });
+    return _formatarSoData(iso) || new Date(_comoInstanteUtc(iso)).toLocaleDateString('pt-BR', { timeZone: FUSO_BRASIL });
 }
 
 function formatarHoraBrasil(iso) {
@@ -30,6 +41,8 @@ function formatarHoraBrasil(iso) {
 
 function formatarDataHoraBrasil(iso) {
     if (!iso) return '--';
+    const soData = _formatarSoData(iso);
+    if (soData) return soData;
     return new Date(_comoInstanteUtc(iso)).toLocaleString('pt-BR', { timeZone: FUSO_BRASIL });
 }
 
@@ -2394,7 +2407,13 @@ async function criarFuncionario() {
         return;
     }
 
-    const salarioDigitado = document.getElementById('func-salario').value.trim();
+    // Lido pelo VALOR numérico, não pela string crua -- "0" digitado vira
+    // a string mascarada "R$ 0,00" (truthy!), então checar a string em vez
+    // do número fazia valor_mensal=0 ser mandado pro backend, que rejeita
+    // (exige > 0 quando informado). Achado real do painel de revisão.
+    const salarioValor = document.getElementById('func-salario').value.trim()
+        ? valorMoedaParaNumero('func-salario')
+        : 0;
 
     const dados = {
         nome: document.getElementById('func-nome').value,
@@ -2407,10 +2426,11 @@ async function criarFuncionario() {
         is_admin: document.getElementById('func-admin').checked,
         bate_ponto: document.getElementById('func-bate-ponto').checked,
         cargo_confianca: document.getElementById('func-cargo').value.includes('direto'),
-        // null (não 0) quando o campo fica vazio -- a API rejeita 0 como
-        // salário (valor_mensal exige > 0 quando informado; ver
-        // schemas.FuncionarioCreate), null é "não definir salário agora".
-        valor_mensal: salarioDigitado ? valorMoedaParaNumero('func-salario') : null,
+        // null (não 0) quando o campo fica vazio OU o valor digitado é 0 --
+        // a API rejeita 0 como salário (valor_mensal exige > 0 quando
+        // informado; ver schemas.FuncionarioCreate), null é "não definir
+        // salário agora".
+        valor_mensal: salarioValor > 0 ? salarioValor : null,
         cpf: document.getElementById('func-cpf').value,
         email: document.getElementById('func-email').value,
         cep: document.getElementById('func-cep').value,

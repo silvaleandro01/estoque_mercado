@@ -264,9 +264,12 @@ StatusRespostaSolicitacao = Literal["aprovada", "recusada"]
 
 
 class SolicitacaoInput(BaseModel):
-    titulo: str
-    descricao: str
-    itens: str
+    # max_length aqui segue o mesmo padrão já usado em
+    # AjusteInventarioInput.motivo -- achado do painel de revisão: eram
+    # campos de texto livre sem nenhum limite.
+    titulo: str = Field(..., max_length=255)
+    descricao: str = Field(..., max_length=2000)
+    itens: str = Field(..., max_length=2000)
 
     @field_validator("titulo", "descricao", "itens")
     @classmethod
@@ -279,7 +282,7 @@ class SolicitacaoInput(BaseModel):
 
 class SolicitacaoResposta(BaseModel):
     status: StatusRespostaSolicitacao
-    resposta: str
+    resposta: str = Field(..., max_length=2000)
 
     @field_validator("resposta")
     @classmethod

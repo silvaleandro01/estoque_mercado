@@ -187,3 +187,17 @@ def test_solicitacao_input_rejeita_titulo_vazio():
 def test_solicitacao_resposta_rejeita_comentario_vazio():
     with pytest.raises(ValueError):
         SolicitacaoResposta(status="aprovada", resposta="   ")
+
+
+def test_solicitacao_resposta_rejeita_status_fora_do_literal():
+    with pytest.raises(ValueError):
+        SolicitacaoResposta(status="pendente", resposta="ok")
+    with pytest.raises(ValueError):
+        SolicitacaoResposta(status="qualquer_coisa", resposta="ok")
+
+
+def test_solicitacao_input_rejeita_campos_acima_do_limite():
+    with pytest.raises(ValueError):
+        SolicitacaoInput(titulo="x" * 256, descricao="desc", itens="item")
+    with pytest.raises(ValueError):
+        SolicitacaoInput(titulo="titulo", descricao="x" * 2001, itens="item")

@@ -178,6 +178,12 @@ def cancelar_venda(venda_id: int, funcionario_id: int):
 
         itens = session.exec(select(ItemVenda).where(ItemVenda.venda_id == venda_id)).all()
         itens_ordenados = sorted(itens, key=lambda item: item.codigodebarras)
+        # Achado do painel de revisão: produto excluído depois da venda faz
+        # a devolução daquele item específico ser pulada (ver abaixo) -- sem
+        # rastrear isso, a mensagem de retorno afirmava "estoque devolvido"
+        # mesmo quando a devolução foi só parcial, escondendo a
+        # inconsistência de quem cancelou a venda.
+        codigos_nao_devolvidos = []
 
         try:
             for item in itens_ordenados:
@@ -190,6 +196,7 @@ def cancelar_venda(venda_id: int, funcionario_id: int):
                     # repository/estoque.py::deletar_estoque). A venda ainda
                     # é cancelada normalmente; só esta devolução de item é
                     # pulada.
+                    codigos_nao_devolvidos.append(item.codigodebarras)
                     continue
 
                 produto.quantidade = arredondar_quantidade(produto.quantidade + item.quantidade)
@@ -210,9 +217,6 @@ def cancelar_venda(venda_id: int, funcionario_id: int):
         except OperationalError as exc:
             session.rollback()
             tratar_operational_error(exc, "Não foi possível cancelar a venda, tente novamente")
-        except HTTPException:
-            session.rollback()
-            raise
         except Exception:
             session.rollback()
             raise HTTPException(status_code=500, detail="Erro ao cancelar venda")
@@ -220,34 +224,27 @@ def cancelar_venda(venda_id: int, funcionario_id: int):
         session.refresh(venda)
 
     criar_log(funcionario_id, f"Venda cancelada: #{venda_id}")
+    if codigos_nao_devolvidos:
+        detalhe = ", ".join(codigos_nao_devolvidos)
+        return {
+            "msg": (
+                f"Venda #{venda_id} cancelada. Estoque devolvido parcialmente -- "
+                f"produto(s) excluído(s) do cadastro não puderam receber a devolução: {detalhe}"
+            ),
+        }
     return {"msg": f"Venda #{venda_id} cancelada, estoque devolvido"}
 
 
-def _stats_do_periodo(session: Session, inicio, fim) -> dict:
-    # Venda cancelada não é faturamento real -- mesmo filtro de
-    # vendas_do_dia.
-    vendas = session.exec(
-        select(Venda).where(Venda.data >= inicio, Venda.data < fim, Venda.status == "concluida")
-    ).all()
+def _resumo_periodo(vendas, compras, despesas) -> dict:
     faturamento = arredondar(sum((v.valor_total for v in vendas), Decimal("0.00")))
-
-    # Só conta como investimento o que já foi efetivamente autorizado --
-    # mesmo filtro de status usado em compras_do_dia.
-    compras = session.exec(
-        select(Compra).where(Compra.status == "autorizada", Compra.data >= inicio, Compra.data < fim)
-    ).all()
     investimento = arredondar(sum((c.valor_total for c in compras), Decimal("0.00")))
-
-    despesas_periodo = session.exec(select(Despesa).where(Despesa.data >= inicio, Despesa.data < fim)).all()
-    despesas = arredondar(sum((d.valor for d in despesas_periodo), Decimal("0.00")))
-
-    lucro_liquido = arredondar(faturamento - investimento - despesas)
-
+    total_despesas = arredondar(sum((d.valor for d in despesas), Decimal("0.00")))
+    lucro_liquido = arredondar(faturamento - investimento - total_despesas)
     return {
         "vendas_count": len(vendas),
         "faturamento": faturamento,
         "investimento": investimento,
-        "despesas": despesas,
+        "despesas": total_despesas,
         "lucro_liquido": lucro_liquido,
     }
 
@@ -255,7 +252,16 @@ def _stats_do_periodo(session: Session, inicio, fim) -> dict:
 def dashboard_stats():
     """Agrega vendas, compras autorizadas e despesas em janelas de período
     (diário = dia civil em Brasília; as demais, rolantes a partir de agora --
-    ver limites_dos_ultimos_dias) para o Dashboard Executivo."""
+    ver limites_dos_ultimos_dias) para o Dashboard Executivo.
+
+    Achado do painel de revisão: calcular cada janela com sua própria query
+    custava 21 SELECTs (7 janelas x 3 tabelas), escalando com o número de
+    janelas em vez do volume de dados -- toda janela menor já é um
+    subconjunto da mais larga ("anual"). Busca cada tabela UMA ÚNICA VEZ na
+    união de todas as janelas (do início da mais antiga ao fim da mais
+    recente) e filtra/soma em Python por janela -- 3 SELECTs no total,
+    mesmo resultado.
+    """
     with Session(engine) as session:
         janelas = {
             "diario": limites_do_dia_brasil(),
@@ -266,7 +272,41 @@ def dashboard_stats():
             "semestral": limites_dos_ultimos_dias(180),
             "anual": limites_dos_ultimos_dias(365),
         }
+        inicio_mais_largo = min(inicio for inicio, _ in janelas.values())
+        fim_mais_largo = max(fim for _, fim in janelas.values())
+
+        # Venda cancelada não é faturamento real -- mesmo filtro de
+        # vendas_do_dia. Compra só conta como investimento se já autorizada
+        # -- mesmo filtro de compras_do_dia.
+        todas_vendas = session.exec(
+            select(Venda).where(
+                Venda.data >= inicio_mais_largo, Venda.data < fim_mais_largo,
+                Venda.status == "concluida",
+            )
+        ).all()
+        todas_compras = session.exec(
+            select(Compra).where(
+                Compra.status == "autorizada",
+                Compra.data >= inicio_mais_largo, Compra.data < fim_mais_largo,
+            )
+        ).all()
+        todas_despesas = session.exec(
+            select(Despesa).where(Despesa.data >= inicio_mais_largo, Despesa.data < fim_mais_largo)
+        ).all()
+
+        # SQLAlchemy/SQLite (e MySQL, sem DateTime(timezone=True)) perdem o
+        # tzinfo no vai-e-volta pelo banco -- `v.data`/`c.data`/`d.data` vêm
+        # NAIVE (sem fuso), embora sempre UTC por convenção (mesmo problema
+        # já documentado nas funções de fuso do frontend). `inicio`/`fim`
+        # são timezone-AWARE (UTC) -- comparar aware com naive direto
+        # levanta TypeError em Python (SQL não tem esse problema, só o
+        # filtro em memória abaixo). Remove o tzinfo pra comparar como o
+        # mesmo "relógio" naive-UTC que o banco devolve.
         return {
-            chave: _stats_do_periodo(session, inicio, fim)
+            chave: _resumo_periodo(
+                [v for v in todas_vendas if inicio.replace(tzinfo=None) <= v.data < fim.replace(tzinfo=None)],
+                [c for c in todas_compras if inicio.replace(tzinfo=None) <= c.data < fim.replace(tzinfo=None)],
+                [d for d in todas_despesas if inicio.replace(tzinfo=None) <= d.data < fim.replace(tzinfo=None)],
+            )
             for chave, (inicio, fim) in janelas.items()
         }

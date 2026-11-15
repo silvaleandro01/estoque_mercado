@@ -741,7 +741,12 @@ def test_cancelar_venda_produto_deletado_nao_quebra(engine, session):
 
     resultado = cancelar_venda(venda.id, func.id)
 
+    # Achado do painel de revisão: a mensagem precisa avisar que a devolução
+    # foi parcial (produto excluído), não afirmar "estoque devolvido" sem
+    # ressalva quando algum item ficou de fora.
     assert resultado["msg"].startswith(f"Venda #{venda.id}")
+    assert "parcialmente" in resultado["msg"]
+    assert "CANC006" in resultado["msg"]
     with Session(engine) as s:
         v = s.get(Venda, venda.id)
     assert v.status == "cancelada"

@@ -846,7 +846,7 @@ BEGIN
 END$$
 DELIMITER ;
 
-CALL `_add_column_if_not_exists`('venda', 'status', "VARCHAR(20) NOT NULL DEFAULT 'concluida'");
+CALL `_add_column_if_not_exists`('venda', 'status', "VARCHAR(50) NOT NULL DEFAULT 'concluida'");
 CALL `_add_column_if_not_exists`('venda', 'cancelada_em', 'DATETIME NULL');
 CALL `_add_column_if_not_exists`('venda', 'cancelada_por_id', 'INT NULL');
 
@@ -928,7 +928,7 @@ CREATE TABLE IF NOT EXISTS `solicitacao` (
     -- pendente | aprovada | recusada -- mesmo padrão já usado para
     -- `venda.status`/`compra.status`: valor fixo validado na camada da
     -- aplicação, coluna um VARCHAR simples, sem ENUM do MySQL.
-    status VARCHAR(20) NOT NULL DEFAULT 'pendente',
+    status VARCHAR(50) NOT NULL DEFAULT 'pendente',
     resposta TEXT NULL,
     respondido_por_id INT NULL,
     respondido_em DATETIME NULL,
