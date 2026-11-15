@@ -257,6 +257,39 @@ class VendaInput(BaseModel):
     itens: List[ItemVendaSchema] = Field(..., min_length=1)
 
 
+# Status terminal de uma Solicitacao (ver utils.database.Solicitacao) -- só
+# os dois valores que `responder_solicitacao` de fato aceita como decisão;
+# "pendente" é só o estado inicial, nunca um valor de entrada válido aqui.
+StatusRespostaSolicitacao = Literal["aprovada", "recusada"]
+
+
+class SolicitacaoInput(BaseModel):
+    titulo: str
+    descricao: str
+    itens: str
+
+    @field_validator("titulo", "descricao", "itens")
+    @classmethod
+    def _campo_nao_vazio(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Campo obrigatório")
+        return v
+
+
+class SolicitacaoResposta(BaseModel):
+    status: StatusRespostaSolicitacao
+    resposta: str
+
+    @field_validator("resposta")
+    @classmethod
+    def _resposta_nao_vazia(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Comentário da resposta é obrigatório")
+        return v
+
+
 class TrocarSenhaRequest(BaseModel):
     senha_atual: str
     nova_senha: str

@@ -11,6 +11,7 @@ from repository.pontos import (
     _calcular_horas_dia, _proximo_marco,
 )
 from utils.database import Ponto, Salario
+from utils.timezone import hoje_brasil
 from conftest import make_setor, make_funcionario, set_token
 
 
@@ -262,7 +263,9 @@ def test_ponto_unique_constraint_impede_duplicata(engine, session):
     Ponto pro mesmo funcionário/dia inflariam horas em relatório/folha."""
     setor = make_setor(session, tipo="estoque_pt_uq")
     f = make_funcionario(session, setor_id=setor.id)
-    hoje = date.today()
+    # hoje_brasil() (não date.today()) -- precisa bater com o "hoje" que
+    # bater_ponto/status_hoje calculam de verdade (ver repository/pontos.py).
+    hoje = hoje_brasil()
     make_ponto(session, f.id, hoje, entrada=datetime.now(timezone.utc))
 
     duplicata = Ponto(funcionario_id=f.id, data=hoje, entrada=datetime.now(timezone.utc))
@@ -281,7 +284,7 @@ def test_bater_ponto_corrida_concorrente_vira_409(engine, session, monkeypatch):
     claro, não deixar o IntegrityError escapar cru como 500."""
     setor = make_setor(session, tipo="estoque_pt_race")
     f = make_funcionario(session, setor_id=setor.id)
-    hoje = date.today()
+    hoje = hoje_brasil()
     # "Outra requisição" que já criou o Ponto de hoje antes desta chamada
     # tentar inserir o dela.
     make_ponto(session, f.id, hoje, entrada=datetime.now(timezone.utc))
@@ -303,3 +306,38 @@ def test_bater_ponto_corrida_concorrente_vira_409(engine, session, monkeypatch):
     with pytest.raises(HTTPException) as exc:
         bater_ponto(f.id)
     assert exc.value.status_code == 409
+
+
+# ── fuso horário (achado real: bater_ponto/status_hoje usavam date.today(),
+# não hoje_brasil()) ─────────────────────────────────────────────────────────
+
+def test_bater_ponto_usa_fuso_brasil_nao_utc(engine, session, monkeypatch):
+    """Mesmo cenário documentado em utils/timezone.py e já coberto para
+    vendas_do_dia (ver test_vendas_do_dia_usa_fuso_brasil_nao_utc): 21h30 em
+    Brasília já é 00h30 UTC do dia seguinte. bater_ponto/status_hoje
+    calculavam "hoje" com date.today() (fuso do SISTEMA do servidor) em vez
+    de hoje_brasil() -- num servidor configurado em UTC, bater o ponto nesse
+    horário gravava a entrada contra o dia ERRADO (amanhã, não hoje)."""
+    import utils.timezone as tz_mod
+
+    # 21h30 em Brasília do dia 15/06/2026 == 00h30 UTC do dia 16/06/2026.
+    agora_utc = datetime(2026, 6, 16, 0, 30, tzinfo=timezone.utc)
+
+    class DataHoraFixa(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return agora_utc if tz is None else agora_utc.astimezone(tz)
+
+    monkeypatch.setattr(tz_mod, "datetime", DataHoraFixa)
+
+    setor = make_setor(session, tipo="estoque_pt_fuso")
+    f = make_funcionario(session, setor_id=setor.id)
+
+    bater_ponto(f.id)
+
+    with Session(engine) as s:
+        ponto = s.exec(select(Ponto).where(Ponto.funcionario_id == f.id)).first()
+    assert ponto.data == date(2026, 6, 15)
+
+    status = status_hoje(f.id)
+    assert status.data == date(2026, 6, 15)

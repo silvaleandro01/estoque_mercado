@@ -6,6 +6,7 @@ from sqlmodel import Session, select
 
 from utils.database import Ponto, Salario, Funcionario, engine
 from utils.money import arredondar
+from utils.timezone import hoje_brasil, FUSO_BRASIL
 from logs.logs import criar_log
 from schemas.schemas import PontoRelatorioOut, PontoResumoOut, PontoDiaOut, PontoGeralItemOut
 
@@ -77,7 +78,12 @@ def _valor_hora(session: Session, funcionario_id: int) -> Decimal:
 
 
 def bater_ponto(funcionario_id: int) -> dict:
-    hoje = date.today()
+    # hoje_brasil() (não date.today()) -- mesmo motivo documentado em
+    # utils/timezone.py e já aplicado em repository/lotes.py: date.today()
+    # usa o fuso do SISTEMA do servidor, não o de Brasília/Teresina. Num
+    # servidor configurado em UTC, perto da meia-noite em Brasília (UTC-3)
+    # já seria "amanhã" em UTC, registrando o ponto contra o dia errado.
+    hoje = hoje_brasil()
     with Session(engine) as session:
         ponto = session.exec(
             select(Ponto).where(Ponto.funcionario_id == funcionario_id, Ponto.data == hoje)
@@ -116,12 +122,16 @@ def bater_ponto(funcionario_id: int) -> dict:
             session.rollback()
             raise HTTPException(status_code=500, detail="Erro ao registrar ponto")
 
-    criar_log(funcionario_id, f"Ponto registrado: {marco} às {agora.strftime('%H:%M')}")
-    return {"detail": f"Ponto registrado -- {_ROTULO_MARCO[marco]} às {agora.strftime('%H:%M')}"}
+    # `agora` é UTC (gravado assim no banco, convenção do projeto) -- a
+    # mensagem pro funcionário precisa mostrar o horário local de Brasília,
+    # não o horário UTC cru (3h adiantado).
+    hora_local = agora.astimezone(FUSO_BRASIL).strftime('%H:%M')
+    criar_log(funcionario_id, f"Ponto registrado: {marco} às {hora_local}")
+    return {"detail": f"Ponto registrado -- {_ROTULO_MARCO[marco]} às {hora_local}"}
 
 
 def status_hoje(funcionario_id: int) -> Ponto:
-    hoje = date.today()
+    hoje = hoje_brasil()
     with Session(engine) as session:
         ponto = session.exec(
             select(Ponto).where(Ponto.funcionario_id == funcionario_id, Ponto.data == hoje)

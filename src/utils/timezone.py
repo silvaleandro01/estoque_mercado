@@ -39,3 +39,15 @@ def limites_do_dia_brasil(dia: Optional[date] = None) -> Tuple[datetime, datetim
     inicio_local = datetime.combine(dia, time.min, tzinfo=FUSO_BRASIL)
     fim_local = inicio_local + timedelta(days=1)
     return inicio_local.astimezone(timezone.utc), fim_local.astimezone(timezone.utc)
+
+
+def limites_dos_ultimos_dias(dias: int) -> Tuple[datetime, datetime]:
+    """
+    Retorna o intervalo [inicio, fim) em UTC cobrindo os últimos `dias` dias
+    corridos até o instante atual (janela móvel, não alinhada ao dia civil
+    como `limites_do_dia_brasil` -- usada pelos relatórios que agregam por
+    período rolante, ex.: dashboard executivo).
+    """
+    fim_local = agora_brasil()
+    inicio_local = fim_local - timedelta(days=dias)
+    return inicio_local.astimezone(timezone.utc), fim_local.astimezone(timezone.utc)

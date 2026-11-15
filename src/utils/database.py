@@ -272,6 +272,18 @@ class Venda(SQLModel, table=True):
     data: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
     valor_total: DecimalMoeda = Field(default=Decimal("0.00"), max_digits=10, decimal_places=2)
     funcionario_id: int = Field(foreign_key="funcionario.id", index=True)
+    # Cancelamento de venda (Fase 8 -- ver docstring de MovimentacaoEstoque,
+    # que já reservava CANCELAMENTO_VENDA no enum para quando esta fase
+    # chegasse). "concluida" é o estado normal de toda venda criada por
+    # criar_venda; "cancelada" é terminal (repository/vendas.py::
+    # cancelar_venda não permite cancelar uma venda já cancelada).
+    status: str = Field(default="concluida", index=True)
+    cancelada_em: Optional[datetime] = Field(default=None)
+    # Mesmo padrão de auditoria "SET NULL" já usado em
+    # MovimentacaoEstoque.funcionario_id e Compra.aprovador_id: preserva o
+    # registro de cancelamento mesmo se o funcionário que cancelou sair da
+    # empresa depois, só perdendo a referência de quem foi.
+    cancelada_por_id: Optional[int] = Field(default=None, foreign_key="funcionario.id", ondelete="SET NULL")
 
 
 class ItemVenda(SQLModel, table=True):
@@ -344,6 +356,39 @@ class ItemCompra(SQLModel, table=True):
     preco_custo_unitario: DecimalMoeda = Field(max_digits=10, decimal_places=2)
     preco_custo_total: DecimalMoeda = Field(max_digits=10, decimal_places=2)
     lancado_em: Optional[datetime] = Field(default=None)
+
+
+class Solicitacao(SQLModel, table=True):
+    """Solicitação de compra em texto livre (diferente de `Compra`, que já é
+    um pedido formal com itens estruturados ligados a produtos do estoque).
+    Qualquer funcionário pode abrir uma -- "preciso comprar X" -- sem
+    precisar que os itens já estejam cadastrados no estoque; quem responde
+    (gerente do setor compras, diretoria ou admin, ver
+    services/auth.py::exigir_responder_solicitacao) decide se aprova ou
+    recusa, com um comentário. Não vira automaticamente uma `Compra` -- é só
+    um canal de pedido/triagem anterior a isso.
+
+    `status` segue o mesmo padrão já usado em `Venda.status`/`Compra.status`:
+    "pendente" (estado inicial) -> "aprovada" ou "recusada" (terminal, não é
+    possível responder de novo -- ver repository/solicitacoes.py::
+    responder_solicitacao)."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    titulo: str
+    descricao: str
+    # Texto livre, uma linha por item -- ver carregarInfoEstoqueSolicitacao
+    # em frontend/app.js, que tenta casar cada linha com produtos já
+    # cadastrados no estoque só para ajudar quem responde, sem validação
+    # nenhuma contra o cadastro real.
+    itens: str
+    solicitante_id: int = Field(foreign_key="funcionario.id", index=True)
+    status: str = Field(default="pendente", index=True)
+    resposta: Optional[str] = Field(default=None)
+    # Mesmo padrão de auditoria "SET NULL" já usado em Venda.cancelada_por_id/
+    # Compra.aprovador_id: preserva o registro de quem respondeu mesmo que
+    # esse funcionário saia da empresa depois.
+    respondido_por_id: Optional[int] = Field(default=None, foreign_key="funcionario.id", ondelete="SET NULL")
+    respondido_em: Optional[datetime] = Field(default=None)
+    data: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), index=True)
 
 
 class Ponto(SQLModel, table=True):

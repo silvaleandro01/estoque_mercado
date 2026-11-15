@@ -5,10 +5,11 @@ from fastapi import HTTPException
 from unittest.mock import patch
 from sqlmodel import Session, select
 
-from repository.vendas import criar_venda, vendas_do_dia, listar_vendas
+from repository.vendas import criar_venda, vendas_do_dia, listar_vendas, dashboard_stats, cancelar_venda
+from services.auth import exigir_ver_dashboard, exigir_gerenciar_venda
 from schemas.schemas import VendaInput, ItemVendaSchema
-from utils.database import Venda, ItemVenda
-from conftest import make_setor, make_funcionario, make_produto
+from utils.database import Venda, ItemVenda, Despesa, Estoque, MovimentacaoEstoque
+from conftest import make_setor, make_funcionario, make_produto, make_compra
 
 
 def _input(itens):
@@ -456,3 +457,317 @@ def test_criar_venda_produto_kg_continua_aceitando_quantidade_fracionaria(engine
     make_produto(session, codigo="UNFRAC002", qtd=Decimal("10.000"), preco=5.0, unidade="KG")
     venda = criar_venda(_input([("UNFRAC002", Decimal("1.5"))]), func.id)
     assert venda.valor_total == Decimal("7.50")
+
+
+# ── exigir_ver_dashboard ────────────────────────────────────────────────────
+# Mesmo gate usado pelo frontend para exibir o item "Dashboard" no menu (ver
+# checkAuth em frontend/app.js): só admin ou diretoria.
+
+def test_exigir_ver_dashboard_admin(engine, session):
+    setor = make_setor(session, tipo="dash_perm1")
+    admin = make_funcionario(session, setor_id=setor.id, is_admin=True)
+    assert exigir_ver_dashboard(admin) is True
+
+
+def test_exigir_ver_dashboard_diretoria(engine, session):
+    setor = make_setor(session, tipo="dash_perm2")
+    diretor = make_funcionario(session, setor_id=setor.id, cargo="diretoria")
+    assert exigir_ver_dashboard(diretor) is True
+
+
+def test_exigir_ver_dashboard_outros_cargos_nega(engine, session):
+    setor = make_setor(session, tipo="dash_perm3")
+    gerente = make_funcionario(session, setor_id=setor.id, cargo="gerente")
+    with pytest.raises(HTTPException) as exc:
+        exigir_ver_dashboard(gerente)
+    assert exc.value.status_code == 403
+
+
+# ── vendas_do_dia: lista ─────────────────────────────────────────────────────
+# O frontend (carregarVendasDia em frontend/app.js) renderiza a tabela de
+# vendas do dia a partir de `vendasDia.lista` -- sem esse campo, a tela
+# quebra mesmo com `total_vendido` correto.
+
+def test_vendas_do_dia_lista_vazia_sem_vendas(engine, session):
+    resultado = vendas_do_dia()
+    assert resultado["lista"] == []
+
+
+def test_vendas_do_dia_lista_contem_venda_do_dia(engine, session):
+    setor = make_setor(session, tipo="dia_lista1")
+    func = make_funcionario(session, setor_id=setor.id)
+    make_produto(session, codigo="DL100", qtd=10, preco=12.0)
+    venda = criar_venda(_input([("DL100", 2)]), func.id)
+    resultado = vendas_do_dia()
+    assert len(resultado["lista"]) == 1
+    item = resultado["lista"][0]
+    assert item["id"] == venda.id
+    assert item["valor_total"] == Decimal("24.00")
+
+
+def test_vendas_do_dia_lista_nao_inclui_venda_de_ontem(engine, session):
+    setor = make_setor(session, tipo="dia_lista2")
+    func = make_funcionario(session, setor_id=setor.id)
+    venda_ontem = Venda(
+        funcionario_id=func.id, valor_total=Decimal("50.00"),
+        data=datetime.now(timezone.utc) - timedelta(days=1),
+    )
+    session.add(venda_ontem)
+    session.commit()
+    resultado = vendas_do_dia()
+    assert resultado["lista"] == []
+
+
+def test_vendas_do_dia_lista_ordenada_mais_recente_primeiro(engine, session):
+    setor = make_setor(session, tipo="dia_lista3")
+    func = make_funcionario(session, setor_id=setor.id)
+    make_produto(session, codigo="DL101", qtd=10, preco=10.0)
+    v1 = criar_venda(_input([("DL101", 1)]), func.id)
+    v2 = criar_venda(_input([("DL101", 1)]), func.id)
+    resultado = vendas_do_dia()
+    assert [item["id"] for item in resultado["lista"]] == [v2.id, v1.id]
+
+
+# ── dashboard_stats ──────────────────────────────────────────────────────────
+
+def test_dashboard_stats_sem_dados_retorna_zero_em_todos_periodos(engine, session):
+    stats = dashboard_stats()
+    for chave in ("diario", "semanal", "mensal", "bimestral", "trimestral", "semestral", "anual"):
+        assert stats[chave]["vendas_count"] == 0
+        assert stats[chave]["faturamento"] == 0
+        assert stats[chave]["investimento"] == 0
+        assert stats[chave]["despesas"] == 0
+        assert stats[chave]["lucro_liquido"] == 0
+
+
+def test_dashboard_stats_conta_venda_de_hoje_em_todos_os_periodos(engine, session):
+    setor = make_setor(session, tipo="dash_v1")
+    func = make_funcionario(session, setor_id=setor.id)
+    make_produto(session, codigo="DASH001", qtd=10, preco=100.0)
+    criar_venda(_input([("DASH001", 1)]), func.id)
+    stats = dashboard_stats()
+    for chave in ("diario", "semanal", "mensal", "bimestral", "trimestral", "semestral", "anual"):
+        assert stats[chave]["vendas_count"] == 1
+        assert stats[chave]["faturamento"] == Decimal("100.00")
+
+
+def test_dashboard_stats_venda_fora_da_janela_semanal_nao_entra(engine, session):
+    setor = make_setor(session, tipo="dash_v2")
+    func = make_funcionario(session, setor_id=setor.id)
+    venda_antiga = Venda(
+        funcionario_id=func.id, valor_total=Decimal("500.00"),
+        data=datetime.now(timezone.utc) - timedelta(days=10),
+    )
+    session.add(venda_antiga)
+    session.commit()
+    stats = dashboard_stats()
+    assert stats["semanal"]["faturamento"] == 0
+    assert stats["mensal"]["faturamento"] == Decimal("500.00")
+
+
+def test_dashboard_stats_so_conta_compra_autorizada_como_investimento(engine, session):
+    setor = make_setor(session, tipo="dash_c1")
+    func = make_funcionario(session, setor_id=setor.id)
+    make_compra(session, solicitante_id=func.id, status="pendente")
+    make_compra(session, solicitante_id=func.id, status="autorizada")
+    stats = dashboard_stats()
+    # Item default de make_compra: preco_custo=5.0 * quantidade=10 = 50.00 --
+    # só a compra "autorizada" deve entrar no investimento.
+    assert stats["anual"]["investimento"] == Decimal("50.00")
+
+
+def test_dashboard_stats_soma_despesas_do_periodo(engine, session):
+    setor = make_setor(session, tipo="dash_d1")
+    func = make_funcionario(session, setor_id=setor.id)
+    despesa = Despesa(descricao="Água", valor=Decimal("80.00"), categoria="utilidades", funcionario_id=func.id)
+    session.add(despesa)
+    session.commit()
+    stats = dashboard_stats()
+    assert stats["diario"]["despesas"] == Decimal("80.00")
+
+
+def test_dashboard_stats_lucro_liquido_eh_faturamento_menos_investimento_e_despesas(engine, session):
+    setor = make_setor(session, tipo="dash_l1")
+    func = make_funcionario(session, setor_id=setor.id)
+    make_produto(session, codigo="DASH002", qtd=10, preco=200.0)
+    criar_venda(_input([("DASH002", 1)]), func.id)
+    make_compra(session, solicitante_id=func.id, status="autorizada")  # investimento = 50.00
+    despesa = Despesa(descricao="Luz", valor=Decimal("30.00"), categoria="utilidades", funcionario_id=func.id)
+    session.add(despesa)
+    session.commit()
+
+    stats = dashboard_stats()
+
+    assert stats["anual"]["faturamento"] == Decimal("200.00")
+    assert stats["anual"]["investimento"] == Decimal("50.00")
+    assert stats["anual"]["despesas"] == Decimal("30.00")
+    assert stats["anual"]["lucro_liquido"] == Decimal("120.00")
+
+
+# ── exigir_gerenciar_venda ───────────────────────────────────────────────────
+# Mesmo gate usado pelo frontend para exibir "Cancelar Venda" na tela de
+# Vendas do Dia (ver checkAuth em frontend/app.js, item 'vendas-dia'): admin,
+# diretoria, ou gerente do setor de vendas.
+
+def test_exigir_gerenciar_venda_admin(engine, session):
+    setor = make_setor(session, tipo="gv_perm1")
+    admin = make_funcionario(session, setor_id=setor.id, is_admin=True)
+    assert exigir_gerenciar_venda(admin) is True
+
+
+def test_exigir_gerenciar_venda_diretoria(engine, session):
+    setor = make_setor(session, tipo="gv_perm2")
+    diretor = make_funcionario(session, setor_id=setor.id, cargo="diretoria")
+    assert exigir_gerenciar_venda(diretor) is True
+
+
+def test_exigir_gerenciar_venda_gerente_vendas(engine, session):
+    setor = make_setor(session, tipo="vendas")
+    gerente = make_funcionario(session, setor_id=setor.id, cargo="gerente")
+    assert exigir_gerenciar_venda(gerente) is True
+
+
+def test_exigir_gerenciar_venda_operacional_vendas_nega(engine, session):
+    setor = make_setor(session, tipo="vendas")
+    func = make_funcionario(session, setor_id=setor.id, cargo="operacional")
+    with pytest.raises(HTTPException) as exc:
+        exigir_gerenciar_venda(func)
+    assert exc.value.status_code == 403
+
+
+def test_exigir_gerenciar_venda_gerente_outro_setor_nega(engine, session):
+    setor = make_setor(session, tipo="gv_perm3")
+    gerente = make_funcionario(session, setor_id=setor.id, cargo="gerente")
+    with pytest.raises(HTTPException) as exc:
+        exigir_gerenciar_venda(gerente)
+    assert exc.value.status_code == 403
+
+
+# ── cancelar_venda ───────────────────────────────────────────────────────────
+
+def test_cancelar_venda_inexistente_404(engine, session):
+    with pytest.raises(HTTPException) as exc:
+        cancelar_venda(999, 1)
+    assert exc.value.status_code == 404
+
+
+def test_cancelar_venda_devolve_estoque(engine, session):
+    setor = make_setor(session, tipo="canc1")
+    func = make_funcionario(session, setor_id=setor.id)
+    make_produto(session, codigo="CANC001", qtd=10, preco=10.0)
+    venda = criar_venda(_input([("CANC001", 4)]), func.id)
+    with Session(engine) as s:
+        produto = s.exec(select(Estoque).where(Estoque.codigodebarras == "CANC001")).first()
+    assert produto.quantidade == 6
+
+    cancelar_venda(venda.id, func.id)
+
+    with Session(engine) as s:
+        produto = s.exec(select(Estoque).where(Estoque.codigodebarras == "CANC001")).first()
+    assert produto.quantidade == 10
+
+
+def test_cancelar_venda_marca_status_e_autor(engine, session):
+    setor = make_setor(session, tipo="canc2")
+    func = make_funcionario(session, setor_id=setor.id)
+    gerente = make_funcionario(session, setor_id=setor.id, cargo="gerente")
+    make_produto(session, codigo="CANC002", qtd=5, preco=10.0)
+    venda = criar_venda(_input([("CANC002", 1)]), func.id)
+
+    cancelar_venda(venda.id, gerente.id)
+
+    with Session(engine) as s:
+        v = s.get(Venda, venda.id)
+    assert v.status == "cancelada"
+    assert v.cancelada_por_id == gerente.id
+    assert v.cancelada_em is not None
+
+
+def test_cancelar_venda_ja_cancelada_falha(engine, session):
+    setor = make_setor(session, tipo="canc3")
+    func = make_funcionario(session, setor_id=setor.id)
+    make_produto(session, codigo="CANC003", qtd=5, preco=10.0)
+    venda = criar_venda(_input([("CANC003", 1)]), func.id)
+    cancelar_venda(venda.id, func.id)
+    with pytest.raises(HTTPException) as exc:
+        cancelar_venda(venda.id, func.id)
+    assert exc.value.status_code == 400
+
+
+def test_cancelar_venda_multiplos_itens_devolve_todos(engine, session):
+    setor = make_setor(session, tipo="canc4")
+    func = make_funcionario(session, setor_id=setor.id)
+    make_produto(session, codigo="CANC004A", qtd=10, preco=5.0)
+    make_produto(session, codigo="CANC004B", qtd=20, preco=3.0)
+    venda = criar_venda(_input([("CANC004A", 3), ("CANC004B", 7)]), func.id)
+
+    cancelar_venda(venda.id, func.id)
+
+    with Session(engine) as s:
+        p1 = s.exec(select(Estoque).where(Estoque.codigodebarras == "CANC004A")).first()
+        p2 = s.exec(select(Estoque).where(Estoque.codigodebarras == "CANC004B")).first()
+    assert p1.quantidade == 10
+    assert p2.quantidade == 20
+
+
+def test_cancelar_venda_registra_movimentacao_cancelamento(engine, session):
+    setor = make_setor(session, tipo="canc5")
+    func = make_funcionario(session, setor_id=setor.id)
+    produto = make_produto(session, codigo="CANC005", qtd=10, preco=10.0)
+    venda = criar_venda(_input([("CANC005", 2)]), func.id)
+
+    cancelar_venda(venda.id, func.id)
+
+    with Session(engine) as s:
+        movs = s.exec(
+            select(MovimentacaoEstoque).where(
+                MovimentacaoEstoque.estoque_id == produto.id,
+                MovimentacaoEstoque.tipo == "CANCELAMENTO_VENDA",
+            )
+        ).all()
+    assert len(movs) == 1
+    assert movs[0].quantidade == Decimal("2.000")
+
+
+def test_cancelar_venda_produto_deletado_nao_quebra(engine, session):
+    setor = make_setor(session, tipo="canc6")
+    func = make_funcionario(session, setor_id=setor.id)
+    make_produto(session, codigo="CANC006", qtd=5, preco=10.0)
+    venda = criar_venda(_input([("CANC006", 1)]), func.id)
+    with Session(engine) as s:
+        produto = s.exec(select(Estoque).where(Estoque.codigodebarras == "CANC006")).first()
+        s.delete(produto)
+        s.commit()
+
+    resultado = cancelar_venda(venda.id, func.id)
+
+    assert resultado["msg"].startswith(f"Venda #{venda.id}")
+    with Session(engine) as s:
+        v = s.get(Venda, venda.id)
+    assert v.status == "cancelada"
+
+
+def test_vendas_do_dia_nao_conta_venda_cancelada(engine, session):
+    setor = make_setor(session, tipo="canc7")
+    func = make_funcionario(session, setor_id=setor.id)
+    make_produto(session, codigo="CANC007", qtd=10, preco=50.0)
+    venda = criar_venda(_input([("CANC007", 1)]), func.id)
+    cancelar_venda(venda.id, func.id)
+
+    resultado = vendas_do_dia()
+
+    assert resultado["total_vendido"] == 0
+    assert resultado["lista"] == []
+
+
+def test_dashboard_stats_nao_conta_venda_cancelada(engine, session):
+    setor = make_setor(session, tipo="canc8")
+    func = make_funcionario(session, setor_id=setor.id)
+    make_produto(session, codigo="CANC008", qtd=10, preco=70.0)
+    venda = criar_venda(_input([("CANC008", 1)]), func.id)
+    cancelar_venda(venda.id, func.id)
+
+    stats = dashboard_stats()
+
+    assert stats["anual"]["faturamento"] == 0
+    assert stats["anual"]["vendas_count"] == 0
